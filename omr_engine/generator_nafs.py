@@ -1,0 +1,294 @@
+# -*- coding: utf-8 -*-
+from PIL import Image, ImageDraw, ImageFont
+import qrcode
+import os
+from fpdf import FPDF
+import arabic_reshaper
+from bidi.algorithm import get_display
+from omr_constants import *
+
+def ar(text):
+    if not text: return ""
+    return get_display(arabic_reshaper.reshape(str(text)))
+
+def fmt_date_parts(date_str):
+    """Returns (day, month, year) in Arabic numerals."""
+    if not date_str: return ("", "", "")
+    try:
+        t = str(date_str).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+        import re
+        nums = re.findall(r'\d+', t)
+        if len(nums) == 3:
+            y, m, d = nums[0], nums[1], nums[2]
+            if len(y) != 4: y, m, d = d, m, y # Handle cases where input is already D-M-Y
+            
+            # Convert to Arabic numerals
+            to_ar = str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩')
+            return (str(int(d)).translate(to_ar), 
+                    str(int(m)).translate(to_ar), 
+                    str(y).translate(to_ar))
+    except: pass
+    return (str(date_str), "", "")
+
+FONT_PATH = "C:\\Windows\\Fonts\\arial.ttf"
+try:
+    FONT_XS   = ImageFont.truetype(FONT_PATH, 25)
+    FONT_SM   = ImageFont.truetype(FONT_PATH, 35)
+    FONT_MD_S = ImageFont.truetype(FONT_PATH, 48)
+    FONT_MD   = ImageFont.truetype(FONT_PATH, 55)
+    FONT_MD_B = ImageFont.truetype("C:\\Windows\\Fonts\\arialbd.ttf", 60)
+    FONT_LG   = ImageFont.truetype(FONT_PATH, 65)
+    FONT_LABEL= ImageFont.truetype(FONT_PATH, 42)
+except:
+    FONT_XS = FONT_SM = FONT_MD_S = FONT_MD = FONT_MD_B = FONT_LG = FONT_LABEL = None
+
+# Arabic string constants (defined once, reused everywhere)
+S_SCHOOL    = "مدارس نخبة الشمال الأهلية والعالمية" # متوسطة وثانوية نخبة الشمال الأهلية
+S_EXAM      = "الاختبار المحاكي لاختبار نافس 2026 (اختبار مجمع)"
+S_YEAR      = "العام الدراسي ١٤٤٧ هــ"
+S_NAME_LBL  = "\u0627\u0633\u0645 \u0627\u0644\u0637\u0627\u0644\u0628:"
+S_CLASS_LBL = "\u0627\u0644\u0635\u0641:"
+S_SUBJ_LBL  = "\u0627\u0644\u0645\u0627\u062f\u0629:"
+S_SEAT_LBL  = "\u0631\u0642\u0645 \u0627\u0644\u062c\u0644\u0648\u0633:"
+S_COMM_LBL  = "\u0631\u0642\u0645 \u0627\u0644\u0644\u062c\u0646\u0629:"
+S_DATE_LBL  = "التاريخ واليوم:"
+S_PRINCIPAL = "مدير المدرسة : عيد بن قيران العنزي"
+S_FOOTER    = "مدارس نخبة الشمال الأهلية والعالمية"
+OPT_LABELS  = ["\u0623", "\u0628", "\u062c", "\u062f"]   # أ ب ج د
+
+LOGO_SCH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "public", "شعار المدرسة.jpeg")
+
+def draw_corner_markers(draw):
+    ms = CORNER_MARKER_SIZE
+    draw.rectangle([MARGIN, MARGIN, MARGIN + ms, MARGIN + ms], fill=BLACK)
+    draw.rectangle([WIDTH - MARGIN - ms, MARGIN, WIDTH - MARGIN, MARGIN + ms], fill=BLACK)
+    draw.rectangle([MARGIN, HEIGHT - MARGIN - ms, MARGIN + ms, HEIGHT - MARGIN], fill=BLACK)
+    draw.rectangle([WIDTH - MARGIN - ms, HEIGHT - MARGIN - ms, WIDTH - MARGIN, HEIGHT - MARGIN], fill=BLACK)
+
+
+def draw_header(img, draw, student_info):
+    # ── School Header Box ──────────────────────────────────────────────────────
+    HDR_TOP   = MARGIN
+    HDR_H     = 290
+    HDR_LEFT  = MARGIN
+    HDR_RIGHT = WIDTH - MARGIN
+    HDR_BOT   = HDR_TOP + HDR_H
+    PAD       = 18
+    LOGO_GAP  = 30      # gap between logo and text group
+
+    draw.rectangle([HDR_LEFT, HDR_TOP, HDR_RIGHT, HDR_BOT], outline=BLACK, width=3)
+
+    # ── Text lines (centered on page) ─────────────────────────────────────────
+    lines = [ar(S_SCHOOL), ar(S_EXAM), ar(S_YEAR)]
+    max_tw = 0
+    txt_start_y = HDR_TOP + 35
+    cx = WIDTH // 2
+    for idx, t in enumerate(lines):
+        font = FONT_MD_B if idx == 0 else FONT_MD_S
+        tw = draw.textlength(t, font=font)
+        draw.text((int(cx - tw // 2), txt_start_y + idx * 75), t, fill=BLACK, font=font)
+        max_tw = max(max_tw, tw)
+
+    # ── Header Logos (Slightly Smaller) ──────────────────────────────────────
+    logo_h = HDR_H - 70
+    
+    # ── RIGHT Logo (School)
+    try:
+        rlogo = Image.open(LOGO_SCH).convert("RGBA")
+        rlogo = rlogo.resize((int(rlogo.width * logo_h / rlogo.height), logo_h))
+        # Place at absolute right
+        lx = HDR_RIGHT - LOGO_GAP - rlogo.width
+        ly = HDR_TOP + (HDR_H - rlogo.height) // 2
+        img.paste(rlogo, (lx, ly), rlogo)
+    except: pass
+
+    # ── LEFT Logo (School - same as right)
+    try:
+        llogo = Image.open(LOGO_SCH).convert("RGBA")
+        llogo = llogo.resize((int(llogo.width * logo_h / llogo.height), logo_h))
+        # Place at absolute left
+        lx = HDR_LEFT + LOGO_GAP
+        ly = HDR_TOP + (HDR_H - llogo.height) // 2
+        img.paste(llogo, (lx, ly), llogo)
+    except: pass
+
+    # ── Student info rows (below header box) ──────────────────────────────────
+    start_y = HEADER_START_Y
+    row_h   = HEADER_ROW_H
+    w       = HEADER_WIDTH
+    x       = MARGIN
+    P       = 40
+
+    def rt(label, box_right, y_top, font=FONT_LABEL):
+        t  = ar(label)
+        tw = draw.textlength(t, font=font)
+        ty = y_top + (row_h - 60) // 2
+        draw.text((box_right - tw - P, ty), t, fill=BLACK, font=font)
+        return box_right - tw - P * 2     # left edge for value
+
+    mid_x = x + w // 2
+
+    # Row 1: name
+    draw.rectangle([x, start_y, x + w, start_y + row_h], outline=BLACK, width=3)
+    ll = rt(S_NAME_LBL, x + w, start_y)
+    nv = ar(student_info.get("name", ""))
+    draw.text((ll - draw.textlength(nv, font=FONT_LG) - P,
+               start_y + (row_h - 65) // 2), nv, fill=BLACK, font=FONT_LG)
+
+    # Row 2: date
+    draw.rectangle([x, start_y + row_h, x + w, start_y + 2 * row_h], outline=BLACK, width=3)
+    lld = rt("التاريخ:", x + w, start_y + row_h)
+    
+    # Radical fix for Arabic Date: Draw parts separately to avoid bidi mess
+    day, month, year = fmt_date_parts(student_info.get("date", ""))
+    if year:
+        # We draw from right to left: [Year] - [Month] - [Day]
+        # But wait, in RTL the value is on the left of the label
+        # The rt function returned 'lld' which is the left edge for the value
+        
+        date_str_full = f"{day} - {month} - {year}"
+        dv = ar(date_str_full)
+        draw.text((lld - draw.textlength(dv, font=FONT_LG) - P,
+                   start_y + row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
+    else:
+        dv = ar(day)
+        draw.text((lld - draw.textlength(dv, font=FONT_LG) - P,
+                   start_y + row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
+
+    # Row 3: day
+    draw.rectangle([x, start_y + 2 * row_h, x + w, start_y + 3 * row_h], outline=BLACK, width=3)
+    lly = rt("اليوم:", x + w, start_y + 2 * row_h)
+    dy_val  = ar(student_info.get("day", ""))
+    draw.text((lly - draw.textlength(dy_val, font=FONT_LG) - P,
+               start_y + 2 * row_h + (row_h - 65) // 2), dy_val, fill=BLACK, font=FONT_LG)
+
+
+def build_qr_payload(student_info, num_questions=30, template="nafs"):
+    payload = {
+        "id": str(student_info.get("id", "0")),
+        "nq": int(num_questions),
+        "tpl": str(template),
+    }
+    import json
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def draw_qr_code(img, qr_payload):
+    qr = qrcode.QRCode(box_size=15, border=1)
+    qr.add_data(qr_payload)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    qr_img = qr_img.resize((QR_SIZE, QR_SIZE))
+    img.paste(qr_img, (QR_X, QR_Y))
+
+
+def draw_questions_section(draw, start_y, num_questions=30):
+    """RTL layout: first half on the RIGHT column, second half on the LEFT column.
+    Within each column, question number is rightmost; bubbles أبجد go left.
+    num_questions controls how many rows are drawn (e.g. 20 or 30)."""
+    half      = (WIDTH - 2 * MARGIN) // 2
+    GAP       = 60        # gap between columns
+    col_w     = half - GAP // 2
+
+    # RIGHT column (Q1-10): starts at right edge of page content area
+    r_col_x   = MARGIN + half + GAP // 2   # left boundary of right column
+    # LEFT column (Q11-20): starts at MARGIN
+    l_col_x   = MARGIN
+
+    opt_labels_ar = [ar(o) for o in OPT_LABELS]
+    header_y      = start_y - 100
+    NUM_AREA      = 120    # pixels reserved for question number
+    BUB_SPAN      = 4 * QS_OPT_SPACING   # total bubble row width
+
+    for col_x in [r_col_x, l_col_x]:
+        # Header labels: أ aligns above rightmost bubble, د above leftmost
+        num_right = col_x + col_w - 10
+        bub_right = num_right - NUM_AREA   # center of أ bubble
+        for oi, t in enumerate(opt_labels_ar):
+            ox = bub_right - oi * QS_OPT_SPACING
+            tw = int(draw.textlength(t, font=FONT_SM))
+            draw.text((int(ox) - tw // 2, header_y), t, fill=BLACK, font=FONT_SM)
+
+    per_col = (num_questions + 1) // 2   # questions per column (ceiling division)
+    for q in range(num_questions):
+        if q < per_col:
+            col_x = r_col_x
+            row   = q
+            q_num = q + 1
+        else:
+            col_x = l_col_x
+            row   = q - per_col
+            q_num = q + 1
+
+        y         = start_y + row * QS_ROW_SPACING
+        num_right = col_x + col_w - 10
+        bub_right = num_right - NUM_AREA
+
+        # Question number
+        nt  = ar("%d." % q_num)
+        ntw = draw.textlength(nt, font=FONT_SM)
+        draw.text((int(num_right - ntw), y - 18), nt, fill=BLACK, font=FONT_SM)
+
+        # Bubbles: أ at bub_right, each subsequent 1 step left
+        for oi in range(4):
+            ox = bub_right - oi * QS_OPT_SPACING
+            r  = QS_BUBBLE_R
+            draw.ellipse([int(ox - r), int(y - r), int(ox + r), int(y + r)],
+                         outline=BLACK, width=4)
+
+
+def generate_personalized_sheet(student_info, filename=None):
+    img  = Image.new("RGB", (WIDTH, HEIGHT), WHITE)
+    draw = ImageDraw.Draw(img)
+    draw_corner_markers(draw)
+    draw_header(img, draw, student_info)
+    num_q = student_info.get("num_questions", 30)
+    qr_payload = build_qr_payload(student_info, num_questions=num_q, template="nafs")
+    draw_qr_code(img, qr_payload)
+    draw_questions_section(draw, QS_START_Y, num_questions=student_info.get("num_questions", 30))
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    fy_top = HEIGHT - MARGIN - 160
+    fy_bot = HEIGHT - MARGIN - 40
+
+    pt  = ar(S_PRINCIPAL)
+    draw.text((MARGIN + 40, fy_top), pt, fill=BLACK, font=FONT_MD)
+
+    st  = ar(S_FOOTER)
+    stw = draw.textlength(st, font=FONT_MD)
+    draw.text(((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
+
+    if filename:
+        img.save(filename)
+    return img
+
+
+def create_bulk_pdf(students_list, output_pdf="omr_batch.pdf"):
+    pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
+    temp_dir = "temp_sheets"
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+    
+    for idx, student in enumerate(students_list):
+        img = generate_personalized_sheet(student)
+        img_path = os.path.join(temp_dir, f"sheet_{idx}.png")
+        img.save(img_path)
+        pdf.add_page()
+        pdf.image(img_path, 0, 0, WIDTH, HEIGHT)
+        
+    pdf.output(output_pdf)
+    return output_pdf
+
+
+if __name__ == "__main__":
+    test = {
+        "id": "102",
+        "name": "\u0639\u0644\u064a \u0645\u0643\u064a",
+        "class": "\u0627\u0644\u0623\u0648\u0644 \u0627\u0644\u062b\u0627\u0646\u0648\u064a",
+        "subject": "\u0644\u063a\u0629 \u0639\u0631\u0628\u064a\u0629",
+        "seat_number": "201",
+        "committee_number": "3",
+        "date": "2024-04-02",
+    }
+    generate_personalized_sheet(test, filename="simple_template.png")
+    print("Saved: simple_template.png")

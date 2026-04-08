@@ -1,0 +1,198 @@
+@import "tailwindcss";
+
+@import url('https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Cairo:wght@300;400;600;700&display=swap');
+
+:root {
+  font-family: 'Cairo', sans-serif;
+  direction: rtl;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  /* Soft light background */
+  background-color: #f8fafc;
+  background-attachment: fixed;
+  color: #1e293b; /* Primary dark text */
+}
+
+/* Typography Consistency */
+h1, .text-2xl, .text-3xl, .text-4xl {
+  color: #0f172a !important;
+  font-weight: 900 !important;
+}
+
+h2, h3, .text-xl, .text-lg {
+  color: #1e293b !important;
+  font-weight: 800 !important;
+}
+
+p, span, div, .text-gray-500, .text-gray-600, .text-gray-700, .text-slate-500 {
+  color: #64748b !important; /* Slate 500 for secondary text */
+}
+
+.text-gray-800, .text-slate-800, .text-black {
+  color: #0f172a !important;
+}
+
+label {
+  color: #475569 !important;
+  font-weight: 700 !important;
+}
+
+/* Pure White Cards with Soft Shadows (Glass/Light Variant) */
+.glass, .glass-morphism {
+  background: rgba(255, 255, 255, 0.8) !important;
+  backdrop-filter: blur(12px) saturate(150%) !important;
+  -webkit-backdrop-filter: blur(12px) saturate(150%) !important;
+  border: 1px solid rgba(212, 175, 55, 0.1) !important; 
+  box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.05) !important;
+}
+
+.glass-panel {
+  background: rgba(255, 255, 255, 0.95) !important;
+  backdrop-filter: blur(20px) !important;
+  -webkit-backdrop-filter: blur(20px) !important;
+  border: 1px solid rgba(212, 175, 55, 0.15) !important;
+  box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.1) !important;
+}
+
+.glass-card {
+  background: #ffffff !important;
+  border: 1px solid rgba(212, 175, 55, 0.1) !important;
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.04) !important;
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.glass-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1) !important;
+  border-color: rgba(212, 175, 55, 0.3) !important;
+}
+
+/* Table & List Styling for Light Theme */
+table thead tr {
+  background-color: #f1f5f9 !important;
+  color: #1e293b !important;
+}
+
+table thead th {
+  font-weight: 800 !important;
+}
+
+table tbody tr {
+  border-bottom: 1px solid #f1f5f9 !important;
+  background-color: #ffffff !important;
+}
+
+table tbody tr td {
+  color: #334155 !important;
+}
+
+table tbody tr:hover {
+  background-color: #f8fafc !important;
+}
+
+/* Force Light Backgrounds for components that used .bg-white and were overridden */
+.bg-white {
+  background-color: #ffffff !important;
+}
+
+.bg-gray-50, .bg-slate-50 {
+  background-color: #f8fafc !important;
+}
+
+.bg-gray-100 {
+  background-color: #f1f5f9 !important;
+}
+
+/* Inputs & Forms - Enhanced for Light Theme */
+input, select, textarea {
+  background-color: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  color: #0f172a !important;
+  border-radius: 12px !important;
+}
+
+input:focus, select:focus {
+  border-color: #d4af37 !important;
+  box-shadow: 0 0 0 4px rgba(212, 175, 55, 0.1) !important;
+  outline: none !important;
+}
+
+input::placeholder {
+  color: #94a3b8 !important;
+}
+
+/* Accents & Branding */
+.gold-text {
+  color: #d4af37 !important;
+  text-shadow: none !important;
+}
+
+.text-indigo-600, .text-blue-600 {
+  color: #4f46e5 !important; /* Indigo 600 */
+}
+
+.bg-indigo-600, .bg-blue-600 {
+  background-color: #4f46e5 !important;
+  color: #ffffff !important;
+}
+
+.bg-indigo-50 {
+  background-color: #eef2ff !important;
+  color: #4f46e5 !important;
+}
+
+.border-indigo-100, .border-gray-100 {
+  border-color: #f1f5f9 !important;
+}
+
+/* Luxury Accents */
+.luxury-shadow {
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes popIn {
+  0% { transform: scale(0.96); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.7s ease-out forwards;
+}
+
+.animate-pop-in {
+  animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+
+/* Custom Scrollbar - Refined for Light Mode */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f8fafc;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+@theme {
+  --font-amiri: "Amiri", serif;
+  --font-cairo: "Cairo", sans-serif;
+  --color-gold: #d4af37;
+  --color-navy: #0c1427;
+}

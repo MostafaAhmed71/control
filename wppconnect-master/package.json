@@ -1,0 +1,16 @@
+{
+  "name": "whatsapp-results-server",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "WhatsApp server to send OMR results to parents",
+  "main": "whatsapp-server.js",
+  "scripts": {
+    "start": "node whatsapp-server.js"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.97",
+    "@wppconnect-team/wppconnect": "*",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  }
+}

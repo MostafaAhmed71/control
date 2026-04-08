@@ -1,0 +1,213 @@
+# -*- coding: utf-8 -*-
+from PIL import Image, ImageDraw, ImageFont
+import qrcode
+import os
+from fpdf import FPDF
+import arabic_reshaper
+from bidi.algorithm import get_display
+from omr_constants import *
+
+def ar(text):
+    if not text: return ""
+    return get_display(arabic_reshaper.reshape(str(text)))
+
+def fmt_date_parts(date_str):
+    if not date_str: return ("", "", "")
+    try:
+        t = str(date_str).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+        import re
+        nums = re.findall(r'\d+', t)
+        if len(nums) == 3:
+            y, m, d = nums[0], nums[1], nums[2]
+            if len(y) != 4: y, m, d = d, m, y
+            to_ar = str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩')
+            return (str(int(d)).translate(to_ar), str(int(m)).translate(to_ar), str(y).translate(to_ar))
+    except: pass
+    return (str(date_str), "", "")
+
+FONT_PATH = "C:\\Windows\\Fonts\\arial.ttf"
+try:
+    FONT_XS   = ImageFont.truetype(FONT_PATH, 25)
+    FONT_SM   = ImageFont.truetype(FONT_PATH, 35)
+    FONT_MD   = ImageFont.truetype(FONT_PATH, 55)
+    FONT_MD_B = ImageFont.truetype("C:\\Windows\\Fonts\\arialbd.ttf", 60)
+except:
+    FONT_XS = FONT_SM = FONT_MD = FONT_MD_B = None
+
+S_SCHOOL    = u"\u0645\u062a\u0648\u0633\u0637\u0629 \u0648\u062b\u0627\u0646\u0648\u064a\u0629 \u0646\u062e\u0628\u0629 \u0627\u0644\u0634\u0645\u0627\u0644 \u0627\u0644\u0623\u0647\u0644\u064a\u0629" # متوسطة وثانوية نخبة الشمال الأهلية
+S_PRINCIPAL = "مدير المدرسة : محمد نصر الدين"
+S_FOOTER    = u"\u0646\u0638\u0627\u0645 \u0627\u0644\u062a\u0635\u062d\u064a\u062d \u0627\u0644\u0622\u0644\u064a \u0628\u0645\u062a\u0648\u0633\u0637\u0629 \u0648\u062b\u0627\u0646\u0648\u064a\u0629 \u0646\u062e\u0628\u0629 \u0627\u0644\u0634\u0645\u0627\u0644 \u0627\u0644\u0623\u0647\u0644\u064a\u0629"
+
+def draw_corner_markers(draw):
+    ms = CORNER_MARKER_SIZE
+    draw.rectangle([MARGIN, MARGIN, MARGIN + ms, MARGIN + ms], fill=BLACK)
+    draw.rectangle([WIDTH - MARGIN - ms, MARGIN, WIDTH - MARGIN, MARGIN + ms], fill=BLACK)
+    draw.rectangle([MARGIN, HEIGHT - MARGIN - ms, MARGIN + ms, HEIGHT - MARGIN], fill=BLACK)
+    draw.rectangle([WIDTH - MARGIN - ms, HEIGHT - MARGIN - ms, WIDTH - MARGIN, HEIGHT - MARGIN], fill=BLACK)
+
+def draw_elite_header(img, draw, student_info):
+    HDR_TOP   = MARGIN
+    HDR_H     = 290
+    HDR_LEFT  = MARGIN
+    HDR_RIGHT = WIDTH - MARGIN
+    HDR_BOT   = HDR_TOP + HDR_H
+    PAD       = 18
+    LOGO_GAP  = 30
+
+    draw.rectangle([HDR_LEFT, HDR_TOP, HDR_RIGHT, HDR_BOT], outline=BLACK, width=5)
+
+    # Centered Title
+    title = ar(S_SCHOOL)
+    tw = draw.textlength(title, font=FONT_MD_B)
+    draw.text(((WIDTH - tw) // 2, HDR_TOP + (HDR_H - 80) // 2), title, fill=BLACK, font=FONT_MD_B)
+
+    logo_h = HDR_H - 2 * PAD
+    cx = WIDTH // 2
+
+    # Correct paths for logos (drive-independent)
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    LOGO_MIN = os.path.join(os.path.dirname(BASE_DIR), "public", "شعار الوزارة.png")
+    LOGO_SCH = os.path.join(os.path.dirname(BASE_DIR), "public", "شعار المدرسة.jpeg")
+
+    logo_h = HDR_H - 75
+    
+    # RIGHT Logo (School)
+    try:
+        rlogo = Image.open(LOGO_SCH).convert("RGBA")
+        rlogo = rlogo.resize((int(rlogo.width * logo_h / rlogo.height), logo_h))
+        lx = int(cx + tw // 2 + LOGO_GAP)
+        ly = int(HDR_TOP + (HDR_H - rlogo.height) // 2)
+        img.paste(rlogo, (lx, ly), rlogo)
+    except: pass
+
+    # LEFT Logo (Ministry)
+    try:
+        llogo = Image.open(LOGO_MIN).convert("RGBA")
+        llogo = llogo.resize((int(llogo.width * logo_h / llogo.height), logo_h))
+        lx = int(cx - tw // 2 - LOGO_GAP - llogo.width)
+        ly = int(HDR_TOP + (HDR_H - llogo.height) // 2)
+        img.paste(llogo, (lx, ly), llogo)
+    except: pass
+
+    # Student Data Rows (Boxes)
+    info_y = HDR_BOT + 40
+    row_h  = 90
+    box_w  = WIDTH - 2 * MARGIN
+    draw.rectangle([MARGIN, info_y, MARGIN + box_w, info_y + 2 * row_h], outline=BLACK, width=3)
+    draw.line([MARGIN, info_y + row_h, MARGIN + box_w, info_y + row_h], fill=BLACK, width=3)
+    draw.line([WIDTH // 2, info_y, WIDTH // 2, info_y + 2 * row_h], fill=BLACK, width=3)
+
+    def draw_field(x_start, x_end, y, label, val):
+        lbl_text = ar(label)
+        val_text = ar(val)
+        lw = draw.textlength(lbl_text, font=FONT_SM)
+        draw.text((x_end - lw - 20, y + (row_h - 45) // 2), lbl_text, fill=BLACK, font=FONT_SM)
+        draw.text((x_start + 20, y + (row_h - 45) // 2), val_text, fill=BLACK, font=FONT_SM)
+
+    mid = WIDTH // 2
+    draw_field(mid, MARGIN + box_w, info_y, u"\u0627\u0633\u0645 \u0627\u0644\u0637\u0627\u0644\u0628:", student_info.get("name",""))
+    draw_field(MARGIN, mid, info_y, u"\u0627\u0644\u0635\u0641:", student_info.get("class",""))
+    draw_field(mid, MARGIN + box_w, info_y + row_h, u"\u0627\u0644\u0645\u0627\u062f\u0629:", student_info.get("subject",""))
+    
+    # Draw date directly with fmt_date, without using draw_field which does ar()
+    # draw_field does: val = ar(val_text)
+    # We will replicate draw_field manually for date so we don't ar() the date!
+    x_start = MARGIN
+    x_end = mid
+    y = info_y + row_h
+    draw.rectangle([x_start, y, x_end, y + 60], outline=BLACK, width=3)
+    draw.rectangle([x_end - 150, y, x_end, y + 60], outline=BLACK, width=3, fill=BLACK)
+    draw.text((x_end - 130, y + 5), ar(u"\u0627\u0644\u062a\u0627\u0631\u064a\u062e:"), fill=WHITE, font=FONT_SM)
+    
+    day, month, year = fmt_date_parts(student_info.get("date",""))
+    if year:
+        dv = ar(f"{day} - {month} - {year}")
+    else:
+        dv = ar(day)
+    draw.text((x_start + 20, y + 5), dv, fill=BLACK, font=FONT_SM)
+
+def draw_questions_elite(draw, start_y, num_questions=30):
+    col_w = (WIDTH - 2 * MARGIN) // 2
+    GAP   = 80
+    r_col_x = MARGIN + col_w + GAP // 2
+    l_col_x = MARGIN
+    
+    options = [u'\u0623', u'\u0628', u'\u062c', u'\u062f']
+    row_spacing = 120
+
+    for col_x in [r_col_x, l_col_x]:
+        for oi, t in enumerate(options):
+            ox = col_x + (col_w - 120) - oi * 120
+            tw = draw.textlength(ar(t), font=FONT_SM)
+            draw.text((int(ox - tw // 2), start_y - 110), ar(t), fill=BLACK, font=FONT_SM)
+
+    per_col = (num_questions + 1) // 2
+    for q in range(num_questions):
+        if q < per_col:
+            col_x, r, q_num = r_col_x, q, q+1
+        else:
+            col_x, r, q_num = l_col_x, q-per_col, q+1
+        
+        y = start_y + r * row_spacing
+        num_str = ar("%d." % q_num)
+        nw = draw.textlength(num_str, font=FONT_MD)
+        draw.text((col_x + col_w - int(nw), y - 30), num_str, fill=BLACK, font=FONT_MD)
+
+        bubble_start_x = col_x + col_w - 120
+        for oi in range(4):
+            ox = bubble_start_x - oi * 120
+            rad = 35
+            draw.ellipse([ox-rad, y-rad, ox+rad, y+rad], outline=BLACK, width=5)
+
+def generate_personalized_sheet(student_info, filename=None):
+    img = Image.new("RGB", (WIDTH, HEIGHT), WHITE)
+    draw = ImageDraw.Draw(img)
+    draw_corner_markers(draw)
+    draw_elite_header(img, draw, student_info)
+    
+    # QR Code
+    num_q = student_info.get("num_questions", 30)
+    import json
+    qr_payload = json.dumps(
+        {"id": str(student_info.get("id", "0")), "nq": int(num_q), "tpl": "elite"},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    qr = qrcode.QRCode(box_size=12, border=1)
+    qr.add_data(qr_payload)
+    qr_img = qr.make_image().convert("RGB").resize((300, 300))
+    img.paste(qr_img, (WIDTH - MARGIN - 320, MARGIN + 400))
+
+    draw_questions_elite(draw, MARGIN + 850, num_questions=num_q)
+    
+    # Footer
+    fy_top = HEIGHT - MARGIN - 160
+    fy_bot = HEIGHT - MARGIN - 40
+
+    pr = ar(S_PRINCIPAL)
+    draw.text((MARGIN + 100, fy_top), pr, fill=BLACK, font=FONT_MD)
+
+    st  = ar(S_FOOTER)
+    stw = draw.textlength(st, font=FONT_MD)
+    draw.text(((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
+    
+    if filename:
+        img.save(filename)
+    return img
+
+def create_bulk_pdf(students_list, output_pdf="elite_batch.pdf"):
+    pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
+    temp_dir = "temp_elite"
+    if not os.path.exists(temp_dir): os.makedirs(temp_dir)
+    for idx, student in enumerate(students_list):
+        img = generate_personalized_sheet(student)
+        p = os.path.join(temp_dir, f"e_{idx}.png")
+        img.save(p)
+        pdf.add_page()
+        pdf.image(p, 0, 0, WIDTH, HEIGHT)
+    pdf.output(output_pdf)
+    return output_pdf
+
+if __name__ == "__main__":
+    test = {"id":"444", "name":u"\u0646\u062e\u0628\u0629 \u062a\u062c\u0631\u064a\u0628\u064a", "class":u"\u0627\u0644\u0623\u0648\u0644 \u0627\u0644\u062b\u0627\u0646\u0648\u064a", "subject":u"\u0631\u064a\u0627\u0636\u064a\u0627\u062a", "date":"2024-05"}
+    generate_personalized_sheet(test, "elite_template.png")
