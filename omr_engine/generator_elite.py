@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from PIL import Image, ImageDraw, ImageFont
 import qrcode
 import os
@@ -52,7 +52,7 @@ def draw_elite_header(img, draw, student_info):
     HDR_RIGHT = WIDTH - MARGIN
     HDR_BOT   = HDR_TOP + HDR_H
     PAD       = 18
-    LOGO_GAP  = 30
+    LOGO_GAP  = 150  # gap from header edge — moved further inward
 
     draw.rectangle([HDR_LEFT, HDR_TOP, HDR_RIGHT, HDR_BOT], outline=BLACK, width=5)
 

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from PIL import Image, ImageDraw, ImageFont
 import qrcode
 import os

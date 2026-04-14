@@ -50,6 +50,7 @@ class CustomBatchRequest(BaseModel):
     subject: str
     students: List[Student]
     template_config: Optional[Dict[str, Any]] = None
+    num_questions: int = 30
 
 @app.get("/")
 def read_root():
@@ -68,45 +69,97 @@ async def scan_document(file: UploadFile = File(...), template: str = "default",
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Scanning Error: {str(e)}")
 
+@app.post("/calibrate-printer")
+async def calibrate_printer(file: UploadFile = File(...)):
+    """Analyze a printed blank sheet to verify scale/alignment accuracy."""
+    try:
+        content = await file.read()
+        import numpy as np
+        import cv2
+        nparr = np.frombuffer(content, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return JSONResponse(status_code=400, content={"detail": "الصورة غير صالحة"})
+        gray = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR if len(img.shape)==3 else cv2.COLOR_BGR2GRAY)
+        if len(gray.shape) == 3: gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+        if w > h:
+            gray = cv2.rotate(gray, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        report = scanner.calibrate_printer_geometry(gray)
+        return report
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"detail": str(e)})
+
 @app.post("/generate-batch")
 async def generate_batch(request: BatchRequest):
     try:
         output_filename = f"batch_{request.subject}.pdf"
-        student_dicts = []
-        for s in request.students:
-            student_dicts.append({
-                "id": s.id,
-                "name": s.name,
-                "class": s.class_name,
-                "subject": s.subject,
-                "date": s.date,
-                "day": s.day,
-                "seat_number": s.seat_number,
-                "committee_number": s.committee_number
-            })
-        
-        # Inject num_questions into each student dict so generator can use it
-        for d in student_dicts:
-            d["num_questions"] = request.num_questions
-        
+        student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
+                          "subject": s.subject, "date": s.date, "day": s.day,
+                          "seat_number": s.seat_number,
+                          "committee_number": s.committee_number,
+                          "num_questions": request.num_questions}
+                         for s in request.students]
+        loop = asyncio.get_event_loop()
         if request.template == "elite":
-            generator_elite.create_bulk_pdf(student_dicts, output_pdf=output_filename)
+            await loop.run_in_executor(_omr_executor, lambda: generator_elite.create_bulk_pdf(student_dicts, output_pdf=output_filename))
         elif request.template == "nafs":
-            generator_nafs.create_bulk_pdf(student_dicts, output_pdf=output_filename)
+            await loop.run_in_executor(_omr_executor, lambda: generator_nafs.create_bulk_pdf(student_dicts, output_pdf=output_filename))
         else:
-            generator.create_bulk_pdf(student_dicts, output_pdf=output_filename)
-            
+            await loop.run_in_executor(_omr_executor, lambda: generator.create_bulk_pdf(student_dicts, output_pdf=output_filename))
         return FileResponse(path=output_filename, filename=output_filename, media_type='application/pdf')
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate-batch-stream")
+async def generate_batch_stream(request: BatchRequest):
+    """Streaming version: sends NDJSON progress per sheet, then base64 PDF at the end."""
+    import base64 as _b64
+    output_filename = f"batch_{request.subject}.pdf"
+    student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
+                      "subject": s.subject, "date": s.date, "day": s.day,
+                      "seat_number": s.seat_number,
+                      "committee_number": s.committee_number,
+                      "num_questions": request.num_questions}
+                     for s in request.students]
+    loop = asyncio.get_event_loop()
+
+    async def generate():
+        try:
+            if request.template == "nafs":
+                gen_fn = generator_nafs.create_bulk_pdf_stream
+            elif request.template == "elite":
+                # elite generator may not have stream version yet, fallback
+                gen_fn = getattr(generator_elite, "create_bulk_pdf_stream",
+                                 lambda s, **kw: _sync_wrap(generator_elite.create_bulk_pdf, s, **kw))
+            else:
+                gen_fn = getattr(generator, "create_bulk_pdf_stream",
+                                 lambda s, **kw: _sync_wrap(generator.create_bulk_pdf, s, **kw))
+
+            for event in gen_fn(student_dicts, output_pdf=output_filename):
+                if event.get("finished"):
+                    # Read the final PDF and send as base64
+                    with open(output_filename, "rb") as f:
+                        pdf_b64 = _b64.b64encode(f.read()).decode()
+                    yield json.dumps({"type": "done", "pdf": pdf_b64}) + "\n"
+                else:
+                    yield json.dumps({"type": "progress",
+                                      "done": event["done"],
+                                      "total": event["total"],
+                                      "name": event.get("name", "")}) + "\n"
+                await asyncio.sleep(0)   # yield control to event loop
+        except Exception as e:
+            yield json.dumps({"type": "error", "msg": str(e)}) + "\n"
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
 
 @app.post("/generate-custom-batch")
 async def generate_custom_batch(request: CustomBatchRequest):
     """Generate a batch PDF using a fully customizable NAFS-layout template."""
     try:
         output_filename = f"batch_custom_{request.subject}.pdf"
-        
-        # Merge saved template config if logo is missing from request
         config = request.template_config or {}
         if not config.get("logoDataUrl"):
             try:
@@ -115,24 +168,62 @@ async def generate_custom_batch(request: CustomBatchRequest):
                         saved = json.load(f)
                         if saved.get("logoDataUrl"):
                             config["logoDataUrl"] = saved["logoDataUrl"]
-            except: 
+            except:
                 pass
-
-        student_dicts = [{
-            "id": s.id, "name": s.name, "class": s.class_name,
-            "subject": s.subject, "date": s.date,
-            "day": s.day, "seat_number": s.seat_number,
-            "committee_number": s.committee_number
-        } for s in request.students]
-        
-        generator_custom.create_bulk_pdf(
-            student_dicts,
-            template_config=config,
-            output_pdf=output_filename
-        )
+        student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
+                          "subject": s.subject, "date": s.date, "day": s.day,
+                          "seat_number": s.seat_number,
+                          "committee_number": s.committee_number,
+                          "num_questions": request.num_questions}
+                         for s in request.students]
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(_omr_executor, lambda: generator_custom.create_bulk_pdf(
+            student_dicts, template_config=config, output_pdf=output_filename))
         return FileResponse(path=output_filename, filename=output_filename, media_type='application/pdf')
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate-custom-batch-stream")
+async def generate_custom_batch_stream(request: CustomBatchRequest):
+    """Streaming version of custom batch: NDJSON progress then base64 PDF."""
+    import base64 as _b64
+    output_filename = f"batch_custom_{request.subject}.pdf"
+    config = request.template_config or {}
+    if not config.get("logoDataUrl"):
+        try:
+            if os.path.exists(TEMPLATE_FILE):
+                with open(TEMPLATE_FILE, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                    if saved.get("logoDataUrl"):
+                        config["logoDataUrl"] = saved["logoDataUrl"]
+        except:
+            pass
+    student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
+                      "subject": s.subject, "date": s.date, "day": s.day,
+                      "seat_number": s.seat_number,
+                      "committee_number": s.committee_number,
+                      "num_questions": request.num_questions}
+                     for s in request.students]
+
+    async def generate():
+        try:
+            for event in generator_custom.create_bulk_pdf_stream(
+                    student_dicts, template_config=config, output_pdf=output_filename):
+                if event.get("finished"):
+                    with open(output_filename, "rb") as f:
+                        pdf_b64 = _b64.b64encode(f.read()).decode()
+                    yield json.dumps({"type": "done", "pdf": pdf_b64}) + "\n"
+                else:
+                    yield json.dumps({"type": "progress",
+                                      "done": event["done"],
+                                      "total": event["total"],
+                                      "name": event.get("name", "")}) + "\n"
+                await asyncio.sleep(0)
+        except Exception as e:
+            yield json.dumps({"type": "error", "msg": str(e)}) + "\n"
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 @app.get("/generate-individual")
 async def generate_individual(student_id: str, student_name: str, class_name: str = "N/A", subject: str = "N/A", date: str = "2024", day: str = "", seat_number: str = "", committee_number: str = "", template: str = "default", num_questions: int = 30):
@@ -406,6 +497,54 @@ async def scan_from_scanner_stream(template: str = "default", pages: int = 1, nu
         yield json.dumps({"type": "done", "total": len(img_paths)}) + "\n"
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+@app.get("/calibrate-from-scanner")
+async def calibrate_from_scanner():
+    """Trigger a single-page scan and run calibration on it."""
+    ps_script = _build_ps_scan_script(pages=1)
+    loop = asyncio.get_event_loop()
+    try:
+        proc = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                capture_output=True, text=True, timeout=60
+            )
+        )
+        if "NO_SCANNER" in proc.stderr:
+            return JSONResponse(status_code=503, content={"detail": "لا يوجد سكانر متصل"})
+            
+        # Parse path
+        path = None
+        for line in proc.stdout.splitlines():
+            if line.startswith("SCANPATH:"):
+                path = line[len("SCANPATH:"):].strip()
+                break
+        
+        if not path or not os.path.exists(path):
+            return JSONResponse(status_code=500, content={"detail": "فشل استلام صورة المعايرة"})
+            
+        import cv2
+        img = cv2.imread(path)
+        if img is None:
+            return JSONResponse(status_code=500, content={"detail": "فشل قراءة الملف الممسوح"})
+            
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+        if w > h:
+            gray = cv2.rotate(gray, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            
+        report = scanner.calibrate_printer_geometry(gray)
+        
+        # Cleanup temp file
+        try: os.remove(path)
+        except: pass
+        
+        return report
+        
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"detail": str(e)})
 
 
 @app.get("/scanner-status")

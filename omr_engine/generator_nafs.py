@@ -74,7 +74,7 @@ def draw_header(img, draw, student_info):
     HDR_RIGHT = WIDTH - MARGIN
     HDR_BOT   = HDR_TOP + HDR_H
     PAD       = 18
-    LOGO_GAP  = 30      # gap between logo and text group
+    LOGO_GAP  = 150     # gap from header edge — moved further inward
 
     draw.rectangle([HDR_LEFT, HDR_TOP, HDR_RIGHT, HDR_BOT], outline=BLACK, width=3)
 
@@ -89,14 +89,13 @@ def draw_header(img, draw, student_info):
         draw.text((int(cx - tw // 2), txt_start_y + idx * 75), t, fill=BLACK, font=font)
         max_tw = max(max_tw, tw)
 
-    # ── Header Logos (Slightly Smaller) ──────────────────────────────────────
+    # ── Header Logos ──────────────────────────────────────────────────────────
     logo_h = HDR_H - 70
     
     # ── RIGHT Logo (School)
     try:
         rlogo = Image.open(LOGO_SCH).convert("RGBA")
         rlogo = rlogo.resize((int(rlogo.width * logo_h / rlogo.height), logo_h))
-        # Place at absolute right
         lx = HDR_RIGHT - LOGO_GAP - rlogo.width
         ly = HDR_TOP + (HDR_H - rlogo.height) // 2
         img.paste(rlogo, (lx, ly), rlogo)
@@ -106,7 +105,6 @@ def draw_header(img, draw, student_info):
     try:
         llogo = Image.open(LOGO_SCH).convert("RGBA")
         llogo = llogo.resize((int(llogo.width * logo_h / llogo.height), logo_h))
-        # Place at absolute left
         lx = HDR_LEFT + LOGO_GAP
         ly = HDR_TOP + (HDR_H - llogo.height) // 2
         img.paste(llogo, (lx, ly), llogo)
@@ -264,20 +262,38 @@ def generate_personalized_sheet(student_info, filename=None):
 
 
 def create_bulk_pdf(students_list, output_pdf="omr_batch.pdf"):
+    """In-memory PDF generation — no disk writes for individual sheets."""
+    import io as _io
     pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
-    temp_dir = "temp_sheets"
-    if not os.path.exists(temp_dir):
-        os.makedirs(temp_dir)
-    
+    total = len(students_list)
     for idx, student in enumerate(students_list):
         img = generate_personalized_sheet(student)
-        img_path = os.path.join(temp_dir, f"sheet_{idx}.png")
-        img.save(img_path)
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        buf.name = "sheet.jpg"
+        buf.seek(0)
         pdf.add_page()
-        pdf.image(img_path, 0, 0, WIDTH, HEIGHT)
-        
+        pdf.image(buf, 0, 0, WIDTH, HEIGHT)
     pdf.output(output_pdf)
     return output_pdf
+
+
+def create_bulk_pdf_stream(students_list, output_pdf="omr_batch.pdf"):
+    """Generator that yields progress dicts and finally the output path."""
+    import io as _io
+    pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
+    total = len(students_list)
+    for idx, student in enumerate(students_list):
+        img = generate_personalized_sheet(student)
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        buf.name = "sheet.jpg"
+        buf.seek(0)
+        pdf.add_page()
+        pdf.image(buf, 0, 0, WIDTH, HEIGHT)
+        yield {"done": idx + 1, "total": total, "name": student.get("name", "")}
+    pdf.output(output_pdf)
+    yield {"finished": True, "path": output_pdf}
 
 
 if __name__ == "__main__":

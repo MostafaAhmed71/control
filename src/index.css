@@ -1,198 +1,155 @@
 @import "tailwindcss";
 
-@import url('https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Cairo:wght@300;400;600;700&display=swap');
+/* 
+  ✨ Northelite Design System - Light Luxury Edition ✨
+  Typography: Alexandria (Headers & Accents), IBM Plex Sans Arabic (Body)
+  Colors: Pure White, Indigo Slate, Tactical Emerald
+*/
+
+@import url('https://fonts.googleapis.com/css2?family=Alexandria:wght@300;400;500;600;700;800;900&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&display=swap');
 
 :root {
-  font-family: 'Cairo', sans-serif;
+  --font-header: 'Alexandria', sans-serif;
+  --font-body: 'IBM Plex Sans Arabic', sans-serif;
+  
+  /* Modern Palette */
+  --color-primary: #4f46e5;       /* Indigo 600 */
+  --color-primary-dark: #3730a3;  /* Indigo 800 */
+  --color-emerald: #10b981;       /* Emerald 500 */
+  
+  /* Backgrounds */
+  --color-bg-base: #F8FAFC;       /* Slate 50 */
+  --color-bg-card: #ffffff;       /* Pure White */
+  
+  /* Shadows & Radius */
+  --shadow-premium: 0 10px 40px -10px rgba(0, 0, 0, 0.05);
+  --shadow-tactical: 0 20px 60px -15px rgba(79, 70, 229, 0.1);
+  --radius-luxury: 2.5rem;
+  
+  font-family: var(--font-body);
   direction: rtl;
+  scroll-behavior: smooth;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  /* Soft light background */
-  background-color: #f8fafc;
-  background-attachment: fixed;
-  color: #1e293b; /* Primary dark text */
+  background-color: var(--color-bg-base);
+  color: #1e293b;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Typography Consistency */
-h1, .text-2xl, .text-3xl, .text-4xl {
-  color: #0f172a !important;
-  font-weight: 900 !important;
+/* ── Typography Shortcuts ── */
+.font-alexandria { font-family: 'Alexandria', sans-serif; }
+.font-header { font-family: 'Alexandria', sans-serif; }
+
+h1, h2, h3, h4, .font-header {
+  font-family: var(--font-header);
+  letter-spacing: -0.02em;
 }
 
-h2, h3, .text-xl, .text-lg {
-  color: #1e293b !important;
-  font-weight: 800 !important;
+/* ── Luxury Component Utilities ── */
+.luxury-card {
+  background: var(--color-bg-card);
+  border: 1px solid #f1f5f9;
+  border-radius: var(--radius-luxury);
+  box-shadow: var(--shadow-premium);
+  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-p, span, div, .text-gray-500, .text-gray-600, .text-gray-700, .text-slate-500 {
-  color: #64748b !important; /* Slate 500 for secondary text */
+.luxury-card:hover {
+  transform: translateY(-8px);
+  box-shadow: var(--shadow-tactical);
+  border-color: rgba(79, 70, 229, 0.1);
 }
 
-.text-gray-800, .text-slate-800, .text-black {
-  color: #0f172a !important;
+.shadow-premium {
+  box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.08);
 }
 
-label {
-  color: #475569 !important;
-  font-weight: 700 !important;
+.gold-accent {
+  background: linear-gradient(135deg, #d4af37 0%, #f5d16d 50%, #d4af37 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 900;
 }
 
-/* Pure White Cards with Soft Shadows (Glass/Light Variant) */
-.glass, .glass-morphism {
-  background: rgba(255, 255, 255, 0.8) !important;
-  backdrop-filter: blur(12px) saturate(150%) !important;
-  -webkit-backdrop-filter: blur(12px) saturate(150%) !important;
-  border: 1px solid rgba(212, 175, 55, 0.1) !important; 
-  box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.05) !important;
-}
-
-.glass-panel {
-  background: rgba(255, 255, 255, 0.95) !important;
-  backdrop-filter: blur(20px) !important;
-  -webkit-backdrop-filter: blur(20px) !important;
-  border: 1px solid rgba(212, 175, 55, 0.15) !important;
-  box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.1) !important;
-}
-
-.glass-card {
-  background: #ffffff !important;
-  border: 1px solid rgba(212, 175, 55, 0.1) !important;
-  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.04) !important;
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
-}
-
-.glass-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1) !important;
-  border-color: rgba(212, 175, 55, 0.3) !important;
-}
-
-/* Table & List Styling for Light Theme */
-table thead tr {
-  background-color: #f1f5f9 !important;
-  color: #1e293b !important;
-}
-
-table thead th {
-  font-weight: 800 !important;
-}
-
-table tbody tr {
-  border-bottom: 1px solid #f1f5f9 !important;
-  background-color: #ffffff !important;
-}
-
-table tbody tr td {
-  color: #334155 !important;
-}
-
-table tbody tr:hover {
-  background-color: #f8fafc !important;
-}
-
-/* Force Light Backgrounds for components that used .bg-white and were overridden */
-.bg-white {
-  background-color: #ffffff !important;
-}
-
-.bg-gray-50, .bg-slate-50 {
-  background-color: #f8fafc !important;
-}
-
-.bg-gray-100 {
-  background-color: #f1f5f9 !important;
-}
-
-/* Inputs & Forms - Enhanced for Light Theme */
+/* ── Form Inputs Premium Styling ── */
 input, select, textarea {
-  background-color: #ffffff !important;
+  background: #ffffff !important;
   border: 1px solid #e2e8f0 !important;
-  color: #0f172a !important;
-  border-radius: 12px !important;
+  border-radius: 1.25rem !important;
+  padding: 0.85rem 1.25rem !important;
+  font-family: var(--font-body);
+  font-weight: 600 !important;
+  transition: all 0.3s ease !important;
 }
 
 input:focus, select:focus {
-  border-color: #d4af37 !important;
-  box-shadow: 0 0 0 4px rgba(212, 175, 55, 0.1) !important;
+  border-color: var(--color-primary) !important;
+  box-shadow: 0 0 0 5px rgba(79, 70, 229, 0.05) !important;
   outline: none !important;
 }
 
-input::placeholder {
-  color: #94a3b8 !important;
+/* ── Premium Sliders (Tactical Range) ── */
+.premium-range {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 8px;
+  background: #f1f5f9;
+  border-radius: 10px;
+  outline: none;
 }
 
-/* Accents & Branding */
-.gold-text {
-  color: #d4af37 !important;
-  text-shadow: none !important;
+.premium-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  background: var(--color-primary);
+  border: 4px solid white;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 4px 10px rgba(79, 70, 229, 0.2);
+  transition: all 0.3s;
 }
 
-.text-indigo-600, .text-blue-600 {
-  color: #4f46e5 !important; /* Indigo 600 */
+.premium-range-success::-webkit-slider-thumb {
+  background: var(--color-emerald);
+  box-shadow: 0 4px 10px rgba(16, 185, 129, 0.2);
 }
 
-.bg-indigo-600, .bg-blue-600 {
-  background-color: #4f46e5 !important;
-  color: #ffffff !important;
-}
-
-.bg-indigo-50 {
-  background-color: #eef2ff !important;
-  color: #4f46e5 !important;
-}
-
-.border-indigo-100, .border-gray-100 {
-  border-color: #f1f5f9 !important;
-}
-
-/* Luxury Accents */
-.luxury-shadow {
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05) !important;
-}
-
-/* Animations */
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(12px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes popIn {
-  0% { transform: scale(0.96); opacity: 0; }
-  100% { transform: scale(1); opacity: 1; }
-}
-
-.animate-fade-in {
-  animation: fadeIn 0.7s ease-out forwards;
-}
-
-.animate-pop-in {
-  animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
-}
-
-/* Custom Scrollbar - Refined for Light Mode */
-::-webkit-scrollbar {
+/* ── Sophisticated Scrollbar ── */
+.custom-scrollbar::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 
-::-webkit-scrollbar-track {
-  background: #f8fafc;
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #e2e8f0;
   border-radius: 10px;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1;
+}
+
+/* ── Global Transitions ── */
+.page-transition {
+  animation: pageFadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes pageFadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @theme {
-  --font-amiri: "Amiri", serif;
-  --font-cairo: "Cairo", sans-serif;
-  --color-gold: #d4af37;
-  --color-navy: #0c1427;
+  --font-header: 'Alexandria', sans-serif;
+  --font-body: 'IBM Plex Sans Arabic', sans-serif;
+  --color-indigo-luxury: #4f46e5;
+  --border-radius-luxury: 2.5rem;
 }

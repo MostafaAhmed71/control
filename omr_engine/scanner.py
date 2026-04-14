@@ -48,6 +48,60 @@ def order_points(pts):
     return rect
 
 
+def calibrate_printer_geometry(gray_img):
+    """
+    Analyze a scanned printed sheet to verify its physical dimensions.
+    Returns a report with scale factors and integrity score.
+    """
+    corners = find_corner_markers(gray_img)
+    if corners is None:
+        return {
+            "is_safe": False,
+            "error": "could_not_find_markers",
+            "message": "فشل في العثور على علامات الزوايا. تأكد من جودة الطباعة والمسح."
+        }
+
+    tl, tr, bl, br = corners
+    
+    # Ideal positions based on constants
+    ms  = CORNER_MARKER_SIZE
+    off = MARGIN + ms // 2
+    
+    ideal_w = WIDTH - 2 * off
+    ideal_h = HEIGHT - 2 * off
+    
+    # Measured positions
+    actual_w_top = np.sqrt((tr[0]-tl[0])**2 + (tr[1]-tl[1])**2)
+    actual_w_bot = np.sqrt((br[0]-bl[0])**2 + (br[1]-bl[1])**2)
+    actual_h_left = np.sqrt((bl[0]-tl[0])**2 + (bl[1]-tl[1])**2)
+    actual_h_right = np.sqrt((br[0]-tr[0])**2 + (br[1]-tr[1])**2)
+    
+    avg_w = (actual_w_top + actual_w_bot) / 2
+    avg_h = (actual_h_left + actual_h_right) / 2
+    
+    scale_x = avg_w / ideal_w
+    scale_y = avg_h / ideal_h
+    
+    # Aspect ratio check
+    ideal_aspect = ideal_w / ideal_h
+    actual_aspect = avg_w / avg_h
+    aspect_error = abs(actual_aspect - ideal_aspect) / ideal_aspect
+    
+    # Rotation/Skew check
+    skew_angle = abs(tr[1] - tl[1]) / avg_w # basic tangent
+    
+    is_safe = (0.995 <= scale_x <= 1.005) and (0.995 <= scale_y <= 1.005) and aspect_error < 0.005
+    
+    return {
+        "is_safe": is_safe,
+        "scale_x": round(scale_x, 4),
+        "scale_y": round(scale_y, 4),
+        "aspect_error": round(aspect_error, 5),
+        "skew_angle": round(skew_angle, 5),
+        "status": "success"
+    }
+
+
 def get_paper_contour(img_gray):
     """Locate the A4 paper boundary (must cover >50% of image area)."""
     blurred = cv2.GaussianBlur(img_gray, (7, 7), 0)
@@ -404,18 +458,22 @@ def pick_answer(densities, darknesses=None):
 
 def evaluate_row(densities, darknesses, thresholds):
     """
-    Return row decision with confidence and review signal.
+    Return row decision with confidence, review flag, and reason tags (machine codes).
+
+    Operator policy (school workflow):
+    - If the row is «ضعيف جداً» on both ink metrics → treat as blank, no review.
+    - If one bubble clearly wins (single choice), accept it without review — weak vs strong
+      fill does not by itself trigger review.
+    - Review mainly for genuine two-bubble contention (ambiguous row) or missing signal.
     """
     if not densities or all(d <= 0 for d in densities):
-        return "", 0.0, True
+        return "", 0.0, True, ["no_bubble_signal"]
 
     bi = int(np.argmax(densities))
     max_d = float(densities[bi])
     max_dark = float(darknesses[bi]) if darknesses and bi < len(darknesses) else 0.0
     others = [float(d) for i, d in enumerate(densities) if i != bi]
     second = max(others) if others else 0.0
-    second_idx = int(np.argsort(densities)[-2]) if len(densities) > 1 else bi
-    second_dark = float(darknesses[second_idx]) if darknesses and second_idx < len(darknesses) else 0.0
 
     fill_thr = thresholds["fill_threshold"]
     dark_thr = thresholds["darkness_threshold"]
@@ -423,42 +481,26 @@ def evaluate_row(densities, darknesses, thresholds):
     strong_dark = thresholds["strong_darkness"]
     dom_ratio = thresholds["dominance_ratio"]
 
-    if max_d < fill_thr or max_dark < dark_thr:
-        # High blank confidence when both are far below threshold.
-        blank_margin = max((fill_thr - max_d), 0.0) + max((dark_thr - max_dark), 0.0)
-        conf_blank = float(min(1.0, 0.55 + 1.6 * blank_margin))
-        return "", conf_blank, conf_blank < 0.75
+    # Very faint → لا يُحسب إجابة (فراغ)، دون طلب مراجعة
+    min_ink = max(0.065, float(fill_thr) * 0.36)
+    min_dark = max(0.055, float(dark_thr) * 0.34)
+    if max_d < min_ink and max_dark < min_dark:
+        blank_margin = max((min_ink - max_d), 0.0) + max((min_dark - max_dark), 0.0)
+        conf_blank = float(min(0.95, 0.35 + 2.0 * blank_margin))
+        return "", conf_blank, False, []
 
-    ratio = (max_d / max(second, 1e-6))
-    pass_strong = (max_d >= strong_fill and max_dark >= strong_dark and second < WEAK_FILL)
-    pass_ratio = (second < 0.001 or max_d >= dom_ratio * second)
-    # Erase-aware rule:
-    # Old erased choice often leaves binary density residue but weak grayscale darkness.
-    # If winner is much darker than 2nd option, accept winner.
-    pass_erase_aware = (
-        max_d >= fill_thr + 0.03 and
-        max_dark >= dark_thr + 0.10 and
-        (max_dark - second_dark) >= 0.16 and
-        (max_d - second) >= 0.03
-    )
-    accepted = pass_strong or pass_ratio or pass_erase_aware
+    second_floor = max(0.11, float(fill_thr) * 0.42)
+    tie_ratio = 1.22
+    if second >= second_floor and max_d < second * tie_ratio and (max_d - second) < 0.04:
+        return "", 0.4, True, ["ambiguous_mark"]
 
-    if not accepted:
-        return "", 0.35, True
-
-    # Confidence combines margin above thresholds + dominance + darkness.
+    ratio = max_d / max(second, 1e-6)
     fill_score = min(1.0, max(0.0, (max_d - fill_thr) / max(1e-6, (strong_fill - fill_thr))))
     dark_score = min(1.0, max(0.0, (max_dark - dark_thr) / max(1e-6, (strong_dark - dark_thr))))
     dom_score = min(1.0, max(0.0, ratio / max(1e-6, dom_ratio)))
     confidence = float(0.40 * fill_score + 0.30 * dark_score + 0.30 * dom_score)
-
-    # Review if weak confidence even after acceptance.
-    # If accepted by erase-aware path only, keep review if confidence is moderate.
-    if pass_erase_aware and not (pass_strong or pass_ratio):
-        needs_review = confidence < 0.82
-    else:
-        needs_review = confidence < 0.70
-    return RTL_MAP[bi], confidence, needs_review
+    confidence = max(0.25, min(0.99, confidence))
+    return RTL_MAP[bi], confidence, False, []
 
 
 def merge_double_pass(primary, secondary):
@@ -467,7 +509,9 @@ def merge_double_pass(primary, secondary):
     """
     answers = {}
     confidence = {}
-    needs_review = set(primary.get("needs_review_questions", []))
+    primary_review = set(int(x) for x in primary.get("needs_review_questions", []))
+    secondary_review = set(int(x) for x in secondary.get("needs_review_questions", []))
+    needs_review = set(primary_review)
     mismatch = []
 
     q_keys = sorted(primary["answers"].keys(), key=lambda x: int(x))
@@ -480,17 +524,36 @@ def merge_double_pass(primary, secondary):
         if a1 == a2:
             answers[q] = a1
             confidence[q] = round(max(c1, c2), 3)
-            if abs(c1 - c2) > 0.30:
-                needs_review.add(int(q))
+            # Conservative relaxation:
+            # If both passes agree and one pass is confidently clear,
+            # do not keep review unless BOTH passes flagged it.
+            qi = int(q)
+            high_conf_agree = (max(c1, c2) >= 0.78 and a1 != "")
+            if high_conf_agree and not (qi in primary_review and qi in secondary_review):
+                needs_review.discard(qi)
         else:
-            # Disagreement means not safe for auto grading.
-            answers[q] = ""
-            confidence[q] = round(min(c1, c2), 3)
-            needs_review.add(int(q))
-            mismatch.append(int(q))
+            # Prefer a real mark over blank when passes disagree (normal vs strict).
+            if a1 and not a2:
+                answers[q] = a1
+                confidence[q] = round(c1, 3)
+                needs_review.discard(int(q))
+            elif a2 and not a1:
+                answers[q] = a2
+                confidence[q] = round(c2, 3)
+                needs_review.discard(int(q))
+            else:
+                answers[q] = ""
+                confidence[q] = round(min(c1, c2), 3)
+                needs_review.add(int(q))
+                mismatch.append(int(q))
 
-    if secondary.get("needs_review_questions"):
-        needs_review.update(int(x) for x in secondary["needs_review_questions"])
+    # Secondary-only review: only if merged answer is still blank.
+    for qi in secondary_review:
+        qk = str(qi)
+        if qi in needs_review:
+            continue
+        if answers.get(qk, "") == "":
+            needs_review.add(qi)
 
     avg_conf = float(np.mean(list(confidence.values()))) if confidence else 0.0
     quality_flags = []
@@ -506,6 +569,18 @@ def merge_double_pass(primary, secondary):
     else:
         decision = "AUTO_ACCEPTED"
 
+    merged_reasons = {}
+    for qi in sorted(needs_review):
+        qk = str(qi)
+        r1 = list((primary.get("review_reasons") or {}).get(qk, []))
+        r2 = list((secondary.get("review_reasons") or {}).get(qk, []))
+        merged = list(dict.fromkeys(r1 + r2))
+        a1 = primary["answers"].get(qk, "")
+        a2 = secondary["answers"].get(qk, "")
+        if a1 != a2 and a1 and a2:
+            merged = ["double_pass_mismatch"] + [x for x in merged if x != "double_pass_mismatch"]
+        merged_reasons[qk] = list(dict.fromkeys(merged))
+
     return {
         "answers": answers,
         "confidence": confidence,
@@ -514,7 +589,41 @@ def merge_double_pass(primary, secondary):
         "quality_flags": quality_flags,
         "double_pass_mismatch_questions": mismatch,
         "average_confidence": round(avg_conf, 3),
+        "review_reasons": merged_reasons,
     }
+
+
+def relax_high_confidence_reviews(
+    answers,
+    confidence,
+    needs_review_questions,
+    unstable_questions=None,
+    mismatch_questions=None,
+    min_conf=0.78,
+    review_reasons=None,
+):
+    """
+    Conservative auto-relax for review flags:
+    remove review only if answer is non-blank, highly confident, stable,
+    and not part of pass mismatch.
+    """
+    unstable_set = set(int(x) for x in (unstable_questions or []))
+    mismatch_set = set(int(x) for x in (mismatch_questions or []))
+    rr = dict(review_reasons or {})
+
+    kept = []
+    removed = []
+    for q in (needs_review_questions or []):
+        qi = int(q)
+        qk = str(qi)
+        ans = str((answers or {}).get(qk, "")).strip()
+        conf = float((confidence or {}).get(qk, 0.0))
+        if ans and conf >= float(min_conf) and qi not in unstable_set and qi not in mismatch_set:
+            removed.append(qi)
+            rr.pop(qk, None)
+            continue
+        kept.append(qi)
+    return sorted(kept), sorted(removed), rr
 
 
 def _append_audit_log(entry):
@@ -562,28 +671,51 @@ def parse_qr_payload(qr_text):
 
 def assess_image_quality(gray_img):
     """
-    Basic quality gate to avoid grading low-quality scans.
+    Enhanced quality gate to avoid grading low-quality scans.
+    Checks for:
+    1. Sharpness (Blur)
+    2. Brightness (Too dark)
+    3. Contrast (Dynamic range)
     Returns (score, flags).
     """
     flags = []
+    # Sharpness Check
     lap_var = float(cv2.Laplacian(gray_img, cv2.CV_64F).var())
+    
+    # Brightness Check (Average intensity) 
+    # (0=black, 255=white). Ideal scanned A4 is > 200.
+    mean_brightness = float(np.mean(gray_img))
+    
+    # Contrast Check
     contrast_std = float(np.std(gray_img))
     p10 = float(np.percentile(gray_img, 10))
     p90 = float(np.percentile(gray_img, 90))
     dynamic_range = p90 - p10
 
-    if lap_var < 22.0:
+    # Flags
+    if lap_var < 18.0:
+        flags.append("extreme_blur")
+    elif lap_var < 35.0:
         flags.append("low_sharpness")
+        
+    if mean_brightness < 80.0:
+        flags.append("too_dark")
+    elif mean_brightness < 130.0:
+        flags.append("low_brightness")
+        
     if contrast_std < 22.0:
         flags.append("low_contrast")
     if dynamic_range < 48.0:
         flags.append("low_dynamic_range")
 
     # Score in [0,1], higher is better.
-    sharp_score = min(1.0, lap_var / 60.0)
+    sharp_score = min(1.0, lap_var / 70.0)
+    bright_score = min(1.0, mean_brightness / 200.0)
     contrast_score = min(1.0, contrast_std / 45.0)
     range_score = min(1.0, dynamic_range / 90.0)
-    score = float(0.45 * sharp_score + 0.30 * contrast_score + 0.25 * range_score)
+    
+    # Weighting: Sharpness and Brightness are most critical for OMR
+    score = float(0.40 * sharp_score + 0.30 * bright_score + 0.15 * contrast_score + 0.15 * range_score)
     return score, flags
 
 
@@ -726,6 +858,40 @@ def get_bubble_grid_elite():
 # SECTION 6 — Main Entry Point
 # ══════════════════════════════════════════════════════════════════════════════
 
+def extract_question_bubble_roi(warped, q_num, per_col, y_start, row_sp, xs, radius):
+    """
+    Extract a zoomed-in Base64 image of a question's bubble row
+    for manual human review.
+    """
+    try:
+        row_idx = (q_num - 1) % per_col
+        cy = y_start + row_idx * row_sp
+        
+        # Calculate bounding box for the row of 4 bubbles
+        pad_x = int(radius * 3.5)
+        pad_y = int(radius * 2.5)
+        
+        x_min = max(0, int(min(xs)) - pad_x)
+        x_max = min(warped.shape[1], int(max(xs)) + pad_x)
+        y_min = max(0, int(cy) - pad_y)
+        y_max = min(warped.shape[0], int(cy) + pad_y)
+        
+        # Crop the ROI
+        roi = warped[y_min:y_max, x_min:x_max]
+        if roi.size == 0 or roi.shape[0] < 5 or roi.shape[1] < 5:
+            return None
+            
+        # Zoomed view for better visibility (Cubic for smoother appearance)
+        h, w = roi.shape[:2]
+        zoomed = cv2.resize(roi, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
+        
+        # Encode to JPEG base64
+        _, buffer = cv2.imencode('.jpg', zoomed, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return base64.b64encode(buffer).decode('utf-8')
+    except Exception:
+        return None
+
+
 def _scan_omr_single(
     image_path_or_bytes,
     is_bytes=False,
@@ -733,6 +899,7 @@ def _scan_omr_single(
     from_scanner=False,
     num_questions=30,
     sensitivity="normal",
+    thresholds=None,
     enable_stability=True,
 ):
     # ── 0. Read image ────────────────────────────────────────────────────────
@@ -786,7 +953,25 @@ def _scan_omr_single(
                          dtype="float32"))
             warped = cv2.warpPerspective(img, M, (WIDTH, HEIGHT))
         else:
+            # No paper contour — resize first then try corner-marker warp
+            # as a direct perspective source (avoids scale distortion).
             warped = cv2.resize(img, (WIDTH, HEIGHT))
+            warped_gray_tmp = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            corners_direct = find_corner_markers(warped_gray_tmp)
+            if corners_direct is not None:
+                # Use corner markers as the source for a full perspective warp
+                tl, tr, bl, br = corners_direct
+                src_pts = np.array([tl, tr, br, bl], dtype="float32")
+                ms_h  = CORNER_MARKER_SIZE
+                off_h = MARGIN + ms_h // 2
+                dst_pts = np.array([
+                    [off_h, off_h],
+                    [WIDTH - off_h, off_h],
+                    [WIDTH - off_h, HEIGHT - off_h],
+                    [off_h, HEIGHT - off_h],
+                ], dtype="float32")
+                M2 = cv2.getPerspectiveTransform(src_pts, dst_pts)
+                warped = cv2.warpPerspective(warped, M2, (WIDTH, HEIGHT))
         warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
 
     # ── 2. Fine alignment: corner-marker refinement ──────────────────────────
@@ -794,18 +979,25 @@ def _scan_omr_single(
     #   has a visible border, so the only reliable anchors are the printed
     #   corner squares.
     warped, warped_gray = refine_warp_with_markers(warped, warped_gray)
-
-    # If corner markers not found on scanner image, try mild bilateral filter
     # then attempt refinement once more
     if from_scanner:
         corners_found = find_corner_markers(warped_gray)
         if corners_found is None:
             enhanced = cv2.bilateralFilter(warped_gray, 9, 75, 75)
-            _, tmp_bin = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
             # Use enhanced gray for corner detection
             warped_gray_enh = enhanced
-            warped_enh_color = cv2.cvtColor(warped_gray_enh, cv2.COLOR_GRAY2BGR)
             warped, warped_gray = refine_warp_with_markers(warped, warped_gray_enh)
+            
+            # Re-check if refinement still fails
+            if find_corner_markers(warped_gray) is None:
+                alignment_failed = True
+            else:
+                alignment_failed = False
+        else:
+            alignment_failed = False
+    else:
+        # For non-scanner images, alignment depends on paper contour
+        alignment_failed = False
 
     cv2.imwrite(os.path.join(DEBUG_DIR, "last_warped.png"), warped)
 
@@ -818,6 +1010,8 @@ def _scan_omr_single(
         proc_gray = preprocess(warped_gray)
 
     quality_score, quality_flags = assess_image_quality(warped_gray)
+    if alignment_failed:
+        quality_flags.append("alignment_failed")
     base_proc_vis = cv2.cvtColor(proc_gray, cv2.COLOR_GRAY2BGR) if len(proc_gray.shape) == 2 else proc_gray
     system_view_image = build_system_view_image(warped_gray, base_proc_vis)
 
@@ -870,6 +1064,7 @@ def _scan_omr_single(
             "quality_flags": quality_flags + ["quality_gate_reject"],
             "unstable_questions": list(range(1, num_questions + 1)),
             "system_view_image": system_view_image,
+            "review_reasons": {str(i + 1): ["sheet_quality_low"] for i in range(num_questions)},
             "status": "success",
         }
 
@@ -917,9 +1112,12 @@ def _scan_omr_single(
     confidence_by_question = {}
     needs_review_questions = []
     unstable_questions = []
+    review_reasons = {}
+    review_rois = {}
     for row in row_data:
         q = row["q"]
-        ans, conf, needs_review = evaluate_row(row["dens"], row["darks"], thresholds)
+        ans, conf, needs_review, tags = evaluate_row(row["dens"], row["darks"], thresholds)
+        reason_tags = list(tags)
 
         # Stability check: re-evaluate around nearby row centers.
         if enable_stability and row["dens"]:
@@ -931,17 +1129,30 @@ def _scan_omr_single(
             for y_shift in (-6, 0, 6):
                 d2 = row_densities(proc_gray, xs, y_center + y_shift, bub_r, max(12, y_tol // 2))
                 k2 = row_darknesses(warped_gray, xs, y_center + y_shift, bub_r, max(12, y_tol // 2))
-                a2, _, _ = evaluate_row(d2, k2, thresholds)
+                a2, _, _, _ = evaluate_row(d2, k2, thresholds)
                 jitter_answers.append(a2)
-            if len(set(jitter_answers)) > 1:
+            # Only treat as unstable when two different non-blank answers appear.
+            # Mixing "" with a letter is normal for a single mark near row edge — not ambiguity.
+            non_blank_letters = [a for a in jitter_answers if a]
+            if len(non_blank_letters) >= 2 and len(set(non_blank_letters)) > 1:
                 needs_review = True
                 conf = min(conf, 0.68)
                 unstable_questions.append(q)
+                if "unstable_jitter" not in reason_tags:
+                    reason_tags.append("unstable_jitter")
 
         answers[str(q)] = ans
         confidence_by_question[str(q)] = round(conf, 3)
         if needs_review:
             needs_review_questions.append(q)
+            review_reasons[str(q)] = list(dict.fromkeys(reason_tags))
+            
+            # Capture Visual ROI for human review
+            roi_b64 = extract_question_bubble_roi(
+                warped, q, per_col, y_start, row_sp, xs, bub_r
+            )
+            if roi_b64:
+                review_rois[str(q)] = roi_b64
 
     annotated_proc = build_annotated_proc_view(
         proc_gray=proc_gray,
@@ -962,6 +1173,7 @@ def _scan_omr_single(
         "answers":    answers,
         "confidence": confidence_by_question,
         "needs_review_questions": needs_review_questions,
+        "review_rois": review_rois,
         "quality_score": round(quality_score, 3),
         "quality_flags": quality_flags,
         "unstable_questions": unstable_questions,
@@ -973,6 +1185,7 @@ def _scan_omr_single(
             "dominance_ratio": round(thresholds["dominance_ratio"], 4),
         },
         "system_view_image": system_view_image,
+        "review_reasons": review_reasons,
         "status":     "success",
     }
 
@@ -986,6 +1199,44 @@ def scan_omr(image_path_or_bytes, is_bytes=False, style="default", from_scanner=
         num_questions=num_questions,
         scan_mode="strict",
     )
+
+
+def compute_reliability_score(result):
+    """
+    Compute a production reliability score (0-100) based on multiple quality factors.
+    Used for supervisor dashboards and audit confidence.
+    """
+    score = 100.0
+    
+    # 1. Quality Reductions
+    quality_score = result.get("quality_score", 1.0)
+    if quality_score < 0.7:
+        score -= (0.7 - quality_score) * 40 # Up to 28 points reduction
+        
+    # 2. Review Requirements
+    needs_review = result.get("needs_review_questions", [])
+    if needs_review:
+        score -= 20.0
+        # Additional penalty per problematic question
+        score -= len(needs_review) * 2.5
+        
+    # 3. Double-pass Mismatches
+    mismatches = result.get("double_pass_mismatch_questions", [])
+    if mismatches:
+        score -= 15.0
+        score -= len(mismatches) * 5.0
+        
+    # 4. Alignment / Stability
+    unstable = result.get("unstable_questions", [])
+    if unstable:
+        score -= len(unstable) * 2.0
+        
+    # 5. Flags
+    flags = result.get("quality_flags", [])
+    if "alignment_failure" in flags: score -= 30.0
+    if "num_questions_mismatch" in flags: score -= 50.0
+    
+    return max(0.0, min(100.0, round(score, 1)))
 
 
 def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", from_scanner=False, num_questions=30, scan_mode="strict"):
@@ -1011,6 +1262,17 @@ def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", fro
         decision_status = "REVIEW_REQUIRED" if fast_pass.get("needs_review_questions") else "AUTO_ACCEPTED"
         if "quality_gate_reject" in quality_flags or "num_questions_mismatch" in quality_flags:
             decision_status = "REJECTED_QUALITY"
+        relaxed_review, relaxed_removed, review_rr = relax_high_confidence_reviews(
+            answers=fast_pass.get("answers", {}),
+            confidence=fast_pass.get("confidence", {}),
+            needs_review_questions=fast_pass.get("needs_review_questions", []),
+            unstable_questions=fast_pass.get("unstable_questions", []),
+            mismatch_questions=[],
+            min_conf=0.78,
+            review_reasons=fast_pass.get("review_reasons", {}),
+        )
+        if decision_status != "REJECTED_QUALITY":
+            decision_status = "REVIEW_REQUIRED" if relaxed_review else "AUTO_ACCEPTED"
 
         result = {
             "student_id": fast_pass.get("student_id", ""),
@@ -1018,28 +1280,33 @@ def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", fro
             "detected_num_questions": detected_nq,
             "answers": fast_pass.get("answers", {}),
             "confidence": fast_pass.get("confidence", {}),
-            "needs_review_questions": fast_pass.get("needs_review_questions", []),
+            "needs_review_questions": relaxed_review,
+            "review_reasons": review_rr,
             "adaptive_thresholds": fast_pass.get("adaptive_thresholds", {}),
             "decision_status": decision_status,
             "quality_flags": quality_flags,
             "quality_score": fast_pass.get("quality_score", 0.0),
             "unstable_questions": fast_pass.get("unstable_questions", []),
             "double_pass_mismatch_questions": [],
+            "review_rois": fast_pass.get("review_rois", {}),
             "system_view_image": fast_pass.get("system_view_image", ""),
             "average_confidence": round(float(np.mean(list((fast_pass.get("confidence", {}) or {"0": 0.0}).values()))), 3) if fast_pass.get("confidence") else 0.0,
             "processing_mode": "fast",
             "final_verified": False,
             "status": "success",
         }
+        result["reliability_score"] = compute_reliability_score(result)
         _append_audit_log({
             "ts": datetime.utcnow().isoformat() + "Z",
             "student_id": result["student_id"],
             "decision_status": result["decision_status"],
+            "reliability_score": result["reliability_score"],
             "num_questions": int(num_questions),
             "needs_review_count": len(result["needs_review_questions"]),
             "average_confidence": result["average_confidence"],
             "quality_flags": result["quality_flags"],
             "processing_mode": "fast",
+            "relaxed_review_removed_count": len(relaxed_removed),
         })
         return result
 
@@ -1068,6 +1335,17 @@ def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", fro
             decision_status = "AUTO_ACCEPTED"
             if "quality_gate_reject" in quality_flags or "num_questions_mismatch" in quality_flags:
                 decision_status = "REJECTED_QUALITY"
+            relaxed_review, relaxed_removed, review_rr = relax_high_confidence_reviews(
+                answers=pass_primary.get("answers", {}),
+                confidence=pass_primary.get("confidence", {}),
+                needs_review_questions=pass_primary.get("needs_review_questions", []),
+                unstable_questions=pass_primary.get("unstable_questions", []),
+                mismatch_questions=[],
+                min_conf=0.78,
+                review_reasons=pass_primary.get("review_reasons", {}),
+            )
+            if decision_status != "REJECTED_QUALITY":
+                decision_status = "REVIEW_REQUIRED" if relaxed_review else "AUTO_ACCEPTED"
 
             result = {
                 "student_id": pass_primary.get("student_id", ""),
@@ -1075,28 +1353,33 @@ def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", fro
                 "detected_num_questions": detected_nq,
                 "answers": pass_primary.get("answers", {}),
                 "confidence": pass_primary.get("confidence", {}),
-                "needs_review_questions": pass_primary.get("needs_review_questions", []),
+                "needs_review_questions": relaxed_review,
+                "review_reasons": review_rr,
                 "adaptive_thresholds": pass_primary.get("adaptive_thresholds", {}),
                 "decision_status": decision_status,
                 "quality_flags": quality_flags,
                 "quality_score": pass_primary.get("quality_score", 0.0),
                 "unstable_questions": pass_primary.get("unstable_questions", []),
                 "double_pass_mismatch_questions": [],
+                "review_rois": pass_primary.get("review_rois", {}),
                 "system_view_image": pass_primary.get("system_view_image", ""),
                 "average_confidence": round(float(np.mean(list((pass_primary.get("confidence", {}) or {"0": 0.0}).values()))), 3) if pass_primary.get("confidence") else 0.0,
                 "processing_mode": "hybrid-fast-accepted",
                 "final_verified": False,
                 "status": "success",
             }
+            result["reliability_score"] = compute_reliability_score(result)
             _append_audit_log({
                 "ts": datetime.utcnow().isoformat() + "Z",
                 "student_id": result["student_id"],
                 "decision_status": result["decision_status"],
+                "reliability_score": result["reliability_score"],
                 "num_questions": int(num_questions),
                 "needs_review_count": len(result["needs_review_questions"]),
                 "average_confidence": result["average_confidence"],
                 "quality_flags": result["quality_flags"],
                 "processing_mode": "hybrid-fast-accepted",
+                "relaxed_review_removed_count": len(relaxed_removed),
             })
             return result
 
@@ -1139,29 +1422,57 @@ def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", fro
         "answers": merged["answers"],
         "confidence": merged["confidence"],
         "needs_review_questions": merged["needs_review_questions"],
+        "review_reasons": merged.get("review_reasons", {}),
         "adaptive_thresholds": pass_primary.get("adaptive_thresholds", {}),
         "decision_status": "REJECTED_QUALITY" if ("num_questions_mismatch" in quality_flags or "quality_gate_reject" in quality_flags) else merged["decision_status"],
         "quality_flags": quality_flags,
         "quality_score": round(quality_score, 3),
         "unstable_questions": pass_primary.get("unstable_questions", []),
         "double_pass_mismatch_questions": merged["double_pass_mismatch_questions"],
+        "review_rois": pass_primary.get("review_rois", {}),
         "system_view_image": pass_primary.get("system_view_image", ""),
         "average_confidence": merged["average_confidence"],
         "processing_mode": "strict" if mode == "strict" else "hybrid-strict-fallback",
         "final_verified": True,
         "status": "success",
     }
+    relaxed_review, relaxed_removed, review_rr = relax_high_confidence_reviews(
+        answers=result["answers"],
+        confidence=result["confidence"],
+        needs_review_questions=result["needs_review_questions"],
+        unstable_questions=result.get("unstable_questions", []),
+        mismatch_questions=result.get("double_pass_mismatch_questions", []),
+        min_conf=0.78,
+        review_reasons=result.get("review_reasons", {}),
+    )
+    result["needs_review_questions"] = relaxed_review
+    result["review_reasons"] = review_rr
+    if result["decision_status"] != "REJECTED_QUALITY":
+        result["decision_status"] = "REVIEW_REQUIRED" if relaxed_review else "AUTO_ACCEPTED"
+
+    result["reliability_score"] = compute_reliability_score(result)
+    result["image_hash"] = img_hash
+
+    # Initialize structured audit trail for digital accreditation
+    audit_entry = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "action": "system_scan",
+        "user": "System (AI Engine)",
+        "details": f"Processed via {result['processing_mode']} mode. Quality Score: {result['quality_score']}",
+        "metrics": {
+            "reliability_score": result["reliability_score"],
+            "avg_confidence": result["average_confidence"],
+            "needs_review_count": len(result["needs_review_questions"])
+        }
+    }
+    result["audit"] = [audit_entry]
 
     _append_audit_log({
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": audit_entry["ts"],
         "student_id": result["student_id"],
         "decision_status": result["decision_status"],
-        "num_questions": int(num_questions),
-        "needs_review_count": len(result["needs_review_questions"]),
-        "average_confidence": result["average_confidence"],
-        "quality_flags": result["quality_flags"],
+        "reliability_score": result["reliability_score"],
         "image_sha256": img_hash,
-        "answers": result["answers"],
         "processing_mode": result["processing_mode"],
     })
     return result

@@ -39,6 +39,22 @@ const StudentList = () => {
         }
     };
 
+    const handleDeleteFiltered = async () => {
+        try {
+            if (filteredStudents.length === 0) return;
+            if (window.confirm(`هل أنت متأكد من حذف ${filteredStudents.length} طالب (الطلاب المعروضين حالياً)؟ لن يمكنك التراجع عن هذه الخطوة.`)) {
+                const filteredIds = new Set(filteredStudents.map(s => s.id));
+                const remainingStudents = students.filter(s => !filteredIds.has(s.id));
+                await saveStudentsBulk(remainingStudents);
+                fetchStudents();
+                alert('تم الحذف بنجاح!');
+            }
+        } catch (error) {
+            console.error(error);
+            alert('حدث خطأ أثناء الحذف: ' + error.message);
+        }
+    };
+
     const handleSave = async (e) => {
         e.preventDefault();
         const formData = new FormData(e.target);
@@ -46,6 +62,7 @@ const StudentList = () => {
             id: editingStudent?.id,
             name: formData.get('name'),
             seatNumber: formData.get('seatNumber') || '',
+            nationalId: formData.get('nationalId') || '',
             stage: formData.get('stage'),
             grade: formData.get('grade'),
             class: formData.get('class'),
@@ -122,6 +139,7 @@ const StudentList = () => {
         reader.onload = async (event) => {
             try {
                 let importedData = [];
+                let foundKeysInfo = 'بيانات الأعمدة غير متوفرة';
 
                 if (fileExtension === 'json') {
                     importedData = JSON.parse(event.target.result);
@@ -131,6 +149,8 @@ const StudentList = () => {
                     const sheetName = workbook.SheetNames[0];
                     const worksheet = workbook.Sheets[sheetName];
                     const rawJsonData = XLSX.utils.sheet_to_json(worksheet);
+                    
+                    foundKeysInfo = rawJsonData.length > 0 ? Object.keys(rawJsonData[0]).join(' | ') : 'ملف فارغ';
                     
                     // Normalize keys (remove leading/trailing spaces from Excel headers)
                     const jsonData = rawJsonData.map(row => {
@@ -143,27 +163,77 @@ const StudentList = () => {
                         return normalizedRow;
                     });
 
-                    // Map Excel columns to our data structure
+                    // Map Excel columns to our data structure with a flexible search
+                    const getVal = (row, possibleNames) => {
+                        for (const key in row) {
+                            // Remove ALL spaces, invisible chars, and normalize
+                            const cleanKey = key.toString().replace(/[\s\u200B-\u200D\uFEFF]/g, '');
+                            for (const name of possibleNames) {
+                                const cleanName = name.replace(/[\s]/g, '');
+                                if (cleanKey === cleanName || cleanKey.includes(cleanName)) {
+                                    return row[key] !== undefined && row[key] !== null ? row[key] : '';
+                                }
+                            }
+                        }
+                        return '';
+                    };
+
                     importedData = jsonData.map((row, index) => ({
                         id: Date.now().toString() + index,
-                        name: (row['الاسم'] || row['اسم الطالب'] || row['الاسم رباعي'] || row['Name'] || row['student name'] || '').toString().trim(),
-                        seatNumber: (row['رقم الجلوس'] || row['الجلوس'] || row['Seat Number'] || row['seat'] || '').toString().trim(),
-                        stage: (row['المرحلة'] || row['المرحلة الدراسية'] || row['Stage'] || row['الصفوف'] || row['المستوي'] || '').toString().trim(),
-                        grade: (row['الصف'] || row['الصف الدراسي'] || row['Grade'] || row['grade'] || '').toString().trim(),
-                        class: (row['الفصل'] || row['الشعبة'] || row['Class'] || '').toString().trim(),
-                        committee: (row['اللجنة'] || row['رقم اللجنة'] || row['Committee'] || '').toString().trim(),
-                        phone: (row['رقم الجوال'] || row['الجوال'] || row['هاتف'] || row['Phone'] || row['phone'] || row['جوال'] || '').toString().trim(),
-                    })).filter(s => s.name); // Filter out empty rows
+                        name: getVal(row, ['الاسم', 'اسم الطالب', 'الاسم رباعي', 'name']).toString().trim(),
+                        seatNumber: getVal(row, ['رقم الطالب', 'رقم الجلوس', 'الجلوس', 'seat']).toString().trim(),
+                        nationalId: getVal(row, ['رقم الهوية', 'الهوية', 'nationalId']).toString().trim(),
+                        stage: getVal(row, ['المرحلة', 'stage', 'المرحلة الدراسية']).toString().trim(),
+                        grade: getVal(row, ['رقم الصف', 'الصف', 'grade']).toString().trim(),
+                        class: getVal(row, ['الفصل', 'الشعبة', 'class']).toString().trim(),
+                        committee: getVal(row, ['اللجنة', 'رقم اللجنة', 'committee']).toString().trim(),
+                        phone: getVal(row, ['رقم الجوال', 'الجوال', 'هاتف', 'جوال', 'phone']).toString().trim(),
+                    })).filter(s => s.name !== ''); // Filter out empty rows
                 }
 
                 if (Array.isArray(importedData) && importedData.length > 0) {
-                    if (confirm(`هل أنت متأكد من استيراد ${importedData.length} طالب؟ سيتم استبدال القائمة الحالية.`)) {
-                        await saveStudentsBulk(importedData);
+                    const wantToMerge = window.confirm(`تم قراءة ${importedData.length} طالب من الملف.\n\nهل ترغب في "تحديث" الطلاب الحاليين (لإضافة رقم الهوية والبيانات الناقصة) بدلاً من مسح القائمة بالكامل؟\n\n- اضغط "موافق/OK" للتحديث والدمج.\n- اضغط "إلغاء/Cancel" لمسح القائمة السابقة واستبدالها بالكامل.`);
+                    
+                    if (wantToMerge) {
+                        // Merge logic: match by seatNumber or name
+                        let updatedCount = 0;
+                        const mergedStudents = students.map(existing => {
+                            const match = importedData.find(imp => 
+                                (imp.seatNumber && imp.seatNumber === existing.seatNumber) || 
+                                (imp.name === existing.name)
+                            );
+                            
+                            if (match) {
+                                updatedCount++;
+                                return { 
+                                    ...existing, 
+                                    nationalId: match.nationalId || existing.nationalId,
+                                    phone: match.phone || existing.phone,
+                                    committee: match.committee || existing.committee
+                                };
+                            }
+                            return existing;
+                        });
+                        
+                        // Add purely new students who did not match any existing
+                        const existingMatchKeys = new Set(mergedStudents.map(s => s.seatNumber ? s.seatNumber : s.name));
+                        const newStudents = importedData.filter(imp => !existingMatchKeys.has(imp.seatNumber ? imp.seatNumber : imp.name));
+                        
+                        const finalList = [...mergedStudents, ...newStudents];
+                        await saveStudentsBulk(finalList);
                         fetchStudents();
-                        alert('تم استيراد البيانات بنجاح');
+                        
+                        alert(`تم التحديث بنجاح!\nتم تحديث بيانات ${updatedCount} طالب موجود، وإضافة ${newStudents.length} طالب جديد.\n(الأعمدة المقروءة: ${foundKeysInfo})`);
+                        
+                    } else {
+                        if (window.confirm(`تحذير نهائي: سيتم حذف جميع الطلاب الحاليين واستبدالهم بالقائمة الجديدة. هل أنت متأكد؟`)) {
+                            await saveStudentsBulk(importedData);
+                            fetchStudents();
+                            alert('تم استبدال البيانات بنجاح!\n(الأعمدة المقروءة من الملف: ' + foundKeysInfo + ')');
+                        }
                     }
                 } else {
-                    alert('ملف غير صالح أو فارغ. يرجى التأكد من رؤوس الأعمدة (الاسم، رقم الجلوس، الصف، إلخ).');
+                    alert('لم يتم العثور على أي طلاب بأسماء صحيحة.\nالأعمدة المقروءة: ' + foundKeysInfo);
                 }
             } catch (err) {
                 console.error(err);
@@ -196,10 +266,10 @@ const StudentList = () => {
                     />
                     <button
                         onClick={() => document.getElementById('import-students').click()}
-                        className="flex items-center gap-2 px-4 py-2 bg-white/5 border border-white/10 text-slate-300 rounded-xl hover:bg-white/10 transition-all active:scale-95 text-sm font-bold"
+                        className="flex items-center gap-2 px-6 py-3 bg-white border border-slate-200 text-slate-600 rounded-2xl hover:bg-slate-50 transition-all active:scale-95 text-sm font-bold shadow-sm"
                     >
-                        <FileSpreadsheet size={16} className="text-gold" />
-                        <span>استيراد بيانات</span>
+                        <FileSpreadsheet size={18} className="text-indigo-500" />
+                        <span>استيراد ملفات</span>
                     </button>
                     <button
                         onClick={() => {
@@ -207,129 +277,145 @@ const StudentList = () => {
                             setGenConfig({ ...genConfig, startNumber: suggested.toString() });
                             setIsGeneratorOpen(true);
                         }}
-                        className="flex items-center gap-2 px-4 py-2 bg-gold/10 text-gold rounded-xl hover:bg-gold/20 border border-gold/20 transition-all font-bold active:scale-95 text-sm"
+                        className="flex items-center gap-2 px-6 py-3 bg-amber-50 text-amber-700 border border-amber-100 rounded-2xl hover:bg-amber-100 transition-all font-bold active:scale-95 text-sm shadow-sm"
                     >
-                        <Wand2 size={16} />
-                        <span>توليد أرقام جلوس</span>
+                        <Wand2 size={18} />
+                        <span>أرقام الجلوس</span>
                     </button>
                     <button
                         onClick={handleExport}
-                        className="flex items-center gap-2 px-4 py-2 bg-white/5 border border-white/10 text-slate-300 rounded-xl hover:bg-white/10 transition-all active:scale-95 text-sm font-bold"
+                        className="flex items-center gap-2 px-6 py-3 bg-white border border-slate-200 text-slate-600 rounded-2xl hover:bg-slate-50 transition-all active:scale-95 text-sm font-bold shadow-sm"
                     >
-                        <Download size={16} />
-                        <span>تصدير</span>
+                        <Download size={18} />
+                        <span>نسخة احتياطية</span>
                     </button>
                     <button
                         onClick={() => { setEditingStudent(null); setIsModalOpen(true); }}
-                        className="flex items-center gap-2 px-6 py-2 bg-gold text-navy rounded-xl hover:brightness-110 transition-all shadow-lg shadow-gold/10 active:scale-95 font-black text-sm"
+                        className="flex items-center gap-2 px-8 py-3 bg-indigo-600 text-white rounded-2xl hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 active:scale-95 font-black text-sm"
                     >
-                        <UserPlus size={18} />
-                        <span>إضافة طالب جديد</span>
+                        <Plus size={20} />
+                        <span>إضافة طالب</span>
                     </button>
+                    {filteredStudents.length > 0 && filteredStudents.length < students.length && (
+                        <button
+                            onClick={handleDeleteFiltered}
+                            className="flex items-center gap-2 px-6 py-3 bg-rose-50 border border-rose-100 text-rose-600 rounded-2xl hover:bg-rose-600 hover:text-white transition-all active:scale-95 text-sm font-bold shadow-sm"
+                        >
+                            <Trash2 size={18} />
+                            <span>حذف المعروض ({filteredStudents.length})</span>
+                        </button>
+                    )}
                     <button
                         onClick={handleDeleteAll}
-                        className="flex items-center gap-2 px-4 py-2 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl hover:bg-red-500/20 transition-all active:scale-95 text-sm font-bold"
+                        className="flex items-center gap-2 px-6 py-3 bg-red-50 border border-red-100 text-red-600 rounded-2xl hover:bg-red-600 hover:text-white transition-all active:scale-95 text-sm font-bold shadow-sm"
                     >
-                        <Trash2 size={16} />
-                        <span>حذف الكل</span>
+                        <Trash2 size={18} />
+                        <span>تفريغ السجل</span>
                     </button>
                 </div>
             </div>
 
-            <div className="glass rounded-[2rem] border border-white/5 shadow-2xl overflow-hidden">
-                <div className="p-6 border-b border-white/5 flex flex-col md:flex-row gap-6 items-center justify-between">
-                    <div className="relative w-full md:w-96">
-                        <Search className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+            <div className="luxury-card border-none overflow-hidden bg-white p-2">
+                <div className="p-8 border-b border-slate-50 flex flex-col md:flex-row gap-8 items-center justify-between bg-slate-50/20">
+                    <div className="relative w-full md:w-[450px]">
+                        <Search className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
                         <input
                             type="text"
-                            placeholder="ابحث عن اسم أو رقم جلوس..."
-                            className="w-full pr-12 pl-4 py-3 bg-white/5 border border-white/10 rounded-2xl focus:ring-2 focus:ring-gold/20 focus:border-gold outline-none transition-all text-white placeholder:text-slate-600"
+                            placeholder="ابحث باسم الطالب أو رقم الجلوس..."
+                            className="w-full pr-14 pl-6 py-4 bg-white border border-slate-200 rounded-2xl focus:ring-4 focus:ring-indigo-100/30 focus:border-indigo-300 outline-none transition-all text-slate-800 font-bold text-sm shadow-sm"
                             value={searchTerm}
                             onChange={(e) => setSearchTerm(e.target.value)}
                         />
                     </div>
-                    <div className="flex items-center gap-3">
-                        <Filter size={18} className="text-gold" />
-                        <span className="text-slate-400 text-sm font-bold">تصفية بالمرحلة:</span>
+                    <div className="flex items-center gap-4 bg-white px-6 py-3 rounded-2xl border border-slate-100 shadow-sm">
+                        <Filter size={18} className="text-indigo-400" rotate={90} />
+                        <span className="text-slate-400 text-[11px] font-black uppercase tracking-widest">تصفية المرحلة:</span>
                         <select
-                            className="bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:border-gold outline-none"
+                            className="bg-transparent border-none font-bold text-sm text-slate-800 outline-none cursor-pointer focus:ring-0"
                             value={selectedStage}
                             onChange={(e) => setSelectedStage(e.target.value)}
                         >
-                            {stages.map(s => <option key={s} value={s} className="bg-navy">{s === 'الكل' ? 'جميع المراحل' : s}</option>)}
+                            {stages.map(s => <option key={s} value={s}>{s === 'الكل' ? 'جميع المراحل' : s}</option>)}
                         </select>
                     </div>
                 </div>
 
-                <div className="overflow-x-auto h-[60vh] custom-scrollbar">
-                    <table className="w-full text-right border-collapse">
+                <div className="overflow-x-auto p-2">
+                    <table className="premium-table text-right">
                         <thead>
-                            <tr className="bg-white/5 text-gold text-xs font-black uppercase tracking-widest border-b border-white/5">
+                            <tr className="border-none">
                                 <th className="px-8 py-5">اسم الطالب</th>
-                                <th className="px-8 py-5">رقم الجلوس</th>
-                                <th className="px-8 py-5">المرحلة</th>
-                                <th className="px-8 py-5">الصف</th>
-                                <th className="px-8 py-5">الفصل</th>
-                                <th className="px-8 py-5">رقم الجوال</th>
-                                <th className="px-8 py-5">اللجنة</th>
-                                <th className="px-8 py-5 text-center">التحكم</th>
+                                <th className="px-8 py-5 text-center">رقم الجلوس</th>
+                                <th className="px-8 py-5 text-center">رقم الهوية</th>
+                                <th className="px-8 py-5 text-center">المرحلة</th>
+                                <th className="px-8 py-5 text-center">الصف الدراسي</th>
+                                <th className="px-8 py-5 text-center">الفصل</th>
+                                <th className="px-8 py-5 text-center">هاتف الجوال</th>
+                                <th className="px-8 py-5 text-center">اللجنة</th>
+                                <th className="px-8 py-5 text-left">الإجراءات</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-white/5">
+                        <tbody className="divide-y-8 divide-transparent">
                             {loading ? (
-                                <tr><td colSpan="8" className="text-center py-20 text-slate-500 font-bold animate-pulse">جاري جلب السجلات الملكية...</td></tr>
+                                <tr><td colSpan="9" className="text-center py-20 text-slate-300 font-bold animate-pulse">جاري جلب السجلات...</td></tr>
                             ) : filteredStudents.length === 0 ? (
-                                <tr><td colSpan="8" className="text-center py-20 text-slate-600 font-medium italic">لا يوجد طلاب مطابقين في السجلات الحالية</td></tr>
+                                <tr><td colSpan="9" className="text-center py-24 text-slate-300 font-black text-xl italic opacity-40">لا توجد بيانات مطابقة للبحث</td></tr>
                             ) : filteredStudents.map((student) => (
-                                <tr key={student.id} className="hover:bg-white/5 transition-all">
+                                <tr key={student.id} className="hover:scale-[1.005] transition-transform">
                                     <td className="px-8 py-5">
-                                        <div className="font-bold text-white text-lg">{student.name}</div>
+                                        <div className="flex items-center gap-4">
+                                          <div className="w-11 h-11 bg-slate-50 text-slate-400 rounded-2xl flex items-center justify-center font-black border border-slate-100 shadow-inner">
+                                              <UserPlus size={20} />
+                                          </div>
+                                          <div className="font-black text-slate-900 text-base">{student.name}</div>
+                                        </div>
                                     </td>
-                                    <td className="px-8 py-5 font-black text-gold text-lg tracking-widest">{student.seatNumber}</td>
-                                    <td className="px-8 py-5">
-                                        <span className="px-3 py-1 rounded-lg text-[11px] font-black bg-white/5 text-slate-300 border border-white/10 uppercase tracking-tighter">
+                                    <td className="px-8 py-5 text-center font-header font-black text-indigo-600 text-lg tracking-widest">{student.seatNumber}</td>
+                                    <td className="px-8 py-5 text-center font-mono text-slate-600">{student.nationalId}</td>
+                                    <td className="px-8 py-5 text-center">
+                                        <span className="px-4 py-1.5 rounded-xl text-[10px] font-black bg-slate-50 text-slate-500 border border-slate-100 uppercase tracking-tight">
                                             {student.stage}
                                         </span>
                                     </td>
-                                    <td className="px-8 py-5">
-                                        <span className="px-3 py-1 rounded-lg text-[11px] font-black bg-gold/10 text-gold border border-gold/20">
+                                    <td className="px-8 py-5 text-center">
+                                        <span className="px-4 py-1.5 rounded-xl text-[10px] font-black bg-indigo-50 text-indigo-600 border border-indigo-100">
                                             {student.grade}
                                         </span>
                                     </td>
-                                    <td className="px-8 py-5 text-slate-300 font-bold">{student.class}</td>
-                                    <td className="px-8 py-5">
+                                    <td className="px-8 py-5 text-center text-slate-600 font-black">{student.class}</td>
+                                    <td className="px-8 py-5 text-center">
                                         {student.phone ? (
                                             <a href={`tel:${student.phone}`}
-                                                className="flex items-center gap-2 text-emerald-400 font-black text-sm hover:text-emerald-300 transition-colors">
+                                                className="inline-flex items-center gap-2 text-emerald-600 font-black text-xs hover:text-emerald-700 transition-colors bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-100">
                                                 <Phone size={14} className="shrink-0" />
-                                                {student.phone}
+                                                <span dir="ltr">{student.phone}</span>
                                             </a>
                                         ) : (
-                                            <span className="text-slate-700 text-xs italic">—</span>
-                                        )}
-                                    </td>
-                                    <td className="px-8 py-5">
-                                        {student.committee ? (
-                                            <span className="bg-white/5 text-slate-200 px-3 py-1.5 rounded-xl text-xs font-black border border-white/10">
-                                                اللجنة {student.committee}
-                                            </span>
-                                        ) : (
-                                            <span className="text-slate-700 text-xs italic">غير مدرج</span>
+                                            <span className="text-slate-300 text-xs italic">—</span>
                                         )}
                                     </td>
                                     <td className="px-8 py-5 text-center">
-                                        <div className="flex justify-center gap-3">
+                                        {student.committee ? (
+                                            <span className="bg-amber-50 text-amber-600 px-4 py-1.5 rounded-xl text-[10px] font-black border border-amber-100">
+                                                اللجنة {student.committee}
+                                            </span>
+                                        ) : (
+                                            <span className="text-slate-300 text-xs italic opacity-40">غير مدرج</span>
+                                        )}
+                                    </td>
+                                    <td className="px-8 py-5 text-left">
+                                        <div className="flex justify-start gap-4">
                                             <button
                                                 onClick={() => { setEditingStudent(student); setIsModalOpen(true); }}
-                                                className="p-2 text-blue-400 hover:bg-blue-400/10 rounded-xl transition-all hover:scale-110"
+                                                className="p-3 text-indigo-400 hover:bg-indigo-50 rounded-2xl transition-all active:scale-95 border border-transparent hover:border-indigo-100"
                                             >
-                                                <Edit2 size={18} />
+                                                <Edit2 size={20} />
                                             </button>
                                             <button
                                                 onClick={() => handleDelete(student.id)}
-                                                className="p-2 text-red-400 hover:bg-red-400/10 rounded-xl transition-all hover:scale-110"
+                                                className="p-3 text-rose-400 hover:bg-rose-50 rounded-2xl transition-all active:scale-95 border border-transparent hover:border-rose-100"
                                             >
-                                                <Trash2 size={18} />
+                                                <Trash2 size={20} />
                                             </button>
                                         </div>
                                     </td>
@@ -341,63 +427,66 @@ const StudentList = () => {
             </div>
 
             {isGeneratorOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-navy/80 backdrop-blur-md">
-                    <div className="glass w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden animate-pop-in">
-                        <div className="p-8 border-b border-white/5 flex items-center justify-between">
-                            <h3 className="text-xl font-black gold-text">توليد الأرقام الملكية</h3>
-                            <button onClick={() => setIsGeneratorOpen(false)} className="text-slate-500 hover:text-white transition-colors"><X size={24} /></button>
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+                    <div className="bg-white w-full max-w-lg rounded-[2.5rem] shadow-2xl overflow-hidden animate-in zoom-in-95 border border-slate-100">
+                        <div className="p-8 bg-indigo-600 text-white flex items-center justify-between">
+                            <div>
+                              <h3 className="text-2xl font-black font-header">توليد أرقام الجلوس</h3>
+                              <p className="text-indigo-100 text-xs mt-1 font-bold">معالج الربط التلقائي للهوية الرقمية</p>
+                            </div>
+                            <button onClick={() => setIsGeneratorOpen(false)} className="p-3 hover:bg-white/10 rounded-2xl transition-all"><X size={24} /></button>
                         </div>
-                        <div className="p-8 space-y-6">
-                            <div className="space-y-2">
-                                <label className="text-sm font-black text-slate-400 uppercase tracking-widest">المرحلة التعليمية</label>
+                        <div className="p-10 space-y-6">
+                            <div className="space-y-3">
+                                <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest mr-1">المرحلة الدراسية</label>
                                 <select
-                                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold"
+                                    className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-800 font-bold transition-all"
                                     value={genConfig.stage}
                                     onChange={(e) => setGenConfig({ ...genConfig, stage: e.target.value, grade: '' })}
                                 >
-                                    <option value="" className="bg-navy">-- اختر المرحلة --</option>
+                                    <option value="">-- اختر المرحلة --</option>
                                     {(() => {
                                         const dataStages = [...new Set(students.map(s => s.stage).filter(Boolean))];
                                         const displayStages = [...new Set(['الابتدائي', 'المتوسط', 'الثانوي', ...dataStages])];
                                         return displayStages.map(s => {
                                             const count = students.filter(std => std.stage === s).length;
-                                            return <option key={s} value={s} className="bg-navy">{s} ({count} طالب)</option>;
+                                            return <option key={s} value={s}>{s} ({count} طالب)</option>;
                                         });
                                     })()}
                                 </select>
                             </div>
-                            <div className="space-y-2">
-                                <label className="text-sm font-black text-slate-400 uppercase tracking-widest">الصف</label>
+                            <div className="space-y-3">
+                                <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest mr-1">الصف المحدد</label>
                                 <select
-                                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold"
+                                    className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-800 font-bold transition-all"
                                     value={genConfig.grade}
                                     onChange={(e) => setGenConfig({ ...genConfig, grade: e.target.value })}
                                 >
-                                    <option value="" className="bg-navy">-- اختر الصف --</option>
+                                    <option value="">-- اختر الصف --</option>
                                     {[...new Set(students.filter(s => s.stage === genConfig.stage).map(s => s.grade))].map(g => (
-                                        <option key={g} value={g} className="bg-navy">{g}</option>
+                                        <option key={g} value={g}>{g}</option>
                                     ))}
                                 </select>
                             </div>
-                            <div className="space-y-2">
-                                <label className="text-sm font-black text-slate-400 uppercase tracking-widest">رقم البداية</label>
+                            <div className="space-y-3">
+                                <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest mr-1">رقم البداية التسلسلي</label>
                                 <input
                                     type="number"
-                                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold placeholder:text-slate-700"
+                                    className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-800 font-header font-black text-lg placeholder:text-slate-300 transition-all font-mono"
                                     value={genConfig.startNumber}
                                     onChange={(e) => setGenConfig({ ...genConfig, startNumber: e.target.value })}
                                     placeholder="مثال: 1001"
                                 />
                             </div>
 
-                            <div className="flex gap-4 mt-8">
+                            <div className="flex gap-4 mt-10">
                                 <button
                                     onClick={handleGenerateSeats}
-                                    className="flex-1 py-4 bg-gold text-navy rounded-2xl font-black hover:brightness-110 shadow-lg shadow-gold/20 active:scale-95 transition-all text-lg"
+                                    className="flex-1 py-5 bg-indigo-600 text-white rounded-2xl font-black hover:bg-indigo-700 shadow-xl shadow-indigo-100 active:scale-95 transition-all text-lg"
                                 >
-                                    بدء التوليد
+                                    بدء التشغيل
                                 </button>
-                                <button onClick={() => setIsGeneratorOpen(false)} className="px-8 py-4 bg-white/5 text-slate-400 rounded-2xl font-black hover:bg-white/10 hover:text-white transition-all text-lg">إلغاء</button>
+                                <button onClick={() => setIsGeneratorOpen(false)} className="px-10 py-5 bg-slate-100 text-slate-500 rounded-2xl font-black hover:bg-slate-200 transition-all text-lg">إلغاء</button>
                             </div>
                         </div>
                     </div>
@@ -405,63 +494,79 @@ const StudentList = () => {
             )}
 
             {isModalOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-navy/80 backdrop-blur-md">
-                    <div className="glass w-full max-w-lg rounded-[2.5rem] shadow-2xl overflow-hidden animate-pop-in">
-                        <div className="p-8 border-b border-white/5 flex items-center justify-between">
-                            <h3 className="text-2xl font-black gold-text">
-                                {editingStudent ? 'تحديث السجل الملكي' : 'إضافة عضو جديد'}
-                            </h3>
-                            <button onClick={() => setIsModalOpen(false)} className="text-slate-500 hover:text-white text-3xl font-light">×</button>
-                        </div>
-                        <form onSubmit={handleSave} className="p-8 space-y-6">
-                            <div className="space-y-2">
-                                <label className="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">الاسم الكامل للطالب</label>
-                                <input required name="name" defaultValue={editingStudent?.name} className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold text-lg" />
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+                    <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden animate-in zoom-in-95 border border-slate-100">
+                        <div className="p-10 bg-gradient-to-br from-indigo-600 to-indigo-700 text-white flex items-center justify-between">
+                            <div>
+                              <h3 className="text-3xl font-black font-header">
+                                  {editingStudent ? 'تعديل بيانات الطالب' : 'إضافة طالب جديد'}
+                              </h3>
+                              <p className="text-indigo-100 text-sm mt-2 opacity-80 font-medium tracking-tight">يرجى ملء الحقول التالية بدقة لضمان صحة رصد الدرجات</p>
                             </div>
-                            <div className="grid grid-cols-2 gap-6">
-                                <div className="space-y-2">
-                                    <label className="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">رقم الجلوس</label>
-                                    <input name="seatNumber" defaultValue={editingStudent?.seatNumber} className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold font-mono tracking-widest" placeholder="تلقائي" />
+                            <button onClick={() => setIsModalOpen(false)} className="p-4 hover:bg-white/10 rounded-3xl transition-all">
+                              <X size={32} />
+                            </button>
+                        </div>
+                        <form onSubmit={handleSave} className="p-10 space-y-8 bg-white">
+                            <div className="space-y-3">
+                                <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">الاسم الثلاثي أو الرباعي للطلاب</label>
+                                <input required name="name" defaultValue={editingStudent?.name} 
+                                  className="w-full px-8 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-black text-xl transition-all" />
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                <div className="space-y-3">
+                                    <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">رقم الجلوس (Seat ID)</label>
+                                    <input name="seatNumber" defaultValue={editingStudent?.seatNumber} 
+                                      className="w-full px-8 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-indigo-600 font-header font-black text-xl font-mono tracking-widest transition-all" placeholder="يتم توليده تلقائياً" />
                                 </div>
-                                <div className="space-y-2">
-                                    <label className="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">المرحلة</label>
-                                    <select required name="stage" defaultValue={editingStudent?.stage || 'الثانوي'} className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold">
-                                        <option value="الابتدائي" className="bg-navy">الابتدائي</option>
-                                        <option value="المتوسط" className="bg-navy">المتوسط</option>
-                                        <option value="الثانوي" className="bg-navy">الثانوي</option>
+                                <div className="space-y-3">
+                                    <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">المرحلة الأكاديمية</label>
+                                    <select required name="stage" defaultValue={editingStudent?.stage || 'الثانوي'} 
+                                      className="w-full px-8 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-bold transition-all appearance-none">
+                                        <option value="الابتدائي">الابتدائي</option>
+                                        <option value="المتوسط">المتوسط</option>
+                                        <option value="الثانوي">الثانوي</option>
                                     </select>
                                 </div>
                             </div>
-                            <div className="grid grid-cols-3 gap-4">
-                                <div className="space-y-2">
-                                    <label className="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">الصف</label>
-                                    <input required name="grade" defaultValue={editingStudent?.grade} className="w-full px-4 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold text-sm" placeholder="مثال: الأول" />
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                                <div className="space-y-3">
+                                    <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">رقم الهوية</label>
+                                    <input name="nationalId" defaultValue={editingStudent?.nationalId} 
+                                      className="w-full px-6 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-bold text-sm transition-all text-center" placeholder="10XXXXXXXX" />
                                 </div>
-                                <div className="space-y-2">
-                                    <label className="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">الفصل</label>
-                                    <input required name="class" defaultValue={editingStudent?.class} className="w-full px-4 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold text-sm text-center" placeholder="أ، ب..." />
+                                <div className="space-y-3">
+                                    <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">الصف</label>
+                                    <input required name="grade" defaultValue={editingStudent?.grade} 
+                                      className="w-full px-6 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-bold text-sm transition-all" placeholder="مثال: الأول" />
                                 </div>
-                                <div className="space-y-2">
-                                    <label className="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">اللجنة</label>
-                                    <input name="committee" defaultValue={editingStudent?.committee} className="w-full px-4 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold text-sm text-center" />
+                                <div className="space-y-3">
+                                    <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">الفصل / الشعبة</label>
+                                    <input required name="class" defaultValue={editingStudent?.class} 
+                                      className="w-full px-6 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-bold text-sm text-center transition-all" placeholder="أ، ب..." />
+                                </div>
+                                <div className="space-y-3">
+                                    <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">رقم اللجنة</label>
+                                    <input name="committee" defaultValue={editingStudent?.committee} 
+                                      className="w-full px-6 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-bold text-sm text-center transition-all" />
                                 </div>
                             </div>
-                            <div className="space-y-2">
-                                <label className="text-xs font-black text-slate-500 uppercase tracking-[0.2em] flex items-center gap-2">
-                                    <Phone size={14} className="text-emerald-500" /> هاتف ولي الأمر
+                            <div className="space-y-3">
+                                <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2 mr-1">
+                                    <Phone size={14} className="text-emerald-500" /> هاتف ولي الأمر (لإرسال النتائج)
                                 </label>
                                 <input
                                     name="phone"
                                     type="tel"
                                     defaultValue={editingStudent?.phone}
-                                    className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none focus:border-gold text-white font-bold font-mono"
+                                    className="w-full px-8 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-bold font-mono transition-all"
                                     placeholder="05XXXXXXXX"
                                     dir="ltr"
                                 />
                             </div>
-                            <div className="flex gap-4 mt-10">
-                                <button type="submit" className="flex-1 py-5 bg-gold text-navy rounded-2xl font-black hover:brightness-110 shadow-xl shadow-gold/10 active:scale-95 transition-all text-xl">حفظ السجل</button>
-                                <button type="button" onClick={() => setIsModalOpen(false)} className="px-10 py-5 bg-white/5 text-slate-400 rounded-2xl font-black hover:bg-white/10 hover:text-white transition-all text-xl">إلغاء</button>
+                            <div className="flex gap-4 mt-12 py-2">
+                                <button type="submit" className="flex-1 py-6 bg-indigo-600 text-white rounded-[1.5rem] font-black hover:bg-indigo-700 shadow-2xl shadow-indigo-100 active:scale-95 transition-all text-xl">حفظ البيانات</button>
+                                <button type="button" onClick={() => setIsModalOpen(false)} className="px-12 py-6 bg-slate-100 text-slate-500 rounded-[1.5rem] font-black hover:bg-slate-200 transition-all text-xl">تجاهل</button>
                             </div>
                         </form>
                     </div>

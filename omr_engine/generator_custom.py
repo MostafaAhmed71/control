@@ -76,7 +76,7 @@ def draw_header(img, draw, student_info, cfg):
     HDR_H     = 290
     HDR_LEFT  = MARGIN
     HDR_RIGHT = WIDTH - MARGIN
-    LOGO_GAP  = 30
+    LOGO_GAP  = 150  # gap from header edge — moved further inward
 
     draw.rectangle([HDR_LEFT, HDR_TOP, HDR_RIGHT, HDR_TOP + HDR_H], outline=BLACK, width=3)
 
@@ -317,19 +317,38 @@ def generate_personalized_sheet(student_info, template_config=None, num_question
 
 
 def create_bulk_pdf(students_list, template_config=None, output_pdf="omr_custom_batch.pdf"):
-    cfg      = {**DEFAULT_CONFIG, **(template_config or {})}
-    pdf      = FPDF(unit="pt", format=(WIDTH, HEIGHT))
-    temp_dir = "temp_sheets_custom"
-    if not os.path.exists(temp_dir):
-        os.makedirs(temp_dir)
-
+    """In-memory PDF generation — no disk writes for individual sheets."""
+    import io as _io
+    cfg = {**DEFAULT_CONFIG, **(template_config or {})}
+    pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
     for idx, student in enumerate(students_list):
         num_q = student.get("num_questions", 30)
-        img      = generate_personalized_sheet(student, cfg, num_questions=num_q)
-        img_path = os.path.join(temp_dir, f"sheet_{idx}.png")
-        img.save(img_path)
+        img   = generate_personalized_sheet(student, cfg, num_questions=num_q)
+        buf   = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        buf.name = "sheet.jpg"
+        buf.seek(0)
         pdf.add_page()
-        pdf.image(img_path, 0, 0, WIDTH, HEIGHT)
-
+        pdf.image(buf, 0, 0, WIDTH, HEIGHT)
     pdf.output(output_pdf)
     return output_pdf
+
+
+def create_bulk_pdf_stream(students_list, template_config=None, output_pdf="omr_custom_batch.pdf"):
+    """Generator that yields progress dicts and finally the output path."""
+    import io as _io
+    cfg   = {**DEFAULT_CONFIG, **(template_config or {})}
+    pdf   = FPDF(unit="pt", format=(WIDTH, HEIGHT))
+    total = len(students_list)
+    for idx, student in enumerate(students_list):
+        num_q = student.get("num_questions", 30)
+        img   = generate_personalized_sheet(student, cfg, num_questions=num_q)
+        buf   = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        buf.name = "sheet.jpg"
+        buf.seek(0)
+        pdf.add_page()
+        pdf.image(buf, 0, 0, WIDTH, HEIGHT)
+        yield {"done": idx + 1, "total": total, "name": student.get("name", "")}
+    pdf.output(output_pdf)
+    yield {"finished": True, "path": output_pdf}

@@ -36,3 +36,15 @@ debug_scans
 omr_engine/debug_scans
 omr_engine/__pycache__
 omr_engine/*.jsonl
+omr_engine/temp_sheets_custom/
+omr_engine/venv/
+omr_engine/test_output.pdf
+*.png
+*.pdf
+*.jpg
+*.jpeg
+builder.log
+builder-final.log
+vite-build.log
+*.log
+!student-portal-standalone/package-lock.json

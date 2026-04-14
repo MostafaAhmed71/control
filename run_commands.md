@@ -2,7 +2,7 @@
 
 ## 1. تشغيل محرك الأوراق (OMR Engine)
 لتشغيل خادم `omr_engine`، افتح موجه الأوامر (Terminal) أو PowerShell وانتقل إلى مسار المحرك، ثم قم بتفعيل البيئة الافتراضية (venv) وتشغيل ملف `main.py` باستخدام الأوامر التالية:
-
+         
 ```powershell
 cd "G:\New folder\control\control\omr_engine"
 .\venv\Scripts\python.exe main.py

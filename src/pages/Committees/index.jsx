@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutGrid, Users, User, ArrowRightLeft, Shield, Plus, MoreVertical, Wand2, X, Edit2, Trash2 } from 'lucide-react';
+import { LayoutGrid, Users, User, ArrowRightLeft, Shield, Plus, MoreVertical, Wand2, X, Edit2, Trash2, Home, Landmark, UserCheck, AlertCircle } from 'lucide-react';
 import { getStudents, saveStudent, getCommittees, saveCommittee, deleteCommittee } from '../../utils/dataService';
 
 const Committees = () => {
@@ -41,7 +41,7 @@ const Committees = () => {
     };
 
     const handleDelete = async (id) => {
-        if (window.confirm('هل أنت متأكد من حذف هذه اللجنة؟')) {
+        if (window.confirm('هل أنت متأكد من حذف هذه اللجنة بشكل دائم؟')) {
             await deleteCommittee(id);
             fetchData();
         }
@@ -49,7 +49,7 @@ const Committees = () => {
 
     const handleAutoDistribute = async () => {
         if (!selectedGrade || !selectedCommittee) {
-            alert('يرجى اختيار الصف واللجنة');
+            alert('يرجى اختيار الصف واللجنة المستهدفة');
             return;
         }
 
@@ -59,7 +59,7 @@ const Committees = () => {
         const availableSpace = committeeObj.capacity - currentInCommittee;
 
         if (availableSpace <= 0) {
-            alert('هذه اللجنة ممتلئة بالفعل');
+            alert('هذه اللجنة ممتلئة بالكامل');
             return;
         }
 
@@ -67,7 +67,7 @@ const Committees = () => {
         const toDistribute = unboundStudents.slice(0, availableSpace);
 
         if (toDistribute.length === 0) {
-            alert('لا يوجد طلاب غير موزعين في هذا الصف');
+            alert('لم يتم العثور على طلاب غير موزعين في هذا الصف');
             return;
         }
 
@@ -75,7 +75,7 @@ const Committees = () => {
             await saveStudent({ ...student, committee: committeeNameOnly });
         }
 
-        alert(`تم توزيع ${toDistribute.length} طالب بنجاح`);
+        alert(`تم توزيع ${toDistribute.length} طالباً على اللجنة بنجاح`);
         setIsDistributeOpen(false);
         fetchData();
     };
@@ -83,91 +83,138 @@ const Committees = () => {
     const grades = [...new Set(students.map(s => s.grade))];
 
     return (
-        <div className="space-y-6">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div>
-                    <h1 className="text-2xl font-bold text-gray-800">إدارة اللجان</h1>
-                    <p className="text-gray-500 text-sm mt-1">تجهيز وتوزيع الطلاب على القاعات الامتحانية</p>
+        <div className="space-y-10 animate-in fade-in duration-700 font-alexandria pb-20">
+            {/* ── Page Header ── */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 px-2">
+                <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 bg-indigo-600 rounded-2.5xl flex items-center justify-center text-white shadow-xl shadow-indigo-100">
+                            <Landmark size={24} />
+                        </div>
+                        <h1 className="text-3xl font-black text-slate-900 font-header tracking-tight">إدارة اللجان المركزية</h1>
+                    </div>
+                    <p className="text-slate-400 font-medium text-sm flex items-center gap-2">
+                        <LayoutGrid size={16} className="text-indigo-400" />
+                        تجهيز القاعات الامتحانية، توزيع الكتل الطلابية، وإسناد المهمام الإشرافية
+                    </p>
                 </div>
 
-                <div className="flex gap-3">
+                <div className="flex items-center gap-3">
                     <button
                         onClick={() => setIsDistributeOpen(true)}
-                        className="flex items-center gap-2 px-6 py-2 bg-indigo-50 text-indigo-700 rounded-xl hover:bg-indigo-100 border border-indigo-100 transition-all font-bold"
+                        className="px-6 py-4 bg-white text-indigo-600 rounded-3xl font-black text-sm hover:bg-slate-50 transition-all shadow-sm border border-slate-100 flex items-center gap-3"
                     >
-                        <Wand2 size={18} />
-                        <span>توزيع تلقائي</span>
+                        <Wand2 size={20} className="text-indigo-500" /> توزيع ذكي
                     </button>
                     <button
                         onClick={() => { setEditingCommittee(null); setIsModalOpen(true); }}
-                        className="flex items-center gap-2 px-6 py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all shadow-md active:scale-95"
+                        className="px-8 py-4 bg-indigo-600 text-white rounded-3xl font-black text-sm hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 active:scale-95 flex items-center gap-3"
                     >
-                        <Plus size={18} />
-                        <span>إضافة لجنة</span>
+                        <Plus size={20} /> إضافة لجنة جديدة
                     </button>
                 </div>
             </div>
 
+            {/* ── Stats Summary Area ── */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 px-2">
+               <div className="luxury-card p-6 bg-white border-none shadow-premium flex flex-col">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">إجمالي اللجان</span>
+                  <span className="text-3xl font-black text-slate-900 font-header">{committees.length}</span>
+               </div>
+               <div className="luxury-card p-6 bg-white border-none shadow-premium flex flex-col">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">الطاقة الاستيعابية</span>
+                  <span className="text-3xl font-black text-slate-900 font-header">{committees.reduce((sum, c) => sum + c.capacity, 0)}</span>
+               </div>
+               <div className="luxury-card p-6 bg-white border-none shadow-premium flex flex-col">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">الطلاب الموزعون</span>
+                  <span className="text-3xl font-black text-indigo-600 font-header">{students.filter(s => s.committee).length}</span>
+               </div>
+               <div className="luxury-card p-6 bg-white border-none shadow-premium flex flex-col">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">بانتظار التوزيع</span>
+                  <span className="text-3xl font-black text-rose-500 font-header">{students.filter(s => !s.committee).length}</span>
+               </div>
+            </div>
+
+            {/* ── Committees Grid ── */}
             {loading ? (
-                <div className="p-20 text-center text-gray-400">جاري التحميل...</div>
+                <div className="flex flex-col items-center justify-center py-40 opacity-20">
+                    <Landmark size={64} className="animate-pulse mb-4 text-slate-400" />
+                    <p className="font-black text-xl text-slate-600 tracking-tighter uppercase">تجميع بيانات اللجان والقاعات...</p>
+                </div>
             ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 px-2">
                     {committees.map((committee) => {
                         const committeeNameOnly = committee.name.replace('لجنة ', '');
                         const studentCount = students.filter(s => s.committee === committeeNameOnly).length;
                         const occupancy = (studentCount / committee.capacity) * 100;
 
                         return (
-                            <div key={committee.id} className="glass-morphism rounded-3xl border border-gray-100 p-6 shadow-sm hover:shadow-xl transition-all group">
-                                <div className="flex justify-between items-start mb-4">
-                                    <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
-                                        <LayoutGrid size={24} />
+                            <div key={committee.id} className="luxury-card group p-0 overflow-hidden bg-white border-none shadow-premium transition-all duration-500 hover:-translate-y-2">
+                                {/* Card Header */}
+                                <div className="p-8 pb-4 flex justify-between items-start">
+                                    <div className="flex items-center gap-5">
+                                        <div className="w-16 h-16 bg-slate-50 rounded-[1.5rem] flex items-center justify-center text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white transition-all duration-500 shadow-sm">
+                                            <LayoutGrid size={32} />
+                                        </div>
+                                        <div>
+                                            <h3 className="text-2xl font-black text-slate-800 font-header leading-tight">{committee.name}</h3>
+                                            <div className="flex items-center gap-2 text-slate-400 font-bold text-xs mt-1">
+                                                <Home size={14} className="text-indigo-400" />
+                                                <span>قاعة: {committee.room}</span>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <div className="flex gap-2 translate-x-4 opacity-0 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-300">
                                         <button
                                             onClick={() => { setEditingCommittee(committee); setIsModalOpen(true); }}
-                                            className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                                            className="p-3 bg-indigo-50 text-indigo-600 rounded-2xl hover:bg-slate-900 hover:text-white transition-all"
                                         >
                                             <Edit2 size={18} />
                                         </button>
                                         <button
                                             onClick={() => handleDelete(committee.id)}
-                                            className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                            className="p-3 bg-rose-50 text-rose-500 rounded-2xl hover:bg-rose-500 hover:text-white transition-all shadow-sm shadow-rose-100"
                                         >
                                             <Trash2 size={18} />
                                         </button>
                                     </div>
                                 </div>
 
-                                <h3 className="text-xl font-bold text-gray-800 mb-1">{committee.name}</h3>
-                                <div className="flex items-center gap-2 text-gray-400 text-sm mb-4">
-                                    <Shield size={14} />
-                                    <span>{committee.room}</span>
-                                </div>
-
-                                <div className="space-y-4">
-                                    <div className="bg-gray-50 rounded-2xl p-4">
-                                        <div className="flex justify-between text-sm mb-2">
-                                            <span className="text-gray-500">إشغال اللجنة</span>
-                                            <span className="font-bold text-gray-700">{studentCount} / {committee.capacity}</span>
+                                {/* Progress Section */}
+                                <div className="p-8 pt-4 pb-4">
+                                    <div className="bg-slate-50/80 rounded-3xl p-6 border border-slate-100/50">
+                                        <div className="flex justify-between items-end mb-3">
+                                            <div>
+                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] block mb-1">نسبة الإشغال</span>
+                                                <span className="text-lg font-black text-slate-800">{studentCount} من أصل {committee.capacity}</span>
+                                            </div>
+                                            <span className={`text-xs font-black px-3 py-1 rounded-full ${occupancy > 90 ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'}`}>
+                                                %{Math.round(occupancy)}
+                                            </span>
                                         </div>
-                                        <div className="h-2 w-full bg-gray-200 rounded-full overflow-hidden">
+                                        <div className="h-3 w-full bg-slate-200 rounded-full overflow-hidden p-[2px]">
                                             <div
-                                                className={`h-full transition-all duration-500 ${occupancy > 90 ? 'bg-red-500' : 'bg-indigo-500'}`}
+                                                className={`h-full rounded-full transition-all duration-1000 shadow-sm ${occupancy > 90 ? 'bg-gradient-to-l from-rose-500 to-rose-400' : 'bg-gradient-to-l from-indigo-600 to-indigo-400'}`}
                                                 style={{ width: `${occupancy}%` }}
                                             ></div>
                                         </div>
                                     </div>
+                                </div>
 
-                                    <div className="flex items-center gap-3 pt-2">
-                                        <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500">
-                                            <User size={16} />
-                                        </div>
-                                        <div>
-                                            <p className="text-xs text-gray-400">المراقب</p>
-                                            <p className="text-sm font-semibold text-gray-700">{committee.monitor}</p>
-                                        </div>
-                                    </div>
+                                {/* Monitor Info */}
+                                <div className="px-8 pb-8 pt-4">
+                                     <div className="flex items-center justify-between p-4 bg-white border border-slate-100 rounded-2xl">
+                                         <div className="flex items-center gap-3">
+                                             <div className="w-10 h-10 rounded-xl bg-violet-50 flex items-center justify-center text-violet-500">
+                                                 <UserCheck size={20} />
+                                             </div>
+                                             <div>
+                                                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">المراقب المسؤول</p>
+                                                 <p className="text-sm font-black text-slate-700 leading-tight mt-0.5">{committee.monitor}</p>
+                                             </div>
+                                         </div>
+                                         <ChevronRight size={18} className="text-slate-200" />
+                                     </div>
                                 </div>
                             </div>
                         );
@@ -175,86 +222,111 @@ const Committees = () => {
                 </div>
             )}
 
+            {/* ── Main Modal (Committee Setup) ── */}
             {isModalOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
-                    <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-200">
-                        <div className="p-6 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                            <h3 className="text-lg font-bold text-gray-800">
-                                {editingCommittee ? 'تعديل بيانات اللجنة' : 'إضافة لجنة جديدة'}
-                            </h3>
-                            <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in duration-300">
+                    <div className="bg-white w-full max-w-xl rounded-[2.5rem] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 border-none relative">
+                        <div className="absolute top-0 right-0 w-full h-1.5 bg-gradient-to-l from-indigo-500 via-violet-500 to-indigo-500"></div>
+                        
+                        <div className="p-10 pb-6 border-b border-slate-50 flex items-center justify-between">
+                            <div>
+                                <h3 className="text-2xl font-black text-slate-900 font-header leading-tight">
+                                    {editingCommittee ? 'تحديث بيانات اللجنة' : 'إنشاء لجنة جديدة'}
+                                </h3>
+                                <p className="text-slate-400 font-medium text-xs mt-1">أدخل البيانات الأساسية للقاعة والمشرف المسؤول</p>
+                            </div>
+                            <button onClick={() => setIsModalOpen(false)} className="p-4 bg-slate-50 text-slate-400 hover:bg-rose-50 hover:text-rose-500 rounded-2xl transition-all shadow-sm">
+                                <X size={20} />
+                            </button>
                         </div>
-                        <form onSubmit={handleSave} className="p-6 space-y-4">
-                            <div className="space-y-1.5">
-                                <label className="text-sm font-semibold text-gray-700">اسم اللجنة</label>
-                                <input required name="name" defaultValue={editingCommittee?.name} placeholder="مثال: لجنة 1" className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100" />
+
+                        <form onSubmit={handleSave} className="p-10 space-y-8">
+                            <div className="space-y-3">
+                                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">مسمى اللجنة الرسمي</label>
+                                <input required name="name" defaultValue={editingCommittee?.name} placeholder="مثال: لجنة رقم (١)" className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 font-black text-slate-800 transition-all font-header" />
                             </div>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-1.5">
-                                    <label className="text-sm font-semibold text-gray-700">القاعة / الغرفة</label>
-                                    <input required name="room" defaultValue={editingCommittee?.room} className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100" />
+
+                            <div className="grid grid-cols-2 gap-6">
+                                <div className="space-y-3">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">القاعة أو الغرفة</label>
+                                    <input required name="room" defaultValue={editingCommittee?.room} placeholder="مثال: المختبر ١" className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 font-black text-slate-800 transition-all font-header text-center" />
                                 </div>
-                                <div className="space-y-1.5">
-                                    <label className="text-sm font-semibold text-gray-700">السعة</label>
-                                    <input required type="number" name="capacity" defaultValue={editingCommittee?.capacity} className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100" />
+                                <div className="space-y-3">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">السعة القصوى</label>
+                                    <input required type="number" name="capacity" defaultValue={editingCommittee?.capacity} className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 font-black text-slate-800 transition-all font-header text-center" />
                                 </div>
                             </div>
-                            <div className="space-y-1.5">
-                                <label className="text-sm font-semibold text-gray-700">اسم المراقب الرئيسي</label>
-                                <input required name="monitor" defaultValue={editingCommittee?.monitor} className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100" />
+
+                            <div className="space-y-3">
+                                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">اسم المراقب الرئيسي</label>
+                                <input required name="monitor" defaultValue={editingCommittee?.monitor} placeholder="الاسم ثلاثي..." className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 font-black text-slate-800 transition-all font-header" />
                             </div>
-                            <div className="flex gap-3 mt-6">
-                                <button type="submit" className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-100">حفظ</button>
-                                <button type="button" onClick={() => setIsModalOpen(false)} className="px-6 py-3 bg-gray-100 text-gray-700 rounded-xl font-bold hover:bg-gray-200">إلغاء</button>
+
+                            <div className="flex gap-4 mt-6">
+                                <button type="submit" className="flex-1 py-5 bg-indigo-600 text-white rounded-3xl font-black text-lg hover:bg-indigo-700 shadow-xl shadow-indigo-100 flex items-center justify-center gap-3 active:scale-95 transition-all">اعتماد البيانات</button>
+                                <button type="button" onClick={() => setIsModalOpen(false)} className="px-10 py-5 bg-slate-100 text-slate-500 rounded-3xl font-black hover:bg-slate-200 transition-all text-lg">إلغاء</button>
                             </div>
                         </form>
                     </div>
                 </div>
             )}
 
+            {/* ── Auto-Distribute Modal ── */}
             {isDistributeOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
-                    <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-200">
-                        <div className="p-6 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                            <h3 className="text-lg font-bold text-gray-800">توزيع الطلاب تلقائياً</h3>
-                            <button onClick={() => setIsDistributeOpen(false)} className="text-gray-400 hover:text-gray-600 text-2xl">×</button>
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in duration-300">
+                    <div className="bg-white w-full max-w-xl rounded-[2.5rem] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 border-none relative">
+                        <div className="absolute top-0 right-0 w-full h-1.5 bg-gradient-to-l from-indigo-500 via-violet-500 to-indigo-500"></div>
+
+                        <div className="p-10 pb-6 border-b border-slate-50 flex items-center justify-between">
+                            <div>
+                                <h3 className="text-2xl font-black text-slate-900 font-header leading-tight">التوزيع الذكي القواتي</h3>
+                                <p className="text-slate-400 font-medium text-xs mt-1">توزيع كتل الطلاب على القاعات المتاحة بضغطة زر واحدة</p>
+                            </div>
+                            <button onClick={() => setIsDistributeOpen(false)} className="p-4 bg-slate-50 text-slate-400 hover:bg-rose-50 hover:text-rose-500 rounded-2xl transition-all shadow-sm">
+                                <X size={20} />
+                            </button>
                         </div>
-                        <div className="p-6 space-y-4">
-                            <div className="space-y-1.5">
-                                <label className="text-sm font-semibold text-gray-700">اختر الصف</label>
+                        
+                        <div className="p-10 space-y-8">
+                            <div className="space-y-3">
+                                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">تحديد الصف الدراسي</label>
                                 <select
-                                    className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100 bg-white"
+                                    className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 font-black text-sm text-slate-800 appearance-none"
                                     value={selectedGrade}
                                     onChange={(e) => setSelectedGrade(e.target.value)}
                                 >
-                                    <option value="">-- اختر الصف --</option>
+                                    <option value="">-- اختر الصف الدراسي المستهدف --</option>
                                     {grades.map(g => <option key={g} value={g}>{g}</option>)}
                                 </select>
                             </div>
-                            <div className="space-y-1.5">
-                                <label className="text-sm font-semibold text-gray-700">توزيع في</label>
+
+                            <div className="space-y-3">
+                                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">توجيه التوزيع إلى</label>
                                 <select
-                                    className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100 bg-white"
+                                    className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 font-black text-sm text-slate-800 appearance-none"
                                     value={selectedCommittee}
                                     onChange={(e) => setSelectedCommittee(e.target.value)}
                                 >
-                                    <option value="">-- اختر اللجنة --</option>
-                                    {committees.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                    <option value="">-- حدد اللجنة المستقبلة --</option>
+                                    {committees.map(c => <option key={c.id} value={c.id}>{c.name} (المتبقي: {c.capacity - students.filter(s => s.committee === c.name.replace('لجنة ', '')).length} مقعد)</option>)}
                                 </select>
                             </div>
 
-                            <div className="bg-indigo-50 p-4 rounded-xl text-xs text-indigo-700 leading-relaxed">
-                                سيقوم النظام بتوزيع الطلاب غير الموزعين من الصف المختار إلى اللجنة المختارة حتى اكتمال سعتها.
+                            <div className="bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100 flex gap-4">
+                                <AlertCircle size={24} className="text-indigo-500 shrink-0" />
+                                <p className="text-xs font-bold text-indigo-700 leading-relaxed">
+                                    سيقوم النظام بتوزيع الطلاب غير الموزعين من الصف المختار تلقائياً حتى اكتمال السعة الاستيعابية للجنة. يرجى التأكد من سعة اللجنة المختارة قبل البدء.
+                                </p>
                             </div>
 
-                            <div className="flex gap-3 mt-6">
+                            <div className="flex gap-4 mt-6">
                                 <button
                                     onClick={handleAutoDistribute}
-                                    className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-100"
+                                    className="flex-1 py-5 bg-indigo-600 text-white rounded-3xl font-black text-lg hover:bg-indigo-700 shadow-xl shadow-indigo-100 flex items-center justify-center gap-3 active:scale-95 transition-all"
                                 >
-                                    تأكيد التوزيع
+                                    <Wand2 size={24} /> تأكيد وتوزيع الطلاب
                                 </button>
-                                <button type="button" onClick={() => setIsDistributeOpen(false)} className="px-6 py-3 bg-gray-100 text-gray-700 rounded-xl font-bold hover:bg-gray-200 transition-colors">إلغاء</button>
+                                <button type="button" onClick={() => setIsDistributeOpen(false)} className="px-10 py-5 bg-slate-100 text-slate-500 rounded-3xl font-black hover:bg-slate-200 transition-all text-lg">تجاهل</button>
                             </div>
                         </div>
                     </div>

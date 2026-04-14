@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { MapPin, Building, Search, X, Plus, Edit2, Trash2, Download, Upload } from 'lucide-react';
+import { MapPin, Building, Search, X, Plus, Edit2, Trash2, Download, Upload, Map as MapIcon, Navigation, Layers, CheckCircle2 } from 'lucide-react';
 import { getLocations, saveLocation, deleteLocation } from '../../utils/dataService';
 
 const CommitteeLocations = () => {
@@ -54,129 +54,184 @@ const CommitteeLocations = () => {
     };
 
     return (
-        <div className="space-y-6">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div>
-                    <h1 className="text-2xl font-bold text-gray-800">أماكن اللجان</h1>
-                    <p className="text-gray-500 text-sm mt-1">إدارة خرائط وتوزيع لجان الاختبارات في المباني</p>
+        <div className="space-y-10 animate-in fade-in duration-700 font-alexandria pb-20">
+            {/* ── Page Header ── */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 px-2">
+                <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 bg-indigo-600 rounded-2.5xl flex items-center justify-center text-white shadow-xl shadow-indigo-100">
+                            <MapIcon size={24} />
+                        </div>
+                        <h1 className="text-3xl font-black text-slate-900 font-header tracking-tight">تخطيط أماكن اللجان</h1>
+                    </div>
+                    <p className="text-slate-400 font-medium text-sm flex items-center gap-2">
+                        <Navigation size={16} className="text-indigo-400" />
+                        تعريف المواقع الجغرافية، المباني، والقاعات الدراسية المخصصة للاختبارات
+                    </p>
                 </div>
 
-                <div className="flex gap-3">
+                <div className="flex items-center gap-3">
                     <button
                         onClick={handleExport}
-                        className="flex items-center gap-2 px-6 py-2 bg-white border border-gray-200 text-gray-600 rounded-xl hover:bg-gray-50 transition-all shadow-sm"
+                        className="px-6 py-4 bg-white text-slate-600 rounded-3xl font-black text-sm hover:bg-slate-50 transition-all shadow-sm border border-slate-100 flex items-center gap-3"
                     >
-                        <Download size={18} />
-                        <span>تصدير البيانات</span>
+                        <Download size={20} className="text-indigo-500" /> تصدير الخريطة
                     </button>
                     <button
                         onClick={() => { setEditingLocation(null); setIsModalOpen(true); }}
-                        className="flex items-center gap-2 px-6 py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all shadow-md active:scale-95"
+                        className="px-8 py-4 bg-indigo-600 text-white rounded-3xl font-black text-sm hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 active:scale-95 flex items-center gap-3"
                     >
-                        <Plus size={18} />
-                        <span>إضافة موقع</span>
+                        <Plus size={20} /> إضافة قاعة جديدة
                     </button>
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="glass-morphism rounded-3xl border border-gray-100 p-8 flex flex-col items-center justify-center text-center space-y-4">
-                    <div className="w-20 h-20 bg-indigo-50 rounded-full flex items-center justify-center text-indigo-600">
-                        <Building size={40} />
-                    </div>
-                    <div>
-                        <h3 className="text-xl font-bold text-gray-800">خريطة المدرسة التفاعلية</h3>
-                        <p className="text-gray-500 text-sm mt-2 max-w-xs">يمكنك هنا رفع أو تصميم خريطة توضيحية لسهولة توجيه الطلاب والمراقبين.</p>
-                    </div>
-                    <button
-                        onClick={() => alert('سيتم تفعيل ميزة رفع الخرائط قريباً')}
-                        className="flex items-center gap-2 px-6 py-2 border border-indigo-200 text-indigo-600 rounded-xl hover:bg-indigo-50 transition-colors font-bold text-sm"
-                    >
-                        <Upload size={16} />
-                        <span>رفع ملف الخريطة</span>
-                    </button>
-                </div>
-
-                <div className="glass-morphism rounded-3xl border border-gray-100 overflow-hidden shadow-sm">
-                    <div className="p-5 border-b border-gray-100 bg-gray-50/50 flex justify-between items-center">
-                        <h3 className="font-bold text-gray-800">قائمة المواقع</h3>
-                        <Search size={18} className="text-gray-400" />
-                    </div>
-                    <div className="divide-y divide-gray-100">
-                        {loading ? (
-                            <div className="p-10 text-center text-gray-400">جاري التحميل...</div>
-                        ) : locations.length === 0 ? (
-                            <div className="p-10 text-center text-gray-400">لا توجد مواقع مسجلة</div>
-                        ) : locations.map((loc) => (
-                            <div key={loc.id} className="p-5 hover:bg-indigo-50/30 transition-colors flex justify-between items-center group">
-                                <div className="space-y-1">
-                                    <div className="font-bold text-gray-800 flex items-center gap-2">
-                                        {loc.committee}
-                                        <button
-                                            onClick={() => { setEditingLocation(loc); setIsModalOpen(true); }}
-                                            className="opacity-0 group-hover:opacity-100 p-1 text-blue-600 hover:bg-blue-50 rounded transition-all"
-                                        >
-                                            <Edit2 size={12} />
-                                        </button>
-                                        <button
-                                            onClick={() => handleDelete(loc.id)}
-                                            className="opacity-0 group-hover:opacity-100 p-1 text-red-600 hover:bg-red-50 rounded transition-all"
-                                        >
-                                            <Trash2 size={12} />
-                                        </button>
-                                    </div>
-                                    <div className="flex items-center gap-4 text-xs text-gray-500">
-                                        <span className="flex items-center gap-1"><Building size={12} /> {loc.building}</span>
-                                        <span className="flex items-center gap-1"><MapPin size={12} /> الدور {loc.floor}</span>
-                                    </div>
-                                </div>
-                                <div className="text-right">
-                                    <span className="text-sm font-black text-indigo-600">غرفة {loc.room}</span>
-                                    <div className="text-[10px] text-gray-400 mt-1">السعة: {loc.capacity} طالب</div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            </div>
-
-            {isModalOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
-                    <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-200">
-                        <div className="p-6 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                            <h3 className="text-lg font-bold text-gray-800">
-                                {editingLocation ? 'تعديل بيانات الموقع' : 'إضافة موقع جديد'}
-                            </h3>
-                            <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            {/* ── Visual Grid ── */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 px-2">
+                
+                {/* Visual Map/Hero Card */}
+                <div className="luxury-card p-10 bg-gradient-to-br from-indigo-900 to-slate-900 text-white border-none shadow-2xl relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-500/10 rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl group-hover:bg-indigo-500/20 transition-all duration-1000"></div>
+                    <div className="relative z-10 flex flex-col items-center justify-center text-center space-y-8 h-full min-h-[400px]">
+                        <div className="w-32 h-32 bg-white/5 backdrop-blur-3xl rounded-[2.5rem] border border-white/10 flex items-center justify-center text-white shadow-inner animate-pulse">
+                            <Building size={64} className="opacity-80" />
                         </div>
-                        <form onSubmit={handleSave} className="p-6 space-y-4">
-                            <div className="space-y-1.5">
-                                <label className="text-sm font-semibold text-gray-700">اسم اللجنة</label>
-                                <input required name="committee" defaultValue={editingLocation?.committee} className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100" />
+                        <div className="space-y-3">
+                            <h3 className="text-3xl font-black font-header tracking-tight">خريطة المنشآت الذكية</h3>
+                            <p className="text-indigo-200/80 font-medium text-sm max-w-sm mx-auto leading-relaxed">
+                                قم برفع مسقط أفقي للمنشأة أو خريطة طوارئ لسهولة توجيه المراقبين والطلاب إلى قاعاتهم في اليوم الأول.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => alert('ميزة خرائط المباني (Building Maps) ستكون متاحة في التحديث القادم')}
+                            className="flex items-center gap-3 px-10 py-5 bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/20 text-white rounded-[2rem] transition-all font-black text-sm group/btn"
+                        >
+                            <Upload size={20} className="group-hover/btn:-translate-y-1 transition-transform" />
+                            <span>رفع مخطط المبنى</span>
+                        </button>
+                    </div>
+                    {/* Decorative Map Grid overlay */}
+                    <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-10 pointer-events-none"></div>
+                </div>
+
+                {/* Locations Explorer */}
+                <div className="luxury-card p-0 flex flex-col bg-white border-none shadow-premium overflow-hidden">
+                    <div className="p-8 border-b border-slate-50 bg-slate-50/30 flex justify-between items-center">
+                        <div className="flex items-center gap-3">
+                           <Layers size={20} className="text-indigo-500" />
+                           <h3 className="font-black text-slate-800 font-header">مستكشف القاعات</h3>
+                        </div>
+                        <div className="relative">
+                           <Search size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" />
+                           <input type="text" placeholder="بحث سريع..." className="pr-10 pl-4 py-2 bg-white border border-slate-100 rounded-2xl text-xs font-bold outline-none focus:ring-4 focus:ring-indigo-50/50" />
+                        </div>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto custom-scrollbar max-h-[500px]">
+                        {loading ? (
+                            <div className="flex flex-col items-center justify-center py-40 opacity-20">
+                                <Layers size={48} className="animate-pulse mb-2" />
                             </div>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-1.5">
-                                    <label className="text-sm font-semibold text-gray-700">المبنى</label>
-                                    <input required name="building" defaultValue={editingLocation?.building} className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100" />
+                        ) : locations.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center py-40 space-y-4 opacity-40">
+                                <MapPin size={48} className="text-slate-200" />
+                                <p className="font-black text-slate-400 uppercase tracking-widest text-xs">لم يتم تعريف أي قاعات بعد</p>
+                            </div>
+                        ) : (
+                            <div className="divide-y divide-slate-50">
+                                {locations.map((loc) => (
+                                    <div key={loc.id} className="p-8 hover:bg-indigo-50/30 transition-all flex justify-between items-center group relative">
+                                        <div className="space-y-3 relative z-10">
+                                            <div className="flex items-center gap-3">
+                                                <h4 className="text-xl font-black text-slate-800 font-header">{loc.committee}</h4>
+                                                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all translate-x-4 group-hover:translate-x-0">
+                                                    <button
+                                                        onClick={() => { setEditingLocation(loc); setIsModalOpen(true); }}
+                                                        className="p-2 bg-white text-indigo-600 rounded-xl hover:bg-slate-900 hover:text-white transition-all shadow-sm border border-slate-100"
+                                                    >
+                                                        <Edit2 size={14} />
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleDelete(loc.id)}
+                                                        className="p-2 bg-white text-rose-500 rounded-xl hover:bg-rose-500 hover:text-white transition-all shadow-sm border border-slate-100"
+                                                    >
+                                                        <Trash2 size={14} />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                                                <span className="flex items-center gap-2 bg-slate-50 px-3 py-1 rounded-full"><Building size={14} className="text-indigo-400" /> {loc.building}</span>
+                                                <span className="flex items-center gap-2 bg-slate-50 px-3 py-1 rounded-full"><MapPin size={14} className="text-violet-400" /> الدور: {loc.floor}</span>
+                                            </div>
+                                        </div>
+                                        <div className="text-right space-y-1 relative z-10">
+                                            <div className="px-4 py-2 bg-indigo-600/5 text-indigo-600 rounded-2xl border border-indigo-100">
+                                                <span className="text-lg font-black font-header tracking-tight">غرفة {loc.room}</span>
+                                            </div>
+                                            <div className="text-[10px] font-black text-slate-400 flex items-center justify-end gap-1 opacity-60">
+                                                <Users size={12} />
+                                                <span>السعة: {loc.capacity} طلاب</span>
+                                            </div>
+                                        </div>
+                                        {/* Decorative side accent */}
+                                        <div className="absolute left-0 top-0 bottom-0 w-1 bg-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+
+            {/* ── Location Modal ── */}
+            {isModalOpen && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in duration-300">
+                    <div className="bg-white w-full max-w-xl rounded-[2.5rem] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 border-none relative">
+                        <div className="absolute top-0 right-0 w-full h-1.5 bg-gradient-to-l from-indigo-500 via-violet-500 to-indigo-500"></div>
+
+                        <div className="p-10 pb-6 border-b border-slate-50 flex items-center justify-between">
+                            <div>
+                                <h3 className="text-2xl font-black text-slate-900 font-header leading-tight">
+                                    {editingLocation ? 'تعديل مكان اللجنة' : 'إضافة موقع لجنة جديد'}
+                                </h3>
+                                <p className="text-slate-400 font-medium text-xs mt-1">حدد التوزيع الجغرافي للجنة داخل مباني المدرسة</p>
+                            </div>
+                            <button onClick={() => setIsModalOpen(false)} className="p-4 bg-slate-50 text-slate-400 hover:bg-rose-50 hover:text-rose-500 rounded-2xl transition-all shadow-sm">
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSave} className="p-10 space-y-8">
+                            <div className="space-y-3">
+                                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">اللجنة المستهدفة</label>
+                                <input required name="committee" defaultValue={editingLocation?.committee} placeholder="مثال: لجنة رقم ١" className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 font-black text-slate-800 transition-all font-header" />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-6">
+                                <div className="space-y-3">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">المبنى / الجناح</label>
+                                    <input required name="building" defaultValue={editingLocation?.building} placeholder="مثال: المبنى أ" className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 font-black text-slate-800 transition-all font-header text-center" />
                                 </div>
-                                <div className="space-y-1.5">
-                                    <label className="text-sm font-semibold text-gray-700">الدور</label>
-                                    <input required name="floor" defaultValue={editingLocation?.floor} className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100" />
+                                <div className="space-y-3">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">رقم الدور الدراسي</label>
+                                    <input required name="floor" defaultValue={editingLocation?.floor} placeholder="مثال: الأرضي" className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 font-black text-slate-800 transition-all font-header text-center" />
                                 </div>
                             </div>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-1.5">
-                                    <label className="text-sm font-semibold text-gray-700">رقم/اسم الغرفة</label>
-                                    <input required name="room" defaultValue={editingLocation?.room} className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100" />
+
+                            <div className="grid grid-cols-2 gap-6">
+                                <div className="space-y-3">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">رقم/اسم الغرفة</label>
+                                    <input required name="room" defaultValue={editingLocation?.room} className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 font-black text-slate-800 transition-all font-header text-center" />
                                 </div>
-                                <div className="space-y-1.5">
-                                    <label className="text-sm font-semibold text-gray-700">السعة الاستيعابية</label>
-                                    <input required type="number" name="capacity" defaultValue={editingLocation?.capacity} className="w-full px-4 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100" />
+                                <div className="space-y-3">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">السعة الاستيعابية</label>
+                                    <input required type="number" name="capacity" defaultValue={editingLocation?.capacity} className="w-full px-6 py-4 bg-slate-50 border border-transparent rounded-2.5xl outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 font-black text-slate-800 transition-all font-header text-center" />
                                 </div>
                             </div>
-                            <div className="flex gap-3 mt-6">
-                                <button type="submit" className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-100">حفظ</button>
-                                <button type="button" onClick={() => setIsModalOpen(false)} className="px-6 py-3 bg-gray-100 text-gray-700 rounded-xl font-bold hover:bg-gray-200">إلغاء</button>
+
+                            <div className="flex gap-4 mt-6">
+                                <button type="submit" className="flex-1 py-5 bg-indigo-600 text-white rounded-3xl font-black text-lg hover:bg-indigo-700 shadow-xl shadow-indigo-100 flex items-center justify-center gap-3 active:scale-95 transition-all">تحديث الموقع</button>
+                                <button type="button" onClick={() => setIsModalOpen(false)} className="px-10 py-5 bg-slate-100 text-slate-500 rounded-3xl font-black hover:bg-slate-200 transition-all text-lg">إلغاء</button>
                             </div>
                         </form>
                     </div>

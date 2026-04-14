@@ -14,12 +14,13 @@ import PhotoRenamer from './pages/PhotoRenamer';
 import OMRScanner from './pages/OMRScanner';
 import OMRExams from './pages/OMRExams';
 import OMRResults from './pages/OMRResults';
+import ApprovedResults from './pages/ApprovedResults';
 import GradeRecording from './pages/GradeRecording';
 import OMRDesigner from './pages/OMRDesigner';
 import StudentNotifier from './pages/StudentNotifier';
 import Settings from './pages/Settings';
 import SystemSelector from './components/SystemSelector';
-
+import StudentPortal from './pages/StudentPortal';
 
 // Placeholder components
 import { getStudents, getCommittees, getObservers, clearAllData, getAppSettings } from './utils/dataService';
@@ -47,90 +48,104 @@ const Dashboard = ({ activeSystem }) => {
   const isGrading = activeSystem === 'grading';
 
   return (
-    <div className="p-8 space-y-8 animate-fade-in text-slate-800">
-      <div className="flex justify-between items-center bg-white p-8 rounded-3xl border border-gray-100 shadow-xl">
+    <div className="p-4 md:p-8 space-y-8 animate-fade-in text-slate-800">
+      {/* Welcome Banner */}
+      <div className="luxury-card p-8 flex flex-col md:flex-row justify-between items-center gap-6 bg-gradient-to-br from-white to-slate-50 border-none">
         <div>
-          <h1 className="text-4xl font-black tracking-tight text-slate-900 uppercase">
-            {isGrading ? 'نظام التصحيح' : 'كنترول'} <span className="gold-text">نخبة الشمال</span>
+          <h1 className="text-3xl font-black tracking-tight text-slate-900 font-header leading-tight">
+             مرحباً بك في <span className="gold-accent underline decoration-gold/20">نخبة الشمال</span>
           </h1>
-          <p className="text-slate-500 text-sm mt-2 font-medium tracking-wide">
-            {isGrading ? 'إدارة شؤون الطلاب والرصد الآلي' : (appConfig?.platformName || 'مدارس نخبة الشمال الأهلية والعالمية')}
+          <p className="text-slate-500 text-sm mt-3 font-medium tracking-wide max-w-lg">
+            {isGrading 
+              ? "نظام الرصد الذكي والتصحيح الآلي للطلاب. يمكنك مراقبة الأداء وتصدير النتائج بكل سهولة." 
+              : (appConfig?.platformName || "نظام الكنترول المتكامل لإدارة اللجان وأرقام الجلوس.")}
           </p>
         </div>
         <button
           onClick={handleClear}
-          className="flex items-center gap-3 px-6 py-3 bg-red-50 text-red-600 border border-red-100 rounded-2xl hover:bg-red-600 hover:text-white transition-all text-sm font-bold shadow-sm active:scale-95"
+          className="flex items-center gap-3 px-8 py-4 bg-red-50 text-red-600 border border-red-100 rounded-2xl hover:bg-red-600 hover:text-white transition-all text-sm font-bold shadow-sm active:scale-95 group"
         >
-          <Trash2 size={20} />
+          <Trash2 size={20} className="group-hover:rotate-12 transition-transform" />
           <span>مسح السجلات</span>
         </button>
       </div>
 
+      {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-        {/* Card 1: Students (Common) */}
-        <div className={`${isGrading ? 'bg-indigo-600' : 'bg-slate-900'} p-8 rounded-[2.5rem] shadow-2xl border-b-4 border-gold group hover:scale-[1.02] transition-all duration-500 relative overflow-hidden`}>
-          <div className="flex justify-between items-start">
+        {/* Card 1: Students */}
+        <div className="luxury-card p-6 group relative overflow-hidden bg-white border-l-4 border-l-indigo-500">
+          <div className="absolute -right-4 -top-4 w-20 h-20 bg-indigo-50 rounded-full opacity-40 group-hover:scale-150 transition-transform duration-700"></div>
+          <div className="flex justify-between items-start relative z-10">
             <div>
-              <h3 className="text-white/70 text-sm mb-2 uppercase tracking-[0.2em] font-black group-hover:text-white transition-colors">إجمالي الطلاب</h3>
-              <p className="text-6xl font-black text-white">{stats.students}</p>
+              <h3 className="text-slate-400 text-[10px] mb-2 uppercase tracking-[0.2em] font-black font-header">إجمالي الطلاب</h3>
+              <p className="text-4xl font-black text-slate-900 tracking-tighter">{stats.students}</p>
             </div>
-            <div className="p-4 bg-white/10 rounded-2xl text-white">
-                <Users size={32} />
+            <div className="p-3.5 bg-indigo-50 text-indigo-600 rounded-xl shadow-sm">
+                <Users size={28} />
             </div>
           </div>
-          <div className="mt-6 text-xs font-bold text-white/80 border border-white/20 inline-block px-4 py-1.5 rounded-full backdrop-blur-sm italic">مدير الطلاب</div>
+          <div className="mt-8 flex items-center gap-2">
+             <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
+             <span className="text-[10px] font-bold text-slate-400 tracking-widest uppercase">متصلون الآن بقاعدة البيانات</span>
+          </div>
         </div>
         
-        {/* Card 2: Committees or OMR */}
-        <div className="bg-white p-8 rounded-[2.5rem] shadow-xl border-b-4 border-gray-100 group border-t border-l border-r hover:border-gold/30 transition-all">
-          <div className="flex justify-between items-start">
+        {/* Card 2: Committees/Exams */}
+        <div className="luxury-card p-6 group relative overflow-hidden bg-white border-l-4 border-l-amber-500">
+          <div className="absolute -right-4 -top-4 w-20 h-20 bg-amber-50 rounded-full opacity-40 group-hover:scale-150 transition-transform duration-700"></div>
+          <div className="flex justify-between items-start relative z-10">
             <div>
-              <h3 className="text-slate-400 text-sm mb-2 uppercase tracking-[0.2em] font-black group-hover:text-indigo-600 transition-colors">
+              <h3 className="text-slate-400 text-[10px] mb-2 uppercase tracking-[0.2em] font-black font-header">
                 {isGrading ? 'اختبارات OMR' : 'لجان الاختبار'}
               </h3>
-              <p className="text-6xl font-black text-slate-900">
+              <p className="text-4xl font-black text-slate-900 tracking-tighter">
                 {isGrading ? '-' : stats.committees}
               </p>
             </div>
-            <div className="p-4 bg-gray-50 rounded-2xl text-slate-400 group-hover:text-indigo-600 transition-colors">
-                {isGrading ? <ScanLine size={32} /> : <UsersRound size={32} />}
+            <div className="p-3.5 bg-amber-50 text-amber-600 rounded-xl shadow-sm">
+                {isGrading ? <ScanLine size={28} /> : <UsersRound size={28} />}
             </div>
           </div>
-          <div className="mt-6 text-xs font-bold text-slate-500 bg-gray-100 inline-block px-4 py-1.5 rounded-full">
-            {isGrading ? 'نظام التصحيح الآلي' : 'جاهز للطباعة'}
+          <div className="mt-8">
+            <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-3 py-1 rounded-full uppercase tracking-wider">
+               {isGrading ? 'نظام التصحيح الآلي' : 'جاهز للطباعة والارشفة'}
+            </span>
           </div>
         </div>
 
-        {/* Card 3: Observers or Grades */}
-        <div className="bg-white p-8 rounded-[2.5rem] shadow-xl border-b-4 border-gray-100 group border-t border-l border-r hover:border-gold/30 transition-all">
-          <div className="flex justify-between items-start">
+        {/* Card 3: Observers/Notifier */}
+        <div className="luxury-card p-6 group relative overflow-hidden bg-white border-l-4 border-l-emerald-500">
+          <div className="absolute -right-4 -top-4 w-20 h-20 bg-emerald-50 rounded-full opacity-40 group-hover:scale-150 transition-transform duration-700"></div>
+          <div className="flex justify-between items-start relative z-10">
             <div>
-              <h3 className="text-slate-400 text-sm mb-2 uppercase tracking-[0.2em] font-black group-hover:text-indigo-600 transition-colors">
+              <h3 className="text-slate-400 text-[10px] mb-2 uppercase tracking-[0.2em] font-black font-header">
                 {isGrading ? 'مركز الإشعارات' : 'الكادر التعليمي'}
               </h3>
-              <p className="text-6xl font-black text-slate-900">
+              <p className="text-4xl font-black text-slate-900 tracking-tighter">
                 {isGrading ? '-' : stats.observers}
               </p>
             </div>
-            <div className="p-4 bg-gray-50 rounded-2xl text-slate-400 group-hover:text-indigo-600 transition-colors">
-                {isGrading ? <Send size={32} /> : <UserCheck size={32} />}
+            <div className="p-3.5 bg-emerald-50 text-emerald-600 rounded-xl shadow-sm">
+                {isGrading ? <Send size={28} /> : <UserCheck size={28} />}
             </div>
           </div>
-          <div className="mt-6 text-xs font-bold text-slate-500 bg-gray-100 inline-block px-4 py-1.5 rounded-full">
-            {isGrading ? 'نتائج الطلاب' : 'نظام الحضور'}
+          <div className="mt-8">
+            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-full uppercase tracking-wider">
+               {isGrading ? 'سجل النتائج والتواصل' : 'مدير الحضور والغياب'}
+            </span>
           </div>
         </div>
       </div>
 
       {stats.students === 0 && (
-        <div className="bg-white p-10 rounded-[2.5rem] flex gap-8 items-center animate-pop-in border border-gray-100 shadow-xl">
-          <div className="w-20 h-20 bg-gold rounded-3xl flex items-center justify-center flex-shrink-0 shadow-[0_10px_30px_rgba(212,175,55,0.3)] text-white">
-            <AlertTriangle size={40} />
+        <div className="luxury-card p-12 flex flex-col md:flex-row gap-10 items-center animate-slide-up bg-white border-none">
+          <div className="w-24 h-24 bg-indigo-50 rounded-[2rem] flex items-center justify-center flex-shrink-0 shadow-xl shadow-indigo-100/50 text-indigo-600">
+            <AlertTriangle size={48} />
           </div>
-          <div>
-            <h4 className="font-black text-slate-900 text-2xl mb-2 italic tracking-tight">نخبة الشمال بانتظار المدخلات...</h4>
+          <div className="text-center md:text-right">
+            <h4 className="font-header font-black text-slate-900 text-3xl mb-3 tracking-tight">النظام جاهز للبدء...</h4>
             <p className="text-slate-500 text-lg font-medium leading-relaxed max-w-2xl">
-              النظام جاهز للعمل. يرجى البدء بعملية <span className="text-indigo-600 font-bold underline decoration-gold/50">الاستيراد الملكي</span> للطلاب لتنشيط أدوات {isGrading ? 'الرصد والتصحيح' : 'توزيع اللجان'}.
+              لم نجد أي بيانات مسجلة حالياً. يرجى البدء بعملية <span className="text-indigo-600 font-bold underline decoration-indigo-200 underline-offset-4">استيراد الطلاب</span> لتفعيل كافة أدوات {isGrading ? 'الرصد والتصحيح الآلي' : 'توزيع اللجان والتقارير'}.
             </p>
           </div>
         </div>
@@ -147,17 +162,22 @@ const Header = () => {
   }, []);
 
   return (
-    <header className="h-24 px-10 flex items-center justify-between sticky top-0 z-40 bg-white/80 border-b border-gray-100 backdrop-blur-xl shadow-sm">
-      <div className="flex items-center gap-4">
-        <div className="w-1.5 h-8 bg-gold rounded-full"></div>
-        <h1 className="text-2xl font-black text-slate-900 tracking-tighter">منصة <span className="gold-text">نخبة الشمال</span></h1>
-      </div>
-      <div className="flex items-center space-x-8 space-x-reverse">
-        <div className="flex flex-col items-end">
-          <span className="text-[11px] text-gold font-black uppercase tracking-[0.25em]">مدير المدرسة</span>
-          <span className="text-base font-bold text-slate-800">{config?.managerName || 'الأستاذ محمد نصر الدين'}</span>
+    <header className="h-20 px-10 flex items-center justify-between sticky top-0 z-40 bg-white/80 border-b border-gray-50 backdrop-blur-xl shadow-[0_2px_15px_rgba(0,0,0,0.02)]">
+      <div className="flex items-center gap-6">
+        <div className="flex items-center gap-2">
+           <div className="w-2 h-2 rounded-full bg-gold"></div>
+           <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
         </div>
-        <div className="w-14 h-14 rounded-2xl bg-indigo-50 border-2 border-indigo-100 shadow-sm flex items-center justify-center text-xl font-black text-indigo-600 transform hover:rotate-6 transition-all cursor-pointer">
+        <h1 className="text-xl font-black text-slate-800 tracking-tight font-header">
+           منصة <span className="gold-accent">نخبة الشمال</span> الذكية
+        </h1>
+      </div>
+      <div className="flex items-center gap-8">
+        <div className="hidden md:flex flex-col items-end">
+          <span className="text-[10px] text-slate-400 font-black uppercase tracking-[0.3em] mb-1">مدير المدرسة</span>
+          <span className="text-sm font-bold text-slate-700">{config?.managerName || 'الأستاذ محمد نصر الدين'}</span>
+        </div>
+        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-50 to-white border border-indigo-100 shadow-sm flex items-center justify-center text-lg font-black text-indigo-600 transform hover:scale-105 transition-all cursor-pointer ring-4 ring-slate-50">
           {config?.managerName ? config.managerName.charAt(0) : 'م'}
         </div>
       </div>
@@ -167,6 +187,58 @@ const Header = () => {
 
 
 
+const AdminLayout = ({ activeSystem, handleSystemSelect, setActiveSystem }) => {
+  if (!activeSystem) {
+    return <SystemSelector onSelect={handleSystemSelect} />;
+  }
+
+  return (
+    <div className="min-h-screen flex" dir="rtl">
+      <Sidebar 
+        className="z-50" 
+        activeSystem={activeSystem} 
+        onSwitchSystem={() => setActiveSystem(null)} 
+      />
+      <main className="flex-1 mr-64 min-h-screen relative">
+        <Header />
+
+        <div className="p-4 sm:p-5 lg:p-8 pb-24">
+          <Routes>
+            <Route path="/" element={<Dashboard activeSystem={activeSystem} />} />
+            {/* Grading System Routes */}
+            {activeSystem === 'grading' ? (
+              <>
+                <Route path="/students" element={<StudentList />} />
+                <Route path="/omr-scanner/:examId?" element={<OMRScanner />} />
+                <Route path="/omr-exams" element={<OMRExams />} />
+                <Route path="/omr-results" element={<OMRResults />} />
+                <Route path="/approved-results" element={<ApprovedResults />} />
+                <Route path="/grade-recording" element={<GradeRecording />} />
+                <Route path="/omr-designer" element={<OMRDesigner />} />
+                <Route path="/notifier" element={<StudentNotifier />} />
+                <Route path="/photo-renamer" element={<PhotoRenamer />} />
+              </>
+            ) : (
+              <>
+                {/* Control System Routes */}
+                <Route path="/seating-cards" element={<SeatingCards />} />
+                <Route path="/committees" element={<Committees />} />
+                <Route path="/print-sheets" element={<PrintSheets />} />
+                <Route path="/attendance" element={<Attendance />} />
+                <Route path="/observers" element={<Observers />} />
+                <Route path="/committee-observers" element={<CommitteeObservers />} />
+                <Route path="/committee-seating" element={<CommitteeSeating />} />
+                <Route path="/locations" element={<CommitteeLocations />} />
+              </>
+            )}
+            <Route path="/settings" element={<Settings />} />
+          </Routes>
+        </div>
+      </main>
+    </div>
+  );
+};
+
 function App() {
   const [activeSystem, setActiveSystem] = React.useState(localStorage.getItem('activeSystem'));
 
@@ -175,54 +247,18 @@ function App() {
     setActiveSystem(system);
   };
 
-  if (!activeSystem) {
-    return <SystemSelector onSelect={handleSystemSelect} />;
-  }
-
   return (
     <Router>
-      <div className="min-h-screen flex" dir="rtl">
-        <Sidebar 
-          className="z-50" 
-          activeSystem={activeSystem} 
-          onSwitchSystem={() => setActiveSystem(null)} 
-        />
-        <main className="flex-1 mr-64 min-h-screen relative">
-          <Header />
-
-          <div className="p-4 sm:p-6 lg:p-10 pb-24">
-            <Routes>
-              <Route path="/" element={<Dashboard activeSystem={activeSystem} />} />
-              {/* Grading System Routes */}
-              {activeSystem === 'grading' ? (
-                <>
-                  <Route path="/students" element={<StudentList />} />
-                  <Route path="/omr-scanner" element={<OMRScanner />} />
-                  <Route path="/omr-exams" element={<OMRExams />} />
-                  <Route path="/omr-results" element={<OMRResults />} />
-                  <Route path="/grade-recording" element={<GradeRecording />} />
-                  <Route path="/omr-designer" element={<OMRDesigner />} />
-                  <Route path="/notifier" element={<StudentNotifier />} />
-                  <Route path="/photo-renamer" element={<PhotoRenamer />} />
-                </>
-              ) : (
-                <>
-                  {/* Control System Routes */}
-                  <Route path="/seating-cards" element={<SeatingCards />} />
-                  <Route path="/committees" element={<Committees />} />
-                  <Route path="/print-sheets" element={<PrintSheets />} />
-                  <Route path="/attendance" element={<Attendance />} />
-                  <Route path="/observers" element={<Observers />} />
-                  <Route path="/committee-observers" element={<CommitteeObservers />} />
-                  <Route path="/committee-seating" element={<CommitteeSeating />} />
-                  <Route path="/locations" element={<CommitteeLocations />} />
-                </>
-              )}
-              <Route path="/settings" element={<Settings />} />
-            </Routes>
-          </div>
-        </main>
-      </div>
+      <Routes>
+        <Route path="/portal/*" element={<StudentPortal />} />
+        <Route path="/*" element={
+          <AdminLayout 
+            activeSystem={activeSystem} 
+            handleSystemSelect={handleSystemSelect} 
+            setActiveSystem={setActiveSystem} 
+          />
+        } />
+      </Routes>
     </Router>
   );
 }

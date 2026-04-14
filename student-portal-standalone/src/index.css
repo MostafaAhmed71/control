@@ -1,0 +1,26 @@
+@import url('https://fonts.googleapis.com/css2?family=Alexandria:wght@300;400;500;600;700;800;900&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --font-header: 'Alexandria', sans-serif;
+  --font-body: 'IBM Plex Sans Arabic', sans-serif;
+  --color-primary: #4f46e5;
+  --color-bg-base: #F8FAFC;
+  direction: rtl;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--color-bg-base);
+  font-family: var(--font-body);
+}
+
+.luxury-card {
+  background: white;
+  border-radius: 2.5rem;
+  box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.05);
+}
+
+@media print {
+  .print-hidden { display: none !important; }
+}
