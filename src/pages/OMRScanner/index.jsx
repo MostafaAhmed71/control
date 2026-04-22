@@ -6,7 +6,8 @@ import {
   Settings, Info, AlertTriangle, CheckCircle2, Play, Download, History, Clock, Fingerprint,
   RefreshCcw, UserCheck, ArrowRight, Image as ImageIcon
 } from 'lucide-react';
-import { getOmrExams, saveOmrResult, getStudents, OMR_API_BASE, WHATSAPP_API_BASE } from '../../utils/dataService';
+import { getOmrExams, saveOmrResult, getStudents, saveStudent, OMR_API_BASE, WHATSAPP_API_BASE } from '../../utils/dataService';
+import { useToast } from '../../components/Toast';
 
 /* ── Audit Trail Timeline Component ── */
 const AuditTrailModal = ({ isOpen, onClose, auditData, studentName }) => {
@@ -144,6 +145,77 @@ function formatReviewReasonTags(tags) {
   if (!tags?.length) return 'يُنصح بمراجعة يدوية';
   return tags.map(t => REVIEW_REASON_AR[t] || t).join(' · ');
 }
+
+const normalizeStudentId = (value) => {
+  const raw = (value ?? '').toString().trim();
+  if (!raw) return '';
+
+  const arabicIndicDigits = '٠١٢٣٤٥٦٧٨٩';
+  const easternArabicDigits = '۰۱۲۳۴۵۶۷۸۹';
+
+  const latinDigits = raw
+    .split('')
+    .map((ch) => {
+      const idxA = arabicIndicDigits.indexOf(ch);
+      if (idxA >= 0) return String(idxA);
+      const idxE = easternArabicDigits.indexOf(ch);
+      if (idxE >= 0) return String(idxE);
+      return ch;
+    })
+    .join('');
+
+  // Keep digits and letters only to reduce OCR noise.
+  const alnum = latinDigits.replace(/[^a-zA-Z0-9]/g, '');
+  return alnum.replace(/^0+/, '').trim();
+};
+
+const findStudentByDetectedId = (studentsList, detectedId) => {
+  const normalizedDetected = normalizeStudentId(detectedId);
+  if (!normalizedDetected) return null;
+
+  return studentsList.find((s) => {
+    const seat = normalizeStudentId(s.seatNumber || s.seat_number);
+    const natId = normalizeStudentId(s.nationalId || s.national_id);
+    const studentId = normalizeStudentId(s.studentId || s.student_id);
+    const dbId = normalizeStudentId(s.id);
+    return (
+      (seat && seat === normalizedDetected) ||
+      (natId && natId === normalizedDetected) ||
+      (studentId && studentId === normalizedDetected) ||
+      (dbId && dbId === normalizedDetected)
+    );
+  }) || null;
+};
+
+const MANUAL_STUDENT_MAP_KEY = 'omr_manual_student_map';
+
+const getManualStudentMap = () => {
+  try {
+    const raw = localStorage.getItem(MANUAL_STUDENT_MAP_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const saveManualStudentMap = (mapObj) => {
+  try {
+    localStorage.setItem(MANUAL_STUDENT_MAP_KEY, JSON.stringify(mapObj || {}));
+  } catch {
+    // ignore storage quota errors
+  }
+};
+
+const hashFileSha256 = async (file) => {
+  if (!file || !window?.crypto?.subtle) return '';
+  const buf = await file.arrayBuffer();
+  const digest = await window.crypto.subtle.digest('SHA-256', buf);
+  const hex = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return hex;
+};
 
 /* ── Session Analytics Dashboard ── */
 const SessionDashboard = ({ items, batchTimer, onConfirmAll, onConfirmReviewed, onPrintConfirmed, safeCount, reviewCount, confirmedCount }) => {
@@ -479,6 +551,24 @@ const printResultSlip = (items, exam) => {
   win.document.close();
 };
 
+const dedupeConfirmedForPrint = (list) => {
+  const arr = Array.isArray(list) ? list : [];
+  const seen = new Set();
+  const out = [];
+  for (const it of arr) {
+    const r = it?.result || it;
+    if (!r) continue;
+    const sid = normalizeStudentId(r.studentId || r.detectedStudentId || r.normalizedDetectedStudentId || '');
+    const ex  = (r.examId || '').toString().trim();
+    const name = (r.studentName || '').toString().trim();
+    const key = `${ex}::${sid || name || 'unknown'}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(it);
+  }
+  return out;
+};
+
 const scanImage = async (file, template = 'default', numQuestions = 30, scanMode = 'hybrid') => {
   const fd = new FormData();
   fd.append('file', file);
@@ -498,7 +588,7 @@ const revokePreviewUrl = (url) => {
 };
 
 /* ── Card for a single scanned sheet ── */
-const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswerEdit, onSendWhatsapp, onPrint, onShowAudit, onPreview, exam }) => {
+const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswerEdit, onSendWhatsapp, onPrint, onShowAudit, onPreview, onResolveUnknown, exam }) => {
   const [expanded, setExpanded] = useState(false);
   const [editingAnswer, setEditingAnswer] = useState(null);
   const isConfirmed = item.confirmed;
@@ -507,6 +597,7 @@ const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswer
   const isRejected = decision === 'REJECTED_QUALITY';
   const mismatchWarning = item.result?.qualityFlags?.includes('num_questions_mismatch');
   const lowQualityWarning = item.result?.qualityFlags?.includes('quality_gate_reject');
+  const isUnknownStudent = item.result?.studentName === 'طالب غير معرف';
 
   return (
     <div className={`luxury-card border-none transition-all overflow-hidden bg-white group/card
@@ -528,6 +619,16 @@ const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswer
         <div className="flex-1 min-w-0">
           <div className="font-header font-black text-slate-800 truncate flex items-center gap-2 text-lg">
             {item.result?.studentName || (item.fromScanner ? `ورقة مسح ${item.page || ''}` : item.file?.name || 'ورقة')}
+            {isUnknownStudent && (
+              <button
+                type="button"
+                onClick={() => onResolveUnknown?.(item.id)}
+                className="px-2 py-1 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg text-[10px] font-black hover:bg-amber-100 transition-colors"
+                title="تعيين الطالب يدوياً"
+              >
+                تعديل بيانات الطالب
+              </button>
+            )}
             {item.fromScanner && (
               <span className="text-[9px] font-black px-2 py-1 bg-indigo-50 text-indigo-600 rounded-full border border-indigo-100 uppercase tracking-widest">Scanner</span>
             )}
@@ -538,6 +639,18 @@ const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswer
                 <span className="bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">{item.result.studentGrade}</span>
               )}
               <span className="font-mono tracking-widest text-slate-300">ID: {item.result.studentId}</span>
+            </div>
+          )}
+          {item.result && (
+            <div className="text-[11px] text-slate-500 font-bold mt-1.5 flex flex-wrap items-center gap-2">
+              <span className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-2 py-0.5 rounded-md">
+                رقم الطالب المقروء: <span className="font-mono">{item.result.detectedStudentId || '—'}</span>
+              </span>
+              {item.result.normalizedDetectedStudentId && (
+                <span className="bg-slate-100 text-slate-600 border border-slate-200 px-2 py-0.5 rounded-md">
+                  بعد التطبيع: <span className="font-mono">{item.result.normalizedDetectedStudentId}</span>
+                </span>
+              )}
             </div>
           )}
           
@@ -977,10 +1090,99 @@ const CalibrationModal = ({ show, onClose, scannerAvailable, onRefresh, exam }) 
   );
 };
 
+/* ── Unknown Student Resolver Modal ── */
+const UnknownStudentModal = ({ show, onClose, onSave, initialValues }) => {
+  const [studentName, setStudentName] = useState('');
+  const [studentId, setStudentId] = useState('');
+  const [studentGrade, setStudentGrade] = useState('');
+
+  useEffect(() => {
+    if (!show) return;
+    setStudentName(initialValues?.studentName || '');
+    setStudentId(initialValues?.studentId || '');
+    setStudentGrade(initialValues?.studentGrade || '');
+  }, [show, initialValues]);
+
+  if (!show) return null;
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!studentName.trim()) return alert('يرجى إدخال اسم الطالب');
+    if (!studentId.trim()) return alert('يرجى إدخال رقم الطالب');
+    onSave({
+      studentName: studentName.trim(),
+      studentId: studentId.trim(),
+      studentGrade: studentGrade.trim(),
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm" onClick={onClose}>
+      <form
+        onSubmit={handleSubmit}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-lg bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden"
+      >
+        <div className="p-6 bg-indigo-600 text-white flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-black">تعيين طالب غير معروف</h3>
+            <p className="text-[11px] text-indigo-100 mt-1">أدخل بيانات الطالب لتحديث الورقة الحالية</p>
+          </div>
+          <button type="button" onClick={onClose} className="p-2 rounded-xl hover:bg-white/10">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <div>
+            <label className="block text-xs font-black text-slate-500 mb-1.5">اسم الطالب</label>
+            <input
+              value={studentName}
+              onChange={(e) => setStudentName(e.target.value)}
+              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm focus:ring-2 focus:ring-indigo-300 outline-none"
+              placeholder="مثال: أحمد محمد"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-black text-slate-500 mb-1.5">رقم الطالب (ID)</label>
+              <input
+                value={studentId}
+                onChange={(e) => setStudentId(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm focus:ring-2 focus:ring-indigo-300 outline-none"
+                placeholder="مثال: 10234"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-black text-slate-500 mb-1.5">الصف</label>
+              <input
+                value={studentGrade}
+                onChange={(e) => setStudentGrade(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm focus:ring-2 focus:ring-indigo-300 outline-none"
+                placeholder="مثال: الأول ابتدائي"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="p-5 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-3">
+          <button type="button" onClick={onClose} className="px-5 py-2.5 text-slate-500 font-bold rounded-xl hover:bg-slate-100">
+            إلغاء
+          </button>
+          <button type="submit" className="px-6 py-2.5 bg-indigo-600 text-white font-black rounded-xl hover:bg-indigo-700">
+            حفظ وتحديث الورقة
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
 /* ── Main Page ── */
 const OMRScanner = () => {
   const { examId } = useParams();
   const navigate = useNavigate();
+  const toast = useToast();
   const [items, setItems] = useState([]);
   const [exams, setExams] = useState([]);
   const [filterStage, setFilterStage] = useState('All');
@@ -1009,18 +1211,26 @@ const OMRScanner = () => {
   const [auditModal, setAuditModal] = useState({ open: false, data: [], name: '' });
   const [previewItem, setPreviewItem] = useState(null);
   const [previewMode, setPreviewMode] = useState('original'); // 'original' | 'system'
+  const [unknownStudentModal, setUnknownStudentModal] = useState({
+    open: false,
+    itemId: null,
+    initialValues: { studentName: '', studentId: '', studentGrade: '' },
+  });
 
   useEffect(() => {
     (async () => {
-      const [examsData, studentsData] = await Promise.all([getOmrExams(), getStudents()]);
-      setExams(examsData);
-      setStudents(studentsData);
-      
-      // If examId is provided in URL, prioritize it
-      if (examId) {
-        setSelectedExamId(examId);
-      } else if (examsData.length > 0) {
-        setSelectedExamId(examsData[0].id);
+      try {
+        const [examsData, studentsData] = await Promise.all([getOmrExams(), getStudents()]);
+        setExams(examsData);
+        setStudents(studentsData);
+        if (examId) {
+          setSelectedExamId(examId);
+        } else if (examsData.length > 0) {
+          setSelectedExamId(examsData[0].id);
+        }
+      } catch (err) {
+        toast.error('فشل تحميل بيانات الاختبارات والطلاب. تحقق من اتصالك بالإنترنت.', 'خطأ في التحميل');
+        console.error('OMRScanner load error:', err);
       }
     })();
     checkScanner();
@@ -1080,15 +1290,26 @@ const OMRScanner = () => {
     try {
       const omrData = await scanImage(file, selectedExam?.template || 'default', selectedExam?.qCount || 30, scanMode);
       const { score, total, percentage, details } = grade(omrData.answers, selectedExam?.keys || {}, selectedExam?.weights || {});
-      const cleanId = omrData.student_id?.replace(/^0+/, '');
-      const student = students.find(s => s.id.toString() === cleanId || s.id.toString() === omrData.student_id);
+      const student = findStudentByDetectedId(students, omrData.student_id);
+      const manualMap = getManualStudentMap();
+      const mapped = extraProps?.fingerprint ? manualMap[extraProps.fingerprint] : null;
+      const resolvedByManualMap = !student && !!mapped;
+      const resolvedName = student?.name || mapped?.studentName || 'طالب غير معرف';
+      const resolvedGrade = student ? (student.grade || student.classroom || '') : (mapped?.studentGrade || '');
+      const resolvedPhone = student?.phone || '';
+      const resolvedStudentId = student
+        ? (omrData.student_id || mapped?.studentId || '')
+        : (mapped?.studentId || omrData.student_id || '');
       const result = {
         examId: selectedExamId,
         examTitle: selectedExam?.title || '',
-        studentId: omrData.student_id,
-        studentName: student?.name || 'طالب غير معروف',
-        studentGrade: student ? (student.grade || student.classroom || '') : '',
-        phone: student?.phone || '',
+        studentId: resolvedStudentId,
+        detectedStudentId: (omrData.student_id ?? '').toString().trim(),
+        normalizedDetectedStudentId: normalizeStudentId(omrData.student_id),
+        studentName: resolvedName,
+        studentGrade: resolvedGrade,
+        phone: resolvedPhone,
+        resolvedByManualMap,
         score, total, percentage, details,
         confidence: omrData.confidence || {},
         needsReviewQuestions: omrData.needs_review_questions || [],
@@ -1115,15 +1336,19 @@ const OMRScanner = () => {
   /* ── Handle file upload (existing) ── */
   const handleFiles = async (files) => {
     if (!selectedExamId) { alert('اختر الاختبار أولاً'); return; }
-    const newItems = Array.from(files).map(file => ({
-      id: nextId.current++,
-      file,
-      previewUrl: URL.createObjectURL(file),
-      loading: true,
-      result: null,
-      error: null,
-      confirmed: false,
-      fromScanner: false,
+    const newItems = await Promise.all(Array.from(files).map(async (file) => {
+      const fileHash = await hashFileSha256(file);
+      return {
+        id: nextId.current++,
+        file,
+        previewUrl: URL.createObjectURL(file),
+        loading: true,
+        result: null,
+        error: null,
+        confirmed: false,
+        fromScanner: false,
+        fingerprint: fileHash ? `upload:${fileHash}` : '',
+      };
     }));
     const batchStart = Date.now();
     setBatchTimer({
@@ -1134,7 +1359,7 @@ const OMRScanner = () => {
       lastBatchCount: batchTimer.lastBatchCount,
     });
     setItems(prev => [...prev, ...newItems]);
-    await Promise.all(newItems.map(item => processFile(item.file, item.id)));
+    await Promise.all(newItems.map(item => processFile(item.file, item.id, { fingerprint: item.fingerprint })));
     const spent = Date.now() - batchStart;
     setBatchTimer({
       running: false,
@@ -1193,10 +1418,7 @@ const OMRScanner = () => {
               const omrData = msg.data;
               received++;
               const { score, total, percentage, details } = grade(omrData.answers || {}, selectedExam?.keys || {}, selectedExam?.weights || {});
-              const cleanId = omrData.student_id?.replace(/^0+/, '');
-              const student = students.find(s =>
-                s.id.toString() === cleanId || s.id.toString() === omrData.student_id
-              );
+              const student = findStudentByDetectedId(students, omrData.student_id);
               const newItem = {
                 id: nextId.current++,
                 file: null,
@@ -1207,7 +1429,9 @@ const OMRScanner = () => {
                   examId: selectedExamId,
                   examTitle: selectedExam?.title || '',
                   studentId: omrData.student_id,
-                  studentName: student?.name || 'طالب غير معروف',
+                  detectedStudentId: (omrData.student_id ?? '').toString().trim(),
+                  normalizedDetectedStudentId: normalizeStudentId(omrData.student_id),
+                  studentName: student?.name || 'طالب غير معرف',
                   studentGrade: student ? (student.grade || student.classroom || '') : '',
                   phone: student?.phone || '',
                   score, total, percentage, details,
@@ -1288,7 +1512,16 @@ const OMRScanner = () => {
         }
       ],
     };
-    await saveOmrResult(approved);
+    // Build a stable, deterministic id so upsert works correctly (same student+exam = same record).
+    const stableId = `omr_${approved.examId || 'noexam'}_${(approved.studentId || 'unknown').replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`;
+    const toSave = {
+      ...approved,
+      id: approved.id || stableId,
+      // Strip large base64 blobs to keep Supabase rows lean
+      systemViewImage: undefined,
+      reviewRois: undefined,
+    };
+    await saveOmrResult(toSave);
     setItems(prev => prev.map(it => it.id === itemId ? { ...it, confirmed: true, result: approved } : it));
   };
 
@@ -1341,7 +1574,14 @@ const OMRScanner = () => {
         approvedAt: new Date().toISOString(),
         audit: [...(it.result.audit || []), { action: 'approve', at: new Date().toISOString(), note: 'bulk safe approve' }],
       };
-      await saveOmrResult(approved);
+      const stableId = `omr_${approved.examId || 'noexam'}_${(approved.studentId || 'unknown').replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`;
+      const toSave = {
+        ...approved,
+        id: approved.id || stableId,
+        systemViewImage: undefined,
+        reviewRois: undefined,
+      };
+      await saveOmrResult(toSave);
     }
     setItems(prev => prev.map(it => (
       toConfirm.some(c => c.id === it.id) ? { ...it, confirmed: true } : it
@@ -1372,7 +1612,8 @@ const OMRScanner = () => {
         approvedAt: new Date().toISOString(),
         audit: [...(it.result.audit || []), { action: 'approve', at: new Date().toISOString(), note: 'bulk reviewed approve' }],
       };
-      await saveOmrResult(approved);
+      const stableId = `omr_${approved.examId || 'noexam'}_${(approved.studentId || 'unknown').replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`;
+      await saveOmrResult({ ...approved, id: approved.id || stableId, systemViewImage: undefined, reviewRois: undefined });
     }
 
     setItems(prev => prev.map(it => (
@@ -1455,6 +1696,130 @@ const OMRScanner = () => {
       open: true,
       data: item.result.audit || [],
       name: item.result.studentName
+    });
+  };
+
+  const handleResolveUnknown = (itemId) => {
+    const item = items.find(it => it.id === itemId);
+    if (!item?.result) return;
+    setUnknownStudentModal({
+      open: true,
+      itemId,
+      initialValues: {
+        studentName: item.result.studentName === 'طالب غير معرف' ? '' : (item.result.studentName || ''),
+        studentId: item.result.detectedStudentId || item.result.studentId || '',
+        studentGrade: item.result.studentGrade || '',
+      },
+    });
+  };
+
+  const handleSaveUnknownStudent = async ({ studentName, studentId, studentGrade }) => {
+    const normalizedInputId = normalizeStudentId(studentId);
+    const targetItem = items.find(it => it.id === unknownStudentModal.itemId);
+
+    setItems(prev => prev.map(it => {
+      if (it.id !== unknownStudentModal.itemId || !it.result) return it;
+      return {
+        ...it,
+        result: {
+          ...it.result,
+          studentName,
+          studentId,
+          studentGrade,
+          normalizedDetectedStudentId: normalizedInputId || it.result.normalizedDetectedStudentId || '',
+          audit: [
+            ...(it.result.audit || []),
+            {
+              ts: new Date().toISOString(),
+              action: 'edit',
+              user: 'المصحح (تعيين طالب يدوي)',
+              details: `تم تعيين الطالب يدوياً: ${studentName} (ID: ${studentId}${studentGrade ? `، الصف: ${studentGrade}` : ''})`
+            }
+          ],
+        }
+      };
+    }));
+
+    const existingStudent = students.find((s) => {
+      const seat = normalizeStudentId(s.seatNumber || s.seat_number);
+      const natId = normalizeStudentId(s.nationalId || s.national_id);
+      const stId = normalizeStudentId(s.studentId || s.student_id);
+      const dbId = normalizeStudentId(s.id);
+      return (
+        (normalizedInputId && seat === normalizedInputId) ||
+        (normalizedInputId && natId === normalizedInputId) ||
+        (normalizedInputId && stId === normalizedInputId) ||
+        (normalizedInputId && dbId === normalizedInputId)
+      );
+    });
+
+    const studentToPersist = existingStudent
+      ? {
+          ...existingStudent,
+          name: studentName,
+          grade: studentGrade || existingStudent.grade || '',
+          seatNumber: existingStudent.seatNumber || existingStudent.seat_number || studentId,
+          seat_number: existingStudent.seat_number || existingStudent.seatNumber || studentId,
+          studentId: existingStudent.studentId || existingStudent.student_id || studentId,
+          student_id: existingStudent.student_id || existingStudent.studentId || studentId,
+        }
+      : {
+          id: studentId,
+          name: studentName,
+          seatNumber: studentId,
+          seat_number: studentId,
+          studentId: studentId,
+          student_id: studentId,
+          nationalId: '',
+          grade: studentGrade || '',
+          class: '',
+          committee: '',
+          phone: '',
+        };
+
+    try {
+      await saveStudent(studentToPersist);
+      setStudents(prev => {
+        const prevList = Array.isArray(prev) ? prev : [];
+        const idx = prevList.findIndex((s) => {
+          const seat = normalizeStudentId(s.seatNumber || s.seat_number);
+          const natId = normalizeStudentId(s.nationalId || s.national_id);
+          const stId = normalizeStudentId(s.studentId || s.student_id);
+          const dbId = normalizeStudentId(s.id);
+          return (
+            (normalizedInputId && seat === normalizedInputId) ||
+            (normalizedInputId && natId === normalizedInputId) ||
+            (normalizedInputId && stId === normalizedInputId) ||
+            (normalizedInputId && dbId === normalizedInputId)
+          );
+        });
+        if (idx >= 0) {
+          const updated = [...prevList];
+          updated[idx] = { ...updated[idx], ...studentToPersist };
+          return updated;
+        }
+        return [...prevList, studentToPersist];
+      });
+    } catch (e) {
+      console.error('Failed to persist manual student mapping', e);
+      alert('تم تعديل الورقة الحالية، لكن تعذر حفظ الطالب في قاعدة البيانات.');
+    }
+
+    if (targetItem?.fingerprint) {
+      const currentMap = getManualStudentMap();
+      currentMap[targetItem.fingerprint] = {
+        studentName,
+        studentId,
+        studentGrade: studentGrade || '',
+        updatedAt: new Date().toISOString(),
+      };
+      saveManualStudentMap(currentMap);
+    }
+
+    setUnknownStudentModal({
+      open: false,
+      itemId: null,
+      initialValues: { studentName: '', studentId: '', studentGrade: '' },
     });
   };
 
@@ -1567,7 +1932,7 @@ const OMRScanner = () => {
             className="p-3 bg-slate-50 border border-gray-200 rounded-xl font-bold text-sm focus:ring-2 focus:ring-indigo-400">
             {visibleExams.length === 0
               ? <option disabled value="">لا يوجد اختبارات</option>
-              : visibleExams.map(ex => <option key={ex.id} value={ex.id}>{ex.subject || ex.title} ({ex.qCount} س)</option>)
+              : visibleExams.map(ex => <option key={ex.id} value={ex.id}>{ex.title || ex.subject} ({ex.qCount} س)</option>)
             }
           </select>
         </div>
@@ -1680,7 +2045,7 @@ const OMRScanner = () => {
         batchTimer={batchTimer}
         onConfirmAll={handleConfirmAll}
         onConfirmReviewed={handleConfirmReviewed}
-        onPrintConfirmed={() => printResultSlip(items.filter(it => it.confirmed && it.result), selectedExam)}
+        onPrintConfirmed={() => printResultSlip(dedupeConfirmedForPrint(items.filter(it => it.confirmed && it.result)), selectedExam)}
         safeCount={safePendingCount}
         reviewCount={reviewPendingCount}
         confirmedCount={confirmedCount}
@@ -1701,6 +2066,7 @@ const OMRScanner = () => {
             onPrint={(it) => printResultSlip([it], selectedExam)}
             onShowAudit={handleShowAudit}
             onPreview={(it) => setPreviewItem(it)}
+            onResolveUnknown={handleResolveUnknown}
           />
         ))}
       </div>
@@ -1721,6 +2087,13 @@ const OMRScanner = () => {
         scannerAvailable={scannerAvailable}
         scannerNames={scannerNames}
         onRefresh={checkScanner}
+      />
+
+      <UnknownStudentModal
+        show={unknownStudentModal.open}
+        onClose={() => setUnknownStudentModal(prev => ({ ...prev, open: false }))}
+        onSave={handleSaveUnknownStudent}
+        initialValues={unknownStudentModal.initialValues}
       />
 
       {previewItem && (

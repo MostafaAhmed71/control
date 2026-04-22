@@ -42,6 +42,7 @@ const Sidebar = ({ activeSystem, onSwitchSystem }) => {
         { name: 'تصحيح الـ OMR', path: '/omr-scanner', icon: <ScanLine size={18} />, system: 'grading' },
         { name: 'إدارة الاختبارات', path: '/omr-exams', icon: <FileText size={18} />, system: 'grading' },
         { name: 'كشف المعتمدين', path: '/approved-results', icon: <ClipboardCheck size={18} />, system: 'grading' },
+        { name: 'الاختبارات الوهمية', path: '/mock-exams', icon: <Trophy size={18} />, system: 'grading' },
         { name: 'مصمم القوالب', path: '/omr-designer', icon: <Palette size={18} />, system: 'grading' },
         { name: 'أيقونة الرصد', path: '/grade-recording', icon: <Trophy size={18} />, system: 'grading' },
         { name: 'مركز المراسلات', path: '/notifier', icon: <Send size={18} />, system: 'grading' },

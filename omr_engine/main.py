@@ -114,8 +114,13 @@ async def generate_batch(request: BatchRequest):
 
 @app.post("/generate-batch-stream")
 async def generate_batch_stream(request: BatchRequest):
-    """Streaming version: sends NDJSON progress per sheet, then base64 PDF at the end."""
+    """Streaming version: sends NDJSON progress per sheet, then base64 PDF at the end.
+    Runs the CPU-heavy generator in a thread to avoid blocking the event loop.
+    """
     import base64 as _b64
+    import queue as _queue
+    import threading as _threading
+
     output_filename = f"batch_{request.subject}.pdf"
     student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
                       "subject": s.subject, "date": s.date, "day": s.day,
@@ -123,23 +128,39 @@ async def generate_batch_stream(request: BatchRequest):
                       "committee_number": s.committee_number,
                       "num_questions": request.num_questions}
                      for s in request.students]
-    loop = asyncio.get_event_loop()
+
+    if request.template == "nafs":
+        gen_fn = generator_nafs.create_bulk_pdf_stream
+    elif request.template == "elite":
+        gen_fn = getattr(generator_elite, "create_bulk_pdf_stream", generator_elite.create_bulk_pdf)
+    else:
+        gen_fn = getattr(generator, "create_bulk_pdf_stream", generator.create_bulk_pdf)
+
+    q = _queue.Queue()
+    _DONE_SENTINEL = object()
+
+    def _worker():
+        try:
+            for event in gen_fn(student_dicts, output_pdf=output_filename):
+                q.put(event)
+        except Exception as e:
+            q.put({"type": "error", "msg": str(e)})
+        finally:
+            q.put(_DONE_SENTINEL)
+
+    _threading.Thread(target=_worker, daemon=True).start()
 
     async def generate():
+        loop = asyncio.get_event_loop()
         try:
-            if request.template == "nafs":
-                gen_fn = generator_nafs.create_bulk_pdf_stream
-            elif request.template == "elite":
-                # elite generator may not have stream version yet, fallback
-                gen_fn = getattr(generator_elite, "create_bulk_pdf_stream",
-                                 lambda s, **kw: _sync_wrap(generator_elite.create_bulk_pdf, s, **kw))
-            else:
-                gen_fn = getattr(generator, "create_bulk_pdf_stream",
-                                 lambda s, **kw: _sync_wrap(generator.create_bulk_pdf, s, **kw))
-
-            for event in gen_fn(student_dicts, output_pdf=output_filename):
-                if event.get("finished"):
-                    # Read the final PDF and send as base64
+            while True:
+                event = await loop.run_in_executor(None, q.get)
+                if event is _DONE_SENTINEL:
+                    break
+                if isinstance(event, dict) and event.get("type") == "error":
+                    yield json.dumps(event) + "\n"
+                    break
+                if isinstance(event, dict) and event.get("finished"):
                     with open(output_filename, "rb") as f:
                         pdf_b64 = _b64.b64encode(f.read()).decode()
                     yield json.dumps({"type": "done", "pdf": pdf_b64}) + "\n"
@@ -148,7 +169,6 @@ async def generate_batch_stream(request: BatchRequest):
                                       "done": event["done"],
                                       "total": event["total"],
                                       "name": event.get("name", "")}) + "\n"
-                await asyncio.sleep(0)   # yield control to event loop
         except Exception as e:
             yield json.dumps({"type": "error", "msg": str(e)}) + "\n"
 
@@ -186,8 +206,13 @@ async def generate_custom_batch(request: CustomBatchRequest):
 
 @app.post("/generate-custom-batch-stream")
 async def generate_custom_batch_stream(request: CustomBatchRequest):
-    """Streaming version of custom batch: NDJSON progress then base64 PDF."""
+    """Streaming version of custom batch: NDJSON progress then base64 PDF.
+    Runs the CPU-heavy generator in a thread to avoid blocking the event loop.
+    """
     import base64 as _b64
+    import queue as _queue
+    import threading as _threading
+
     output_filename = f"batch_custom_{request.subject}.pdf"
     config = request.template_config or {}
     if not config.get("logoDataUrl"):
@@ -206,11 +231,32 @@ async def generate_custom_batch_stream(request: CustomBatchRequest):
                       "num_questions": request.num_questions}
                      for s in request.students]
 
-    async def generate():
+    q = _queue.Queue()
+    _DONE_SENTINEL = object()
+
+    def _worker():
         try:
             for event in generator_custom.create_bulk_pdf_stream(
                     student_dicts, template_config=config, output_pdf=output_filename):
-                if event.get("finished"):
+                q.put(event)
+        except Exception as e:
+            q.put({"type": "error", "msg": str(e)})
+        finally:
+            q.put(_DONE_SENTINEL)
+
+    _threading.Thread(target=_worker, daemon=True).start()
+
+    async def generate():
+        loop = asyncio.get_event_loop()
+        try:
+            while True:
+                event = await loop.run_in_executor(None, q.get)
+                if event is _DONE_SENTINEL:
+                    break
+                if isinstance(event, dict) and event.get("type") == "error":
+                    yield json.dumps(event) + "\n"
+                    break
+                if isinstance(event, dict) and event.get("finished"):
                     with open(output_filename, "rb") as f:
                         pdf_b64 = _b64.b64encode(f.read()).decode()
                     yield json.dumps({"type": "done", "pdf": pdf_b64}) + "\n"
@@ -219,7 +265,6 @@ async def generate_custom_batch_stream(request: CustomBatchRequest):
                                       "done": event["done"],
                                       "total": event["total"],
                                       "name": event.get("name", "")}) + "\n"
-                await asyncio.sleep(0)
         except Exception as e:
             yield json.dumps({"type": "error", "msg": str(e)}) + "\n"
 

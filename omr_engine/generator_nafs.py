@@ -262,37 +262,53 @@ def generate_personalized_sheet(student_info, filename=None):
 
 
 def create_bulk_pdf(students_list, output_pdf="omr_batch.pdf"):
-    """In-memory PDF generation — no disk writes for individual sheets."""
-    import io as _io
+    """PDF generation using temp files (fpdf 1.x compatibility)."""
+    import tempfile
     pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
     total = len(students_list)
-    for idx, student in enumerate(students_list):
-        img = generate_personalized_sheet(student)
-        buf = _io.BytesIO()
-        img.save(buf, format="JPEG", quality=95)
-        buf.name = "sheet.jpg"
-        buf.seek(0)
-        pdf.add_page()
-        pdf.image(buf, 0, 0, WIDTH, HEIGHT)
-    pdf.output(output_pdf)
+    tmp_files = []
+    try:
+        for idx, student in enumerate(students_list):
+            img = generate_personalized_sheet(student)
+            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            tmp.close()
+            img.save(tmp.name, format="JPEG", quality=95)
+            tmp_files.append(tmp.name)
+            pdf.add_page()
+            pdf.image(tmp.name, 0, 0, WIDTH, HEIGHT)
+        pdf.output(output_pdf)
+    finally:
+        for f in tmp_files:
+            try:
+                os.remove(f)
+            except Exception:
+                pass
     return output_pdf
 
 
 def create_bulk_pdf_stream(students_list, output_pdf="omr_batch.pdf"):
-    """Generator that yields progress dicts and finally the output path."""
-    import io as _io
+    """Generator: yields progress dicts then finished. Uses temp files for fpdf 1.x."""
+    import tempfile
     pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
     total = len(students_list)
-    for idx, student in enumerate(students_list):
-        img = generate_personalized_sheet(student)
-        buf = _io.BytesIO()
-        img.save(buf, format="JPEG", quality=95)
-        buf.name = "sheet.jpg"
-        buf.seek(0)
-        pdf.add_page()
-        pdf.image(buf, 0, 0, WIDTH, HEIGHT)
-        yield {"done": idx + 1, "total": total, "name": student.get("name", "")}
-    pdf.output(output_pdf)
+    tmp_files = []
+    try:
+        for idx, student in enumerate(students_list):
+            img = generate_personalized_sheet(student)
+            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            tmp.close()
+            img.save(tmp.name, format="JPEG", quality=95)
+            tmp_files.append(tmp.name)
+            pdf.add_page()
+            pdf.image(tmp.name, 0, 0, WIDTH, HEIGHT)
+            yield {"done": idx + 1, "total": total, "name": student.get("name", "")}
+        pdf.output(output_pdf)
+    finally:
+        for f in tmp_files:
+            try:
+                os.remove(f)
+            except Exception:
+                pass
     yield {"finished": True, "path": output_pdf}
 
 

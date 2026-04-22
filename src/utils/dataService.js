@@ -8,263 +8,300 @@ export const WHATSAPP_API_BASE = 'http://localhost:3001';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-export const supabase = (supabaseUrl && supabaseAnonKey) 
-    ? createClient(supabaseUrl, supabaseAnonKey) 
-    : null;
+if (!supabaseUrl || !supabaseAnonKey) {
+    console.error('❌ Supabase credentials are missing! Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file.');
+}
 
-if (supabase) {
-    console.log("⚡ Supabase Client Initialized");
-} else {
-    console.warn("⚠️ Supabase credentials missing! Using LocalStorage only.");
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+// --- Connection state (subscribable) ---
+let _connectionListeners = [];
+let _isConnected = true;
+
+export const subscribeToConnection = (fn) => {
+    _connectionListeners.push(fn);
+    return () => { _connectionListeners = _connectionListeners.filter(f => f !== fn); };
+};
+
+const _setConnected = (state) => {
+    if (_isConnected === state) return;
+    _isConnected = state;
+    _connectionListeners.forEach(fn => fn(state));
+};
+
+// --- Error class ---
+export class SupabaseError extends Error {
+    constructor(table, operation, originalMessage) {
+        super(`[${table}/${operation}]: ${originalMessage}`);
+        this.table = table;
+        this.operation = operation;
+        this.originalMessage = originalMessage;
+    }
 }
 
 // --- Generic Helpers ---
-const slimOmrResultForStorage = (item) => {
+const slimOmrResult = (item) => {
     if (!item || typeof item !== 'object') return item;
-    // Base64 images are too big for localStorage quota
-    const { systemViewImage: _drop, ...rest } = item;
+    const { systemViewImage: _a, reviewRois: _b, ...rest } = item;
     return rest;
 };
 
-function writeOmrResultsLocalStorage(slimList) {
-    try {
-        localStorage.setItem('omr_results', JSON.stringify(slimList));
-    } catch (e) {
-        console.error('LocalStorage quota exceeded for omr_results', e);
-    }
-}
+// --- Core CRUD helpers (Supabase only, throws on error) ---
 
-// --- Dynamic Query Helper ---
 const fetchCollection = async (tableName) => {
-    let dataFromNetwork = null;
-    
-    if (supabase) {
-        try {
-            const { data, error } = await supabase
-                .from(tableName)
-                .select('*');
-            
-            if (!error && data) {
-                // Map from {id, data} structure to flat object
-                dataFromNetwork = data.map(row => ({
-                    id: row.id,
-                    ...(typeof row.data === 'object' ? row.data : {})
-                }));
-            } else if (error) {
-                console.error(`Supabase error fetching ${tableName}:`, error);
-            }
-        } catch (error) {
-            console.error(`Network error fetching ${tableName}:`, error);
-        }
+    const { data, error } = await supabase
+        .from(tableName)
+        .select('*')
+        .range(0, 1999); // Safety cap: max 2000 records per fetch
+
+    if (error) {
+        _setConnected(false);
+        throw new SupabaseError(tableName, 'fetch', error.message);
     }
 
-    if (dataFromNetwork !== null) {
-        if (tableName === 'omr_results') {
-            const slim = dataFromNetwork.map(slimOmrResultForStorage);
-            writeOmrResultsLocalStorage(slim);
-            return slim;
-        }
-        localStorage.setItem(tableName, JSON.stringify(dataFromNetwork));
-        return dataFromNetwork;
-    }
-
-    const localData = localStorage.getItem(tableName);
-    return localData ? JSON.parse(localData) : [];
+    _setConnected(true);
+    return (data || []).map(row => ({
+        id: row.id,
+        ...(typeof row.data === 'object' && row.data !== null ? row.data : {}),
+    }));
 };
 
 const saveDocument = async (tableName, item) => {
     const docData = { ...item };
     if (!docData.id) {
-        docData.id = Date.now().toString() + Math.floor(Math.random() * 1000);
+        docData.id = `${Date.now()}${Math.floor(Math.random() * 10000)}`;
     }
 
-    const persisted = tableName === 'omr_results' ? slimOmrResultForStorage(docData) : docData;
+    const persisted = tableName === 'omr_results' ? slimOmrResult(docData) : docData;
 
-    // Save to Supabase
-    if (supabase) {
-        try {
-            const { error } = await supabase
-                .from(tableName)
-                .upsert({ id: persisted.id, data: persisted });
-            
-            if (error) console.error(`Supabase save error (${tableName}):`, error);
-        } catch (error) {
-            console.error(`Supabase network error (${tableName}):`, error);
-        }
+    const { error } = await supabase
+        .from(tableName)
+        .upsert({ id: String(persisted.id), data: persisted });
+
+    if (error) {
+        _setConnected(false);
+        throw new SupabaseError(tableName, 'save', error.message);
     }
 
-    // Update Local Cache
-    const localData = localStorage.getItem(tableName);
-    const list = localData ? JSON.parse(localData) : [];
-    const exists = list.some(i => i.id === persisted.id);
-    
-    let updated;
-    if (exists) {
-        updated = list.map(i => i.id === persisted.id ? { ...i, ...persisted } : i);
-    } else {
-        updated = [...list, persisted];
-    }
-
-    if (tableName === 'omr_results') {
-        const slimList = updated.map(slimOmrResultForStorage);
-        writeOmrResultsLocalStorage(slimList);
-        return slimList;
-    } else {
-        localStorage.setItem(tableName, JSON.stringify(updated));
-        return updated;
-    }
+    _setConnected(true);
+    return persisted;
 };
 
 const deleteDocument = async (tableName, id) => {
-    if (supabase) {
-        try {
-            const { error } = await supabase
-                .from(tableName)
-                .delete()
-                .eq('id', id);
-            if (error) console.error(`Supabase delete error (${tableName}):`, error);
-        } catch (error) {
-            console.error(`Supabase network error (${tableName}):`, error);
-        }
+    const { error } = await supabase
+        .from(tableName)
+        .delete()
+        .eq('id', String(id));
+
+    if (error) {
+        _setConnected(false);
+        throw new SupabaseError(tableName, 'delete', error.message);
     }
 
-    const localData = localStorage.getItem(tableName);
-    const list = localData ? JSON.parse(localData) : [];
-    const filtered = list.filter(i => i.id !== id);
-    
-    localStorage.setItem(tableName, JSON.stringify(filtered));
-    return filtered;
+    _setConnected(true);
 };
 
 // --- API Methods ---
 
-export const getCommittees = () => fetchCollection('committees');
-export const saveCommittee = (committee) => saveDocument('committees', committee);
+export const getCommittees   = () => fetchCollection('committees');
+export const saveCommittee   = (c) => saveDocument('committees', c);
 export const deleteCommittee = (id) => deleteDocument('committees', id);
 
-export const getObservers = () => fetchCollection('observers');
-export const saveObserver = (observer) => saveDocument('observers', observer);
-export const deleteObserver = (id) => deleteDocument('observers', id);
+export const getObservers    = () => fetchCollection('observers');
+export const saveObserver    = (o) => saveDocument('observers', o);
+export const deleteObserver  = (id) => deleteDocument('observers', id);
 
-export const getLocations = () => fetchCollection('locations');
-export const saveLocation = (location) => saveDocument('locations', location);
-export const deleteLocation = (id) => deleteDocument('locations', id);
+export const getLocations    = () => fetchCollection('locations');
+export const saveLocation    = (l) => saveDocument('locations', l);
+export const deleteLocation  = (id) => deleteDocument('locations', id);
 
-export const getStudents = () => fetchCollection('students');
-export const saveStudent = (student) => saveDocument('students', student);
-export const deleteStudent = (id) => deleteDocument('students', id);
+export const getStudents     = () => fetchCollection('students');
+export const saveStudent     = (s) => saveDocument('students', s);
+export const deleteStudent   = (id) => deleteDocument('students', id);
 
 export const saveStudentsBulk = async (studentList) => {
-    if (supabase) {
-        try {
-            const rows = studentList.map(s => ({
-                id: s.id || Date.now().toString() + Math.floor(Math.random() * 1000) + Math.random().toString(),
-                data: s
-            }));
-            const { error } = await supabase.from('students').upsert(rows);
-            if (error) console.error("Bulk save failed:", error);
-        } catch (e) {
-            console.error("Bulk save network error:", e);
+    const CHUNK = 100;
+    for (let i = 0; i < studentList.length; i += CHUNK) {
+        const batch = studentList.slice(i, i + CHUNK);
+        const rows = batch.map(s => ({
+            id: String(s.id || `${Date.now()}${Math.floor(Math.random() * 10000)}`),
+            data: s,
+        }));
+        const { error } = await supabase.from('students').upsert(rows);
+        if (error) {
+            _setConnected(false);
+            throw new SupabaseError('students', 'bulk-save', error.message);
         }
     }
-    localStorage.setItem('students', JSON.stringify(studentList));
+    _setConnected(true);
     return studentList;
 };
 
-// Settings are stored in a common 'settings' table with 'assignments' as ID
+// --- Assignments ---
 export const getAssignments = async () => {
-    if (supabase) {
-        try {
-            const { data, error } = await supabase
-                .from('settings')
-                .select('data')
-                .eq('id', 'assignments')
-                .single();
-            
-            if (!error && data) {
-                localStorage.setItem('assignments', JSON.stringify(data.data));
-                return data.data;
-            }
-        } catch (e) {}
+    const { data, error } = await supabase
+        .from('settings')
+        .select('data')
+        .eq('id', 'assignments')
+        .maybeSingle();
+
+    if (error) {
+        _setConnected(false);
+        throw new SupabaseError('settings/assignments', 'fetch', error.message);
     }
-    const local = localStorage.getItem('assignments');
-    return local ? JSON.parse(local) : {};
+
+    _setConnected(true);
+    if (!data) {
+        await supabase.from('settings').upsert({ id: 'assignments', data: {} });
+        return {};
+    }
+    return data.data || {};
 };
 
 export const saveAssignments = async (assignments) => {
-    if (supabase) {
-        try {
-            await supabase.from('settings').upsert({ id: 'assignments', data: assignments });
-        } catch (e) {}
+    const { error } = await supabase
+        .from('settings')
+        .upsert({ id: 'assignments', data: assignments });
+
+    if (error) {
+        _setConnected(false);
+        throw new SupabaseError('settings/assignments', 'save', error.message);
     }
-    localStorage.setItem('assignments', JSON.stringify(assignments));
+    _setConnected(true);
     return assignments;
 };
 
-// --- App Settings Methods ---
+// --- App Settings ---
+const DEFAULT_APP_SETTINGS = {
+    platformName: 'Elite Control System',
+    managerName: 'اسم المدير هنا',
+    academicWeight: '2025/2026',
+    primaryColor: '#4f46e5',
+    attendance: {
+        table: { startTop: 15, rowHeight: 2.2, nameRight: 5, seatRight: 35, indexRight: 1, gradeRight: 45, signatureRight: 55 },
+        maxRows: 25,
+    },
+    seating: {
+        name:       { top: 20, right: 10, fontSize: 1.2 },
+        seatNumber: { top: 40, right: 10, fontSize: 1.5 },
+        grade:      { top: 60, right: 10, fontSize: 1.0 },
+        committee:  { top: 80, right: 10, fontSize: 1.0 },
+    },
+    messages: {
+        committee: 'عزيزي ولي أمر الطالب {name}، موعد اختبار ابنكم في لجنة {committee}، رقم الجلوس: {seatNumber}',
+        result:    'تم إعلان نتائج {name}. يمكنك الاطلاع عليها عبر البوابة.',
+    },
+};
+
 export const getAppSettings = async () => {
-    if (supabase) {
-        try {
-            const { data, error } = await supabase
-                .from('settings')
-                .select('data')
-                .eq('id', 'app_config')
-                .single();
-            
-            if (!error && data) {
-                localStorage.setItem('app_config', JSON.stringify(data.data));
-                return data.data;
-            }
-        } catch (e) {}
+    const { data, error } = await supabase
+        .from('settings')
+        .select('data')
+        .eq('id', 'app_config')
+        .maybeSingle();
+
+    if (error) {
+        _setConnected(false);
+        throw new SupabaseError('settings/app_config', 'fetch', error.message);
     }
-    const local = localStorage.getItem('app_config');
-    const defaultData = {
-        platformName: 'Elite Control System',
-        managerName: 'اسم المدير هنا',
-        academicWeight: '2025/2026',
-        primaryColor: '#4f46e5',
-        attendance: {
-            table: { startTop: 15, rowHeight: 2.2, nameRight: 5, seatRight: 35, indexRight: 1, gradeRight: 45, signatureRight: 55 },
-            maxRows: 25
-        },
-        seating: {
-            name: { top: 20, right: 10, fontSize: 1.2 },
-            seatNumber: { top: 40, right: 10, fontSize: 1.5 },
-            grade: { top: 60, right: 10, fontSize: 1.0 },
-            committee: { top: 80, right: 10, fontSize: 1.0 }
-        },
-        messages: {
-            committee: 'عزيزي ولي أمر الطالب {name}، موعد اختبار ابنكم في لجنة {committee}، رقم الجلوس: {seatNumber}',
-            result: 'تم إعلان نتائج {name}. يمكنك الاطلاع عليها عبر البوابة.'
-        }
-    };
-    return local ? JSON.parse(local) : defaultData;
+
+    _setConnected(true);
+    if (!data) {
+        await supabase.from('settings').upsert({ id: 'app_config', data: DEFAULT_APP_SETTINGS });
+        return DEFAULT_APP_SETTINGS;
+    }
+    return { ...DEFAULT_APP_SETTINGS, ...data.data };
 };
 
 export const saveAppSettings = async (config) => {
-    if (supabase) {
-        try {
-            await supabase.from('settings').upsert({ id: 'app_config', data: config });
-        } catch (e) {}
+    const { error } = await supabase
+        .from('settings')
+        .upsert({ id: 'app_config', data: config });
+
+    if (error) {
+        _setConnected(false);
+        throw new SupabaseError('settings/app_config', 'save', error.message);
     }
-    localStorage.setItem('app_config', JSON.stringify(config));
+    _setConnected(true);
     return config;
 };
 
-// --- OMR Database Methods ---
-export const getOmrExams = () => fetchCollection('omr_exams');
-export const saveOmrExam = (exam) => saveDocument('omr_exams', exam);
-export const deleteOmrExam = (id) => deleteDocument('omr_exams', id);
+// --- OMR Subjects (persisted in Supabase) ---
+const DEFAULT_SUBJECTS = [
+    { id: '1', name: 'لغة عربية', grades: ['All'] },
+    { id: '2', name: 'رياضيات', grades: ['All'] },
+    { id: '3', name: 'علوم', grades: ['All'] },
+    { id: '4', name: 'دراسات اجتماعية', grades: ['All'] },
+    { id: '5', name: 'تربية إسلامية', grades: ['All'] },
+    { id: '6', name: 'لغة إنجليزية', grades: ['All'] },
+    { id: '7', name: 'حاسب آلي', grades: ['All'] },
+    { id: '8', name: 'تربية وطنية', grades: ['All'] },
+    { id: '9', name: 'تربية بدنية', grades: ['All'] },
+    { id: '10', name: 'تربية فنية', grades: ['All'] },
+];
 
-export const getOmrResults = () => fetchCollection('omr_results');
-export const saveOmrResult = (result) => saveDocument('omr_results', result);
+export const getOmrSubjects = async () => {
+    const { data, error } = await supabase
+        .from('settings')
+        .select('data')
+        .eq('id', 'omr_subjects')
+        .maybeSingle();
+
+    if (error) {
+        _setConnected(false);
+        throw new SupabaseError('settings/omr_subjects', 'fetch', error.message);
+    }
+
+    _setConnected(true);
+    if (!data) {
+        await supabase.from('settings').upsert({ id: 'omr_subjects', data: DEFAULT_SUBJECTS });
+        return [...DEFAULT_SUBJECTS];
+    }
+    return data.data || [...DEFAULT_SUBJECTS];
+};
+
+export const saveOmrSubjects = async (subjects) => {
+    const { error } = await supabase
+        .from('settings')
+        .upsert({ id: 'omr_subjects', data: subjects });
+
+    if (error) {
+        _setConnected(false);
+        throw new SupabaseError('settings/omr_subjects', 'save', error.message);
+    }
+    _setConnected(true);
+    return subjects;
+};
+
+// --- OMR Methods ---
+export const getOmrExams    = () => fetchCollection('omr_exams');
+export const saveOmrExam    = (e) => saveDocument('omr_exams', e);
+export const deleteOmrExam  = (id) => deleteDocument('omr_exams', id);
+
+export const getOmrResults  = () => fetchCollection('omr_results');
+export const saveOmrResult  = (r) => saveDocument('omr_results', r);
 export const deleteOmrResult = (id) => deleteDocument('omr_results', id);
 
+// --- Clear All Data (Supabase) ---
 export const clearAllData = async () => {
-    const keys = ['students', 'committees', 'observers', 'locations', 'assignments', 'omr_exams', 'omr_results'];
-    if (supabase) {
-        alert("⚠️ تنبيه: يتم مسح التخزين المحلي فقط. لمسح بيانات السحابة يرجى استخدام لوحة تحكم Supabase.");
+    if (!window.confirm('هل أنت متأكد من رغبتك في حذف جميع البيانات من قاعدة البيانات السحابية؟ لا يمكن التراجع عن هذا الإجراء.')) return;
+
+    const tables = ['students', 'committees', 'observers', 'locations', 'omr_exams', 'omr_results'];
+    const errors = [];
+
+    for (const table of tables) {
+        const { error } = await supabase.from(table).delete().neq('id', '__placeholder__');
+        if (error) errors.push(`${table}: ${error.message}`);
     }
-    keys.forEach(key => localStorage.removeItem(key));
+
+    // Reset settings to defaults
+    await supabase.from('settings').upsert({ id: 'app_config',   data: DEFAULT_APP_SETTINGS });
+    await supabase.from('settings').upsert({ id: 'assignments',  data: {} });
+    await supabase.from('settings').upsert({ id: 'omr_subjects', data: DEFAULT_SUBJECTS });
+
+    if (errors.length > 0) {
+        console.error('⚠️ بعض الجداول فشلت في الحذف:', errors);
+    }
+
     window.location.reload();
 };

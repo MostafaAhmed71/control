@@ -21,29 +21,35 @@ import StudentNotifier from './pages/StudentNotifier';
 import Settings from './pages/Settings';
 import SystemSelector from './components/SystemSelector';
 import StudentPortal from './pages/StudentPortal';
+import MockExams from './pages/MockExams';
+import { ToastProvider, useToast } from './components/Toast';
 
-// Placeholder components
-import { getStudents, getCommittees, getObservers, clearAllData, getAppSettings } from './utils/dataService';
-import { Trash2, AlertTriangle, Users, UsersRound, UserCheck, ScanLine, Send } from 'lucide-react';
+import { getStudents, getCommittees, getObservers, clearAllData, getAppSettings, subscribeToConnection } from './utils/dataService';
+import { Trash2, AlertTriangle, Users, UsersRound, UserCheck, ScanLine, Send, WifiOff, Wifi } from 'lucide-react';
 
 const Dashboard = ({ activeSystem }) => {
   const [stats, setStats] = React.useState({ students: 0, committees: 0, observers: 0 });
   const [appConfig, setAppConfig] = React.useState(null);
+  const [loadError, setLoadError] = React.useState(false);
+  const toast = useToast();
 
   React.useEffect(() => {
     const fetchData = async () => {
-      const [s, c, o, config] = await Promise.all([getStudents(), getCommittees(), getObservers(), getAppSettings()]);
-      setStats({ students: s.length, committees: c.length, observers: o.length });
-      setAppConfig(config);
+      try {
+        const [s, c, o, config] = await Promise.all([getStudents(), getCommittees(), getObservers(), getAppSettings()]);
+        setStats({ students: s.length, committees: c.length, observers: o.length });
+        setAppConfig(config);
+        setLoadError(false);
+      } catch (err) {
+        setLoadError(true);
+        toast.error('تعذّر الاتصال بقاعدة البيانات. تحقق من اتصالك بالإنترنت.', 'خطأ في التحميل');
+        console.error('Dashboard load error:', err);
+      }
     };
     fetchData();
   }, [activeSystem]);
 
-  const handleClear = () => {
-    if (confirm('هل أنت متأكد من رغبتك في حذف جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء.')) {
-      clearAllData();
-    }
-  };
+  const handleClear = () => clearAllData();
 
   const isGrading = activeSystem === 'grading';
 
@@ -137,7 +143,19 @@ const Dashboard = ({ activeSystem }) => {
         </div>
       </div>
 
-      {stats.students === 0 && (
+      {loadError && (
+        <div className="luxury-card p-6 flex items-center gap-5 bg-rose-50 border border-rose-100 border-none">
+          <div className="w-12 h-12 bg-rose-100 rounded-2xl flex items-center justify-center text-rose-600 shrink-0">
+            <WifiOff size={24} />
+          </div>
+          <div>
+            <p className="font-black text-rose-800 font-header">تعذّر الاتصال بقاعدة البيانات</p>
+            <p className="text-rose-600 text-sm font-bold mt-1">تأكد من اتصالك بالإنترنت وأن خدمة Supabase تعمل بشكل صحيح.</p>
+          </div>
+        </div>
+      )}
+
+      {stats.students === 0 && !loadError && (
         <div className="luxury-card p-12 flex flex-col md:flex-row gap-10 items-center animate-slide-up bg-white border-none">
           <div className="w-24 h-24 bg-indigo-50 rounded-[2rem] flex items-center justify-center flex-shrink-0 shadow-xl shadow-indigo-100/50 text-indigo-600">
             <AlertTriangle size={48} />
@@ -156,9 +174,13 @@ const Dashboard = ({ activeSystem }) => {
 
 const Header = () => {
   const [config, setConfig] = React.useState(null);
+  const [connected, setConnected] = React.useState(true);
 
   React.useEffect(() => {
-    getAppSettings().then(setConfig);
+    getAppSettings().then(setConfig).catch(() => setConnected(false));
+    // Subscribe to connection state changes from dataService
+    const unsub = subscribeToConnection(setConnected);
+    return unsub;
   }, []);
 
   return (
@@ -173,6 +195,16 @@ const Header = () => {
         </h1>
       </div>
       <div className="flex items-center gap-8">
+        {/* Connection indicator */}
+        <div className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${
+          connected
+            ? 'bg-emerald-50 text-emerald-600 border border-emerald-100'
+            : 'bg-rose-50 text-rose-600 border border-rose-100 animate-pulse'
+        }`}>
+          {connected ? <Wifi size={14} /> : <WifiOff size={14} />}
+          <span>{connected ? 'Supabase متصل' : 'انقطع الاتصال'}</span>
+        </div>
+
         <div className="hidden md:flex flex-col items-end">
           <span className="text-[10px] text-slate-400 font-black uppercase tracking-[0.3em] mb-1">مدير المدرسة</span>
           <span className="text-sm font-bold text-slate-700">{config?.managerName || 'الأستاذ محمد نصر الدين'}</span>
@@ -213,6 +245,7 @@ const AdminLayout = ({ activeSystem, handleSystemSelect, setActiveSystem }) => {
                 <Route path="/omr-exams" element={<OMRExams />} />
                 <Route path="/omr-results" element={<OMRResults />} />
                 <Route path="/approved-results" element={<ApprovedResults />} />
+                <Route path="/mock-exams" element={<MockExams />} />
                 <Route path="/grade-recording" element={<GradeRecording />} />
                 <Route path="/omr-designer" element={<OMRDesigner />} />
                 <Route path="/notifier" element={<StudentNotifier />} />
@@ -248,18 +281,20 @@ function App() {
   };
 
   return (
-    <Router>
-      <Routes>
-        <Route path="/portal/*" element={<StudentPortal />} />
-        <Route path="/*" element={
-          <AdminLayout 
-            activeSystem={activeSystem} 
-            handleSystemSelect={handleSystemSelect} 
-            setActiveSystem={setActiveSystem} 
-          />
-        } />
-      </Routes>
-    </Router>
+    <ToastProvider>
+      <Router>
+        <Routes>
+          <Route path="/portal/*" element={<StudentPortal />} />
+          <Route path="/*" element={
+            <AdminLayout
+              activeSystem={activeSystem}
+              handleSystemSelect={handleSystemSelect}
+              setActiveSystem={setActiveSystem}
+            />
+          } />
+        </Routes>
+      </Router>
+    </ToastProvider>
   );
 }
 

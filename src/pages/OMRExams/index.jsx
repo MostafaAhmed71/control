@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Trash2, Save, FileText, CheckCircle2, XCircle, Download, Users, X, Loader2, Search, CheckSquare, Square, ScanLine, Wifi, WifiOff, AlertCircle, ChevronRight, ChevronDown, Check, Edit2, Settings, Layout, BookOpen, Clock, Calendar, Image as ImageIcon, Layers, FileStack, Printer, RefreshCw, BarChart2, Trophy, Flag, ShieldCheck, Languages } from 'lucide-react';
-import { getOmrExams, saveOmrExam, deleteOmrExam, getStudents, saveOmrResult, OMR_API_BASE } from '../../utils/dataService';
+import { getOmrExams, saveOmrExam, deleteOmrExam, getStudents, saveOmrResult, getOmrSubjects, saveOmrSubjects, OMR_API_BASE } from '../../utils/dataService';
+import { useToast } from '../../components/Toast';
 
 /* ── Constants ── */
 const STAGES = {
@@ -134,6 +135,7 @@ const getSubjectIcon = (subject = '', size = 24) => {
 
 const OMRExams = () => {
   const navigate = useNavigate();
+  const toast = useToast();
   const [exams, setExams] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isAdding, setIsAdding] = useState(false);
@@ -148,26 +150,21 @@ const OMRExams = () => {
   const [filterSubject, setFilterSubject] = useState('All');
 
   /* New exam form */
-  const [newExam, setNewExam] = useState({ stage: '', grade: '', subject: '', qCount: 30, template: 'nafs', title: '', classroom: '' });
+  /* New exam form */
+  const [newExam, setNewExam] = useState({ stage: '', grade: '', subject: '', qCount: 30, template: 'nafs', title: '', classroom: '', date: '' });
 
-  /* Dynamic subjects list (saved in localStorage) */
-  const [subjects, setSubjects] = useState(() => {
-    try {
-      const saved = localStorage.getItem(SUBJECTS_KEY);
-      if (!saved) return [...DEFAULT_SUBJECTS];
-      const parsed = JSON.parse(saved);
-      if (parsed.length > 0 && typeof parsed[0] === 'string') {
-        return parsed.map((s, idx) => ({ id: `migrated-${idx}`, name: s, grades: ['All'] }));
-      }
-      return parsed;
-    } catch { return [...DEFAULT_SUBJECTS]; }
-  });
+  /* Dynamic subjects list (persisted in Supabase) */
+  const [subjects, setSubjects] = useState([...DEFAULT_SUBJECTS]);
   const [newSubjectInput, setNewSubjectInput] = useState('');
   const [newSubjectGrades, setNewSubjectGrades] = useState(['All']);
 
-  const saveSubjects = (list) => {
+  const saveSubjects = async (list) => {
     setSubjects(list);
-    localStorage.setItem(SUBJECTS_KEY, JSON.stringify(list));
+    try {
+      await saveOmrSubjects(list);
+    } catch (err) {
+      toast.error('فشل حفظ المواد في قاعدة البيانات.', 'خطأ');
+    }
   };
   const handleAddSubject = () => {
     const trimmed = newSubjectInput.trim();
@@ -201,15 +198,14 @@ const OMRExams = () => {
   };
   const [customConfig, setCustomConfig] = useState({ ...defaultCustomConfig });
   const [showCustomEditor, setShowCustomEditor] = useState(false);
-  const [customTemplates, setCustomTemplates] = useState(() => {
-    try {
-      const raw = localStorage.getItem(CUSTOM_TEMPLATES_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch { return []; }
-  });
+  const [customTemplates, setCustomTemplates] = useState([]);
   const [customTemplateName, setCustomTemplateName] = useState('');
   const [selectedCustomTemplateId, setSelectedCustomTemplateId] = useState('');
 
+  const persistCustomTemplates = (list) => {
+    setCustomTemplates(list);
+    try { localStorage.setItem(CUSTOM_TEMPLATES_KEY, JSON.stringify(list)); } catch (_) {}
+  };
   /* Bulk print modal */
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [selectedBulkExam, setSelectedBulkExam] = useState(null);
@@ -264,18 +260,31 @@ const OMRExams = () => {
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
-  useEffect(() => { load(); checkScanner(); }, []);
+  useEffect(() => {
+    load();
+    checkScanner();
+    // Restore saved custom templates from localStorage
+    try {
+      const saved = localStorage.getItem(CUSTOM_TEMPLATES_KEY);
+      if (saved) setCustomTemplates(JSON.parse(saved));
+    } catch (_) {}
+  }, []);
 
   const load = async () => {
     setLoading(true);
-    const [ed, sd] = await Promise.all([getOmrExams(), getStudents()]);
-    setExams(ed); setStudents(sd); setLoading(false);
+    try {
+      const [ed, sd, subs] = await Promise.all([getOmrExams(), getStudents(), getOmrSubjects()]);
+      setExams(ed);
+      setStudents(sd);
+      setSubjects(subs);
+    } catch (err) {
+      toast.error('فشل تحميل بيانات الاختبارات.', 'خطأ في التحميل');
+      console.error('OMRExams load error:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const persistCustomTemplates = (list) => {
-    setCustomTemplates(list);
-    localStorage.setItem(CUSTOM_TEMPLATES_KEY, JSON.stringify(list));
-  };
   const isTemplateCustom = (value) => String(value || '').startsWith(CUSTOM_TEMPLATE_PREFIX) || value === 'custom';
   const getCustomTemplateIdFromValue = (value) => String(value || '').startsWith(CUSTOM_TEMPLATE_PREFIX) ? String(value).slice(CUSTOM_TEMPLATE_PREFIX.length) : '';
 
@@ -325,12 +334,20 @@ const OMRExams = () => {
   };
 
   const handleApplyCustomEditor = () => {
+    const name = customTemplateName.trim();
+    if (!name) return;
+    const now = new Date().toISOString();
     if (selectedCustomTemplateId) {
-      const now = new Date().toISOString();
-      const updated = customTemplates.map(t => t.id === selectedCustomTemplateId ? { ...t, config: { ...customConfig }, updatedAt: now } : t);
+      const updated = customTemplates.map(t =>
+        t.id === selectedCustomTemplateId
+          ? { ...t, name, config: { ...customConfig }, updatedAt: now }
+          : t
+      );
       persistCustomTemplates(updated);
-    } else if (customTemplateName.trim()) {
+      toast.success(`تم تحديث القالب "${name}" بنجاح ✓`, 'حفظ القالب');
+    } else {
       handleSaveNamedCustomTemplate();
+      toast.success(`تم حفظ القالب "${name}" في القائمة ✓`, 'حفظ القالب');
     }
     setShowCustomEditor(false);
   };
@@ -359,8 +376,9 @@ const OMRExams = () => {
     
     // Use manually entered title if provided, otherwise generate it
     const isNafs = newExam.template === 'nafs';
-    const finalSubject = isNafs ? 'اختبار مجمع' : newExam.subject;
-    const generatedTitle = isNafs ? `اختبار نافس - ${newExam.grade}` : `${finalSubject} - ${newExam.grade}`;
+    // Use chosen subject if provided, default to 'اختبار مجمع' ONLY if template is nafs and no subject chosen
+    const finalSubject = newExam.subject || (isNafs ? 'اختبار مجمع' : '');
+    const generatedTitle = isNafs ? `اختبار نافس - ${newExam.grade}` : `${finalSubject || 'اختبار'} - ${newExam.grade}`;
     const title = newExam.title || generatedTitle;
 
     const payload = { 
@@ -379,7 +397,7 @@ const OMRExams = () => {
     
     await saveOmrExam(payload);
     setIsAdding(false);
-    setNewExam({ stage: '', grade: '', subject: '', qCount: 30, template: 'nafs', title: '', classroom: '' });
+    setNewExam({ stage: '', grade: '', subject: '', qCount: 30, template: 'nafs', title: '', classroom: '', date: '' });
     load();
   };
 
@@ -478,6 +496,16 @@ const OMRExams = () => {
     // Default the class selection to the classroom specified in the exam, or 'All'
     setSelectedClass(exam.classroom || 'All');
     setSelectedStudentIds(new Set());
+    // Pre-fill date from exam if available
+    if (exam.date) {
+        setDateInputValue(exam.date);
+        handleDateChange(exam.date, dateType);
+    }
+    // Reset template selection to nafs each time the modal opens to avoid stale state
+    setSelectedTemplate('nafs');
+    setSelectedCustomTemplateId('');
+    setCustomConfig({ ...defaultCustomConfig });
+    setCustomTemplateName('');
     setShowBulkModal(true);
   };
 
@@ -521,13 +549,18 @@ const OMRExams = () => {
 
     try {
       let url, body;
+      // Use seatNumber as the QR id so the scanner can match back to the student.
+      // Fall back to nationalId then internal DB id if seatNumber is missing.
+      const getStudentQRId = (s) =>
+        (s.seatNumber || s.seat_number || s.nationalId || s.national_id || s.id || '').toString().trim();
+
       if (isTemplateCustom(selectedTemplate)) {
         url  = `${OMR_API_BASE}/generate-custom-batch-stream`;
         body = JSON.stringify({
           subject: selectedBulkExam.subject,
           template_config: effectiveCustomConfig,
           num_questions: selectedBulkExam.qCount || 30,
-          students: target.map(s => ({ id: s.id, name: s.name, class_name: selectedBulkExam.grade, date: examDate, day: examDay }))
+          students: target.map(s => ({ id: getStudentQRId(s), name: s.name, class_name: selectedBulkExam.grade, date: examDate, day: examDay }))
         });
       } else {
         url  = `${OMR_API_BASE}/generate-batch-stream`;
@@ -535,7 +568,7 @@ const OMRExams = () => {
           subject: selectedBulkExam.subject,
           template: selectedTemplate,
           num_questions: selectedBulkExam.qCount || 30,
-          students: target.map(s => ({ id: s.id, name: s.name, class_name: selectedBulkExam.grade, date: examDate, day: examDay }))
+          students: target.map(s => ({ id: getStudentQRId(s), name: s.name, class_name: selectedBulkExam.grade, date: examDate, day: examDay }))
         });
       }
 
@@ -684,6 +717,11 @@ const OMRExams = () => {
                         <div className="flex flex-wrap gap-1.5 mb-2 justify-end items-center">
                           <span className="px-3 py-1 rounded-lg bg-slate-50 text-slate-500 text-[9px] font-black uppercase tracking-widest">{exam.stage}</span>
                           <span className="px-3 py-1 rounded-lg bg-indigo-50 text-indigo-600 text-[9px] font-black uppercase tracking-widest">{exam.grade}</span>
+                          {exam.date && (
+                            <span className="px-3 py-1 rounded-lg bg-emerald-50 text-emerald-600 text-[9px] font-black flex items-center gap-1">
+                              <Calendar size={10} /> {new Date(exam.date).toLocaleDateString('ar-SA')}
+                            </span>
+                          )}
                         </div>
                         <h3 className="text-lg font-black text-slate-900 group-hover:text-indigo-600 transition-colors leading-tight line-clamp-2">{exam.title}</h3>
                       </div>
@@ -936,6 +974,15 @@ const OMRExams = () => {
                                className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 transition-all font-black text-slate-700 text-right shadow-sm"
                             />
                          </div>
+                         <div className="space-y-3">
+                            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">تاريخ الاختبار</label>
+                            <input 
+                               type="date" 
+                               value={newExam.date || ""} 
+                               onChange={e => setNewExam({...newExam, date: e.target.value})} 
+                               className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 transition-all font-black text-slate-700 text-right shadow-sm"
+                            />
+                         </div>
                       </div>
 
                       <div className="grid grid-cols-2 gap-8">
@@ -1026,7 +1073,30 @@ const OMRExams = () => {
                      <div className="space-y-6"><label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-2">شعار المدرسة</label><div className="flex items-center gap-8 bg-slate-50 p-8 rounded-[2.5rem] border border-slate-100"><div className="w-32 h-32 bg-white rounded-3xl shadow-sm border border-slate-100 flex items-center justify-center overflow-hidden relative group">{customConfig.logoDataUrl ? <img src={customConfig.logoDataUrl} className="w-full h-full object-contain p-2" /> : <ImageIcon className="text-slate-200" size={48} />}<input type="file" onChange={e => handleCustomLogoChange(e.target.files[0])} className="absolute inset-0 opacity-0 cursor-pointer" /></div><div className="flex-1 space-y-4"><p className="text-sm font-bold text-slate-500">اضغط لرفع شعار بصيغة PNG أو JPG</p>{customConfig.logoDataUrl && <button onClick={() => setCustomConfig({...customConfig, logoDataUrl: ''})} className="text-rose-500 font-black text-xs hover:underline">إزالة الشعار</button>}</div></div></div>
                      <div className="grid grid-cols-1 gap-6">{[{ key: 'school_name', label: 'اسم المدرسة / الإدارة' }, { key: 'exam_name', label: 'عنوان الاختبار أو المجمع' }, { key: 'year', label: 'العام الدراسي والترم' }, { key: 'principal', label: 'اسم المدير أو المراقب' }, { key: 'footer', label: 'تذييل الورقة (Footer)' }].map(f => (<div key={f.key} className="space-y-3"><label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-2">{f.label}</label><input type="text" value={customConfig[f.key]} onChange={e => setCustomConfig({...customConfig, [f.key]: e.target.value})} className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] font-black text-slate-700 text-right outline-none focus:bg-white transition-all shadow-sm" /></div>))}</div>
                   </div>
-                  <div className="p-10 border-t border-slate-50 flex gap-6 bg-slate-50/50"><button onClick={() => setShowCustomEditor(false)} className="px-10 py-5 bg-white text-slate-400 rounded-2.5xl font-black border border-slate-100 shadow-sm transition-all hover:bg-slate-50">تجاهل</button><button onClick={handleApplyCustomEditor} className="flex-1 py-5 bg-indigo-600 text-white rounded-2.5xl font-black hover:bg-indigo-700 shadow-xl transition-all">اعتماد القالب</button></div>
+                  <div className="p-10 border-t border-slate-50 bg-slate-50/50 space-y-4">
+                    <div className="flex items-center gap-4">
+                      <div className="flex-1 space-y-2">
+                        <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">اسم القالب (لحفظه في القائمة)</label>
+                        <input
+                          type="text"
+                          value={customTemplateName}
+                          onChange={e => setCustomTemplateName(e.target.value)}
+                          placeholder="مثلاً: قالب الفصل الدراسي الأول..."
+                          className="w-full px-6 py-4 bg-white border-2 border-slate-100 rounded-[1.5rem] font-black text-slate-700 text-right outline-none focus:border-indigo-200 focus:ring-4 focus:ring-indigo-50 transition-all shadow-sm"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex gap-6">
+                      <button onClick={() => setShowCustomEditor(false)} className="px-10 py-5 bg-white text-slate-400 rounded-2.5xl font-black border border-slate-100 shadow-sm transition-all hover:bg-slate-50">تجاهل</button>
+                      <button
+                        onClick={handleApplyCustomEditor}
+                        disabled={!customTemplateName.trim()}
+                        className="flex-1 py-5 bg-indigo-600 text-white rounded-2.5xl font-black hover:bg-indigo-700 shadow-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {selectedCustomTemplateId ? 'تحديث القالب' : 'حفظ وتطبيق القالب'}
+                      </button>
+                    </div>
+                  </div>
                </div>
             </div>
           )}

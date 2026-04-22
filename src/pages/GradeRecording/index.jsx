@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Search, Trophy, User, Users as UsersIcon, CheckCircle2, Filter, FileText, Download, TrendingUp, BookOpen, BarChart2, X, Calendar, Clock, Loader2, Trash2, AlertTriangle, Eraser, PieChart } from 'lucide-react';
-import { getStudents, getOmrResults, getOmrExams, saveOmrResult, deleteOmrResult } from '../../utils/dataService';
+import { getStudents, getOmrResults, getOmrExams, saveOmrResult, deleteOmrResult, getAppSettings } from '../../utils/dataService';
+import { useToast } from '../../components/Toast';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 
@@ -10,6 +11,59 @@ const STAGES = {
   'ثانوي':  ['الأول الثانوي','الثاني الثانوي','الثالث الثانوي'],
 };
 
+/* ── Grade Normalizer ──────────────────────────────────────────────────
+ * Handles all common Arabic grade formats:
+ *   "الثالث الابتدائي" / "ثالث ابتدائي" / "3 ابتدائي" / "3ابتدائي"
+ *   "الأول المتوسط"   / "1 متوسط"      / "اول متوسط"
+ * Returns a canonical form like "الثالث الابتدائي" for comparison.
+ * ─────────────────────────────────────────────────────────────────── */
+const NUM_WORDS = {
+  '1': 'الأول', 'أولى': 'الأول', 'اول': 'الأول', 'أول': 'الأول', 'الاول': 'الأول', 'الأولى': 'الأول',
+  '2': 'الثاني', 'ثاني': 'الثاني', 'ثانى': 'الثاني', 'الثانى': 'الثاني',
+  '3': 'الثالث', 'ثالث': 'الثالث',
+  '4': 'الرابع', 'رابع': 'الرابع',
+  '5': 'الخامس', 'خامس': 'الخامس',
+  '6': 'السادس', 'سادس': 'الخامس',
+};
+const STAGE_WORDS = {
+  'ابتدائي': 'الابتدائي', 'ابتدائى': 'الابتدائي', 'الابتدائى': 'الابتدائي',
+  'متوسط': 'المتوسط', 'المتوسط': 'المتوسط',
+  'ثانوي': 'الثانوي', 'ثانوى': 'الثانوي', 'الثانوى': 'الثانوي',
+};
+
+const normalizeGrade = (raw = '') => {
+  const s = String(raw || '').trim().replace(/\s+/g, ' ');
+  if (!s) return '';
+
+  // Extract parts: number/ordinal word + stage word
+  // Pattern examples: "3 ابتدائي", "ثالث ابتدائي", "الثالث الابتدائي"
+  const parts = s.split(' ');
+  let numPart = '', stagePart = '';
+
+  for (const p of parts) {
+    const pClean = p.replace(/^ال/, ''); // strip ال prefix
+    if (NUM_WORDS[p] || NUM_WORDS[pClean]) {
+      numPart = NUM_WORDS[p] || NUM_WORDS[pClean];
+    } else if (STAGE_WORDS[p] || STAGE_WORDS[pClean]) {
+      stagePart = STAGE_WORDS[p] || STAGE_WORDS[pClean] || `ال${pClean}`;
+    }
+  }
+
+  if (numPart && stagePart) return `${numPart} ${stagePart}`;
+  // If no match found, return cleaned original
+  return s;
+};
+
+/* Checks if a student's grade matches the selected filter grade */
+const gradeMatches = (studentGrade, filterGrade) => {
+  if (!filterGrade || filterGrade === 'All') return true;
+  if (!studentGrade) return false;
+  // Exact match first
+  if (studentGrade === filterGrade) return true;
+  // Normalized comparison
+  return normalizeGrade(studentGrade) === normalizeGrade(filterGrade);
+};
+
 const getSchoolNameByStage = (stage = '') => {
   const s = String(stage || '').trim();
   if (s === 'ابتدائي' || s === 'الابتدائي') return 'مدارس نخبة الشمال الأهلية والعالمية';
@@ -17,11 +71,16 @@ const getSchoolNameByStage = (stage = '') => {
   return 'مدارس نخبة الشمال الأهلية والعالمية';
 };
 
+const EXPORT_SCALE = Math.min(window.devicePixelRatio || 1, 1.5);
+const yieldToUI = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 const GradeRecording = () => {
+  const toast = useToast();
   const [students,   setStudents]   = useState([]);
   const [results,    setResults]    = useState([]);
   const [exams,      setExams]      = useState([]);
   const [loading,    setLoading]    = useState(true);
+  const [academicYear, setAcademicYear] = useState('1447');
 
   /* Filters */
   const [searchTerm,     setSearchTerm]     = useState('');
@@ -37,22 +96,40 @@ const GradeRecording = () => {
 
   /* Export Modal & Metadata */
   const [showExportModal, setShowExportModal] = useState(false);
-  const [exportDay,       setExportDay]       = useState('الأحد');
-  const [exportDate,      setExportDate]      = useState(new Date().toLocaleDateString('ar-SA'));
-  const [isExporting,     setIsExporting]     = useState(false);
-  const [isExportingStats,setIsExportingStats]= useState(false);
-  const [isZeroing,       setIsZeroing]       = useState(false);
+  const [exportDay,         setExportDay]         = useState('الأحد');
+  const [exportDate,        setExportDate]        = useState(new Date().toLocaleDateString('ar-SA'));
+  const [exportExamTitle,   setExportExamTitle]   = useState('');
+  const [exportSheetTitle,  setExportSheetTitle]  = useState('كشف رصد الدرجات');
+  const [isExporting,       setIsExporting]       = useState(false);
+  const [isExportingStats,  setIsExportingStats]  = useState(false);
+  const [isZeroing,         setIsZeroing]         = useState(false);
 
   useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
     setLoading(true);
-    const [sd, rd, ed] = await Promise.all([getStudents(), getOmrResults(), getOmrExams()]);
-    setStudents(sd); setResults(rd); setExams(ed); setLoading(false);
+    try {
+      const [sd, rd, ed, cfg] = await Promise.all([getStudents(), getOmrResults(), getOmrExams(), getAppSettings()]);
+      setStudents(sd);
+      setResults(rd);
+      setExams(ed);
+      // Extract Hijri year from academicWeight (e.g., '2025/2026' → use as-is, or '1447' directly)
+      if (cfg?.academicWeight) {
+        const yr = String(cfg.academicWeight).match(/(\d{4})/);
+        setAcademicYear(yr ? yr[1] : cfg.academicWeight);
+      }
+    } catch (err) {
+      toast.error('فشل تحميل بيانات الدرجات من قاعدة البيانات.', 'خطأ في التحميل');
+      console.error('GradeRecording load error:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  /* All subjects that appear in exams */
-  const allSubjects = useMemo(() => [...new Set(exams.map(e => e.subject).filter(Boolean))], [exams]);
+  /* All unique labels (title || subject) that appear in exams */
+  const allSubjects = useMemo(() => {
+    return [...new Set(exams.map(e => e.title || e.subject).filter(Boolean))].sort();
+  }, [exams]);
   /* Grades for filter */
   const filterGrades = filterStage !== 'All' ? STAGES[filterStage] || [] : [];
   const printSchoolName = getSchoolNameByStage(filterStage);
@@ -83,57 +160,79 @@ const GradeRecording = () => {
     });
   }, [exams, filterStage, filterGrade, filterSubject]);
 
-  /* Results indexed by studentId → subject → best result */
+  /* Results indexed by a canonical key → subject → best result.
+   * The key is built from the result's studentId which may be a seatNumber.
+   * We index by ALL three possible student identifiers so lookup always works. */
   const resultIndex = useMemo(() => {
-    const idx = {}; // { studentId: { subject: result } }
+    // 1. Build a map: every known identifier → student object
+    const studentByAnyId = {};
+    students.forEach(s => {
+      const ids = [
+        (s.id          || '').toString().trim(),
+        (s.seatNumber  || s.seat_number  || '').toString().trim(),
+        (s.nationalId  || s.national_id  || '').toString().trim(),
+      ].filter(Boolean);
+      ids.forEach(id => { studentByAnyId[id] = s; });
+    });
+
+    // 2. Build the main index keyed by student DB-id
+    const idx = {}; // { studentDbId: { subject: result } }
     results.forEach(r => {
-      // Filter by Date if selected
       if (filterDate !== 'All') {
         const rDate = new Date(r.timestamp || r.scannedAt).toLocaleDateString('ar-EG');
         if (rDate !== filterDate) return;
       }
-      
-      // Filter by Exam ID if selected
       if (filterExamId !== 'All' && r.examId !== filterExamId) return;
 
+      // Resolve which student this result belongs to
+      const rStudentIdStr = (r.studentId || '').toString().trim();
+      const matchedStudent = studentByAnyId[rStudentIdStr];
+      const canonicalKey = matchedStudent ? matchedStudent.id : rStudentIdStr;
+
       const exam = exams.find(e => e.id === r.examId);
-      const subject = exam?.subject || r.examTitle || '؟';
-      
-      if (!idx[r.studentId]) idx[r.studentId] = {};
-      
-      // If we filtered by a specific exam, we just want that result. 
-      // Otherwise, keep the latest result per subject
+      const subject = exam?.title || exam?.subject || r.examTitle || '؟';
+
+      if (!idx[canonicalKey]) idx[canonicalKey] = {};
+
       if (filterExamId !== 'All') {
-        idx[r.studentId][subject] = r;
-      } else if (!idx[r.studentId][subject] || new Date(r.timestamp) > new Date(idx[r.studentId][subject].timestamp)) {
-        idx[r.studentId][subject] = r;
+        idx[canonicalKey][subject] = r;
+      } else if (!idx[canonicalKey][subject] || new Date(r.timestamp) > new Date(idx[canonicalKey][subject].timestamp)) {
+        idx[canonicalKey][subject] = r;
       }
     });
     return idx;
-  }, [results, exams, filterDate, filterExamId]);
+  }, [students, results, exams, filterDate, filterExamId]);
 
   /* Filtered students */
   const filteredStudents = useMemo(() => students.filter(s => {
-    const sGrade = s.grade || s.classroom || '';
-    const sStage = s.stage || '';
-    
+    const sGrade = (s.grade || s.classroom || '').trim();
+    const sStage = (s.stage || '').trim();
+
+    // ── Stage filter ──
     if (filterStage !== 'All') {
-      const normalizedStudentStage = sStage.replace(/^ال/, '');
       const stageGrades = STAGES[filterStage] || [];
-      const matchesStage = normalizedStudentStage === filterStage || stageGrades.includes(sGrade);
-      if (!matchesStage) return false;
-    }
-    
-    if (filterGrade !== 'All') {
-      if (sGrade !== filterGrade && !filterGrade.includes(sGrade)) return false;
+      const stageFieldMatch = sStage.replace(/^ال/, '') === filterStage
+        || sStage === filterStage
+        || sStage === `ال${filterStage}`;
+      const gradeInStage = stageGrades.some(sg => gradeMatches(sGrade, sg));
+      if (!stageFieldMatch && !gradeInStage) return false;
     }
 
+    // ── Grade filter ──
+    if (filterGrade !== 'All') {
+      if (!gradeMatches(sGrade, filterGrade)) return false;
+    }
+
+    // ── Tested-only filter ──
     if (showOnlyTested) {
       const hasResult = resultIndex[s.id] && Object.keys(resultIndex[s.id]).length > 0;
       if (!hasResult) return false;
     }
-    
-    const matchSearch = !searchTerm || s.name.toLowerCase().includes(searchTerm.toLowerCase()) || s.id.includes(searchTerm);
+
+    // ── Search filter ──
+    const matchSearch = !searchTerm
+      || s.name.toLowerCase().includes(searchTerm.toLowerCase())
+      || (s.id || '').includes(searchTerm);
     return matchSearch;
   }).sort((a, b) => a.name.localeCompare(b.name, 'ar')), [students, filterStage, filterGrade, searchTerm, showOnlyTested, resultIndex]);
 
@@ -185,9 +284,19 @@ const GradeRecording = () => {
 
     try {
       const canvas = await html2canvas(element, {
-        scale: 2,
+        scale: EXPORT_SCALE,
         useCORS: true,
-        backgroundColor: '#ffffff'
+        backgroundColor: '#ffffff',
+        foreignObjectRendering: false,
+        onclone: (doc) => {
+          const root = doc.querySelector('.printable-statistics-page');
+          if (root) {
+            root.setAttribute('dir', 'rtl');
+            root.style.direction = 'rtl';
+            root.style.unicodeBidi = 'plaintext';
+            root.style.fontFamily = 'Tahoma, Arial, sans-serif';
+          }
+        }
       });
       
       const imgData = canvas.toDataURL('image/jpeg', 0.95);
@@ -229,10 +338,29 @@ const GradeRecording = () => {
       });
 
       for (let i = 0; i < pageElements.length; i++) {
+        // Let the browser breathe between pages to avoid UI lockups.
+        await yieldToUI();
         const canvas = await html2canvas(pageElements[i], {
-          scale: 2,
+          scale: EXPORT_SCALE,
           useCORS: true,
-          backgroundColor: '#ffffff'
+          backgroundColor: '#ffffff',
+          foreignObjectRendering: false,
+          onclone: (doc) => {
+            const root = doc.querySelector('.printable-page');
+            if (root) {
+              root.setAttribute('dir', 'rtl');
+              root.style.direction = 'rtl';
+              root.style.unicodeBidi = 'plaintext';
+              root.style.fontFamily = 'Tahoma, Arial, sans-serif';
+            }
+            doc.querySelectorAll('.printable-page *').forEach((el) => {
+              el.setAttribute('dir', 'rtl');
+              el.style.direction = 'rtl';
+              el.style.unicodeBidi = 'plaintext';
+              el.style.letterSpacing = 'normal';
+              el.style.fontFamily = 'Tahoma, Arial, sans-serif';
+            });
+          }
         });
         
         const imgData = canvas.toDataURL('image/jpeg', 0.95);
@@ -628,21 +756,53 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
             </div>
             
             <div className="p-6 space-y-4">
+              {/* Exam Title */}
               <div>
                 <label className="block text-xs font-bold text-gray-500 mb-1.5 flex items-center gap-1">
-                  <Calendar size={12}/> تاريخ الاختبار
+                  <FileText size={12}/> عنوان الاختبار
                 </label>
-                <input type="text" value={exportDate} onChange={e => setExportDate(e.target.value)}
-                  className="w-full p-3 bg-slate-50 border border-gray-200 rounded-xl font-bold text-sm text-right" placeholder="15 / 09 / 1446"/>
+                <input
+                  type="text"
+                  value={exportExamTitle}
+                  onChange={e => setExportExamTitle(e.target.value)}
+                  className="w-full p-3 bg-slate-50 border border-gray-200 rounded-xl font-bold text-sm text-right"
+                  placeholder={filterSubject === 'اختبار مجمع' ? 'اختبار محاكي اختبار نافس (اختبار مجمع)' : `اختبار نهاية الدور الأول - الفصل الدراسي الثاني العام الدراسي ${academicYear}`}
+                />
+                <p className="text-[10px] text-gray-400 mt-1">اتركه فارغاً لاستخدام العنوان الافتراضي</p>
               </div>
+
+              {/* Sheet Title */}
               <div>
                 <label className="block text-xs font-bold text-gray-500 mb-1.5 flex items-center gap-1">
-                  <Clock size={12}/> اليوم
+                  <BookOpen size={12}/> عنوان الكشف
                 </label>
-                <input type="text" value={exportDay} onChange={e => setExportDay(e.target.value)}
-                  className="w-full p-3 bg-slate-50 border border-gray-200 rounded-xl font-bold text-sm text-right" placeholder="الأحد"/>
+                <input
+                  type="text"
+                  value={exportSheetTitle}
+                  onChange={e => setExportSheetTitle(e.target.value)}
+                  className="w-full p-3 bg-slate-50 border border-gray-200 rounded-xl font-bold text-sm text-right"
+                  placeholder="كشف رصد الدرجات"
+                />
               </div>
-              
+
+              {/* Date & Day */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 mb-1.5 flex items-center gap-1">
+                    <Calendar size={12}/> تاريخ الاختبار
+                  </label>
+                  <input type="text" value={exportDate} onChange={e => setExportDate(e.target.value)}
+                    className="w-full p-3 bg-slate-50 border border-gray-200 rounded-xl font-bold text-sm text-right" placeholder="15 / 09 / 1446"/>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 mb-1.5 flex items-center gap-1">
+                    <Clock size={12}/> اليوم
+                  </label>
+                  <input type="text" value={exportDay} onChange={e => setExportDay(e.target.value)}
+                    className="w-full p-3 bg-slate-50 border border-gray-200 rounded-xl font-bold text-sm text-right" placeholder="الأحد"/>
+                </div>
+              </div>
+
               <div className="bg-amber-50 p-3 rounded-xl border border-amber-100">
                 <p className="text-[10px] text-amber-700 font-bold leading-relaxed">
                   * سيتم توليد التقرير بناءً على التصفية الحالية: 
@@ -737,120 +897,128 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
           </div>
         )}
 
-        {Array.from({ length: Math.ceil(filteredStudents.length / 18) }).map((_, pageIdx) => {
-          const pageStudents = filteredStudents.slice(pageIdx * 18, (pageIdx + 1) * 18);
-          const totalCorrected = filteredStudents.filter(s => {
-            const sResults = resultIndex[s.id] || {};
-            return filterSubject === 'All' ? Object.keys(sResults).length > 0 : !!sResults[filterSubject];
-          }).length;
+        {(() => {
+          const itemsPerPage = filterSubject === 'All' ? 12 : 18;
+          const totalPages = Math.ceil(filteredStudents.length / itemsPerPage) || 1;
+          
+          return Array.from({ length: totalPages }).map((_, pageIdx) => {
+            const pageStudents = filteredStudents.slice(pageIdx * itemsPerPage, (pageIdx + 1) * itemsPerPage);
+            const totalCorrected = filteredStudents.filter(s => {
+              const sResults = resultIndex[s.id] || {};
+              return filterSubject === 'All' ? Object.keys(sResults).length > 0 : !!sResults[filterSubject];
+            }).length;
 
-          return (
-            <div key={pageIdx} className="printable-page bg-white p-12 text-black" 
-                 style={{ 
-                   width: '210mm', 
-                   height: '297mm',
-                   fontFamily: 'Arial, sans-serif', 
-                   direction: 'rtl',
-                   backgroundColor: '#ffffff',
-                   color: '#000000',
-                   marginBottom: '20px'
-                 }}>
-              
-              <style dangerouslySetInnerHTML={{__html: `
-                .printable-page * {
-                  background-color: transparent !important;
-                  color: black !important;
-                  border-color: black !important;
-                  box-shadow: none !important;
-                }
-                .printable-page {
-                  background-color: white !important;
-                }
-                .printable-page table {
-                  border-collapse: collapse !important;
-                  width: 100% !important;
-                }
-                .printable-page th, .printable-page td {
-                  border: 1px solid black !important;
-                  padding: 8px !important;
-                }
-                .printable-page .bg-gray-100 {
-                  background-color: #f3f4f6 !important;
-                }
-              `}} />
+            return (
+              <div key={pageIdx} className="printable-page bg-white p-12 text-black" 
+                   style={{ 
+                     width: '210mm', 
+                     height: '297mm',
+                     fontFamily: 'Arial, sans-serif', 
+                     direction: 'rtl',
+                     backgroundColor: '#ffffff',
+                     color: '#000000',
+                     marginBottom: '20px'
+                   }}>
+                
+                <style dangerouslySetInnerHTML={{__html: `
+                  .printable-page * {
+                    background-color: transparent !important;
+                    color: black !important;
+                    border-color: black !important;
+                    box-shadow: none !important;
+                  }
+                  .printable-page {
+                    background-color: white !important;
+                  }
+                  .printable-page table {
+                    border-collapse: collapse !important;
+                    width: 100% !important;
+                  }
+                  .printable-page th, .printable-page td {
+                    border: 1px solid black !important;
+                    padding: 8px !important;
+                  }
+                  .printable-page .bg-gray-100 {
+                    background-color: #f3f4f6 !important;
+                  }
+                `}} />
 
-              {/* Header Section */}
-              <div className="text-center mb-8 space-y-3">
-                <h1 className="text-3xl font-bold">{printSchoolName}</h1>
-                {filterSubject === 'اختبار مجمع' ? (
-                  <h2 className="text-2xl font-bold border-b-2 border-black pb-2 inline-block">اختبار محاكي اختبار نافس (اختبار مجمع)</h2>
-                ) : (
-                  <h2 className="text-2xl font-bold border-b-2 border-black pb-2 inline-block">اختبار نهاية الدور الأول - الفصل الدراسي الثاني العام الدراسي 1447</h2>
-                )}
-                <div className="mt-4">
-                  <h3 className="text-xl font-bold bg-gray-100 px-8 py-3 rounded-xl inline-block border-2 border-black">كشف رصد الدرجات</h3>
-                </div>
-              </div>
-
-              {/* Table */}
-              <table className="w-full border-collapse border-2 border-black mt-6">
-                <thead>
-                  <tr className="bg-gray-50">
-                    <th className="border-2 border-black p-2 text-sm w-12">م</th>
-                    <th className="border-2 border-black p-2 text-sm text-center">اسم الطالب</th>
-                    {filterSubject === 'All' ? (
-                      allSubjects.map(sub => (
-                        <th key={sub} className="border-2 border-black p-2 text-xs">{sub === 'اختبار مجمع' ? 'الدرجة' : sub}</th>
-                      ))
-                    ) : (
-                      <th className="border-2 border-black p-2 text-sm w-24">الدرجة</th>
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {pageStudents.map((s, idx) => {
-                    const sResults = resultIndex[s.id] || {};
-                    const globalIdx = (pageIdx * 18) + idx + 1;
-                    return (
-                      <tr key={s.id}>
-                        <td className="border-2 border-black p-2 text-center text-sm">{globalIdx}</td>
-                        <td className="border-2 border-black p-2 text-base font-bold text-center">{s.name}</td>
-                        {filterSubject === 'All' ? (
-                          allSubjects.map(sub => (
-                            <td key={sub} className="border-2 border-black p-2 text-center text-xs">
-                              {sResults[sub] ? `${sResults[sub].score}/${sResults[sub].total}` : '-'}
-                            </td>
-                          ))
-                        ) : (
-                          <td className="border-2 border-black p-2 text-center text-sm font-bold">
-                            {sResults[filterSubject] ? `${sResults[filterSubject].score} / ${sResults[filterSubject].total}` : '-'}
-                          </td>
-                        )}
-                      </tr>
-                    );
-                  })}
-                  {/* Fill empty rows to maintain page layout if needed, but not required for simple reports */}
-                </tbody>
-              </table>
-
-              {/* Page Numbering */}
-              <div className="absolute bottom-10 left-1/2 -translate-x-1/2 text-xs font-bold text-gray-400">
-                صفحة {pageIdx + 1} من {Math.ceil(filteredStudents.length / 18)}
-              </div>
-
-              {/* Footer Signature Area (Only on the last page) */}
-              {pageIdx === Math.ceil(filteredStudents.length / 18) - 1 && (
-                <div className="mt-12 flex justify-end px-20 text-sm font-bold">
-                  <div className="text-center">
-                    <div className="mb-2">يعتمد مدير المدرسة</div>
-                    <div>......................................</div>
+                {/* Header Section */}
+                <div className="text-center mb-8 space-y-3">
+                  <h1 className="text-3xl font-bold">{printSchoolName}</h1>
+                  <h2 className="text-2xl font-bold border-b-2 border-black pb-2 inline-block">
+                    {exportExamTitle ||
+                      (filterSubject === 'اختبار مجمع'
+                        ? 'اختبار محاكي اختبار نافس (اختبار مجمع)'
+                        : `اختبار نهاية الدور الأول - الفصل الدراسي الثاني العام الدراسي ${academicYear}`)}
+                  </h2>
+                  <div className="mt-4">
+                    <h3 className="text-xl font-bold bg-gray-100 px-8 py-3 rounded-xl inline-block border-2 border-black">
+                      {exportSheetTitle || 'كشف رصد الدرجات'}
+                    </h3>
                   </div>
                 </div>
-              )}
 
-            </div>
-          );
-        })}
+                {/* Table */}
+                <table className="w-full border-collapse border-2 border-black mt-6">
+                  <thead>
+                    <tr className="bg-gray-50">
+                      <th className="border-2 border-black p-2 text-sm w-12">م</th>
+                      <th className="border-2 border-black p-2 text-sm text-center">اسم الطالب</th>
+                      {filterSubject === 'All' ? (
+                        allSubjects.map(sub => (
+                          <th key={sub} className="border-2 border-black p-2 text-xs">{sub === 'اختبار مجمع' ? 'الدرجة' : sub}</th>
+                        ))
+                      ) : (
+                        <th className="border-2 border-black p-2 text-sm w-24">الدرجة</th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pageStudents.map((s, idx) => {
+                      const sResults = resultIndex[s.id] || {};
+                      const globalIdx = (pageIdx * itemsPerPage) + idx + 1;
+                      return (
+                        <tr key={s.id}>
+                          <td className="border-2 border-black p-2 text-center text-sm">{globalIdx}</td>
+                          <td className="border-2 border-black p-2 text-base font-bold text-center">{s.name}</td>
+                          {filterSubject === 'All' ? (
+                            allSubjects.map(sub => (
+                              <td key={sub} className="border-2 border-black p-2 text-center text-xs">
+                                {sResults[sub] ? `${sResults[sub].score}/${sResults[sub].total}` : '-'}
+                              </td>
+                            ))
+                          ) : (
+                            <td className="border-2 border-black p-2 text-center text-sm font-bold">
+                              {sResults[filterSubject] ? `${sResults[filterSubject].score} / ${sResults[filterSubject].total}` : '-'}
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
+                    {/* Fill empty rows to maintain page layout if needed, but not required for simple reports */}
+                  </tbody>
+                </table>
+
+                {/* Page Numbering */}
+                <div className="absolute bottom-10 left-1/2 -translate-x-1/2 text-xs font-bold text-gray-400">
+                  صفحة {pageIdx + 1} من {totalPages}
+                </div>
+
+                {/* Footer Signature Area (Only on the last page) */}
+                {pageIdx === totalPages - 1 && (
+                  <div className="mt-12 flex justify-end px-20 text-sm font-bold">
+                    <div className="text-center">
+                      <div className="mb-2">يعتمد مدير المدرسة</div>
+                      <div>......................................</div>
+                    </div>
+                  </div>
+                )}
+
+              </div>
+            );
+          });
+        })()}
       </div>
     </>
   );
@@ -860,13 +1028,14 @@ const StatCard = ({ label, count, total, color, icon }) => {
   const percentage = total > 0 ? ((count / total) * 100).toFixed(1) : 0;
   
   // Mapping color names to Tailwind color classes for background/border/text
-  const theme = {
+  const themeMap = {
     emerald: { bg: 'bg-emerald-500', lightBg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', accent: 'border-emerald-500', shadow: 'shadow-emerald-100' },
     blue:    { bg: 'bg-blue-500',    lightBg: 'bg-blue-50',    text: 'text-blue-700',    border: 'border-blue-200',    accent: 'border-blue-500', shadow: 'shadow-blue-100' },
     indigo:  { bg: 'bg-indigo-500',  lightBg: 'bg-indigo-50',  text: 'text-indigo-700',  border: 'border-indigo-200',  accent: 'border-indigo-500', shadow: 'shadow-indigo-100' },
     amber:   { bg: 'bg-amber-500',   lightBg: 'bg-amber-50',   text: 'text-amber-700',   border: 'border-amber-200',   accent: 'border-amber-500', shadow: 'shadow-amber-100' },
     rose:    { bg: 'bg-rose-500',    lightBg: 'bg-rose-50',    text: 'text-rose-700',    border: 'border-rose-200',    accent: 'border-rose-500', shadow: 'shadow-rose-100' },
-  }[color] || theme.indigo;
+  };
+  const theme = themeMap[color] || themeMap['indigo'];
 
   return (
     <div className={`bg-white p-6 rounded-[2.5rem] border ${theme.border} border-b-4 ${theme.accent} shadow-xl shadow-gray-100 transition-all duration-400 hover:scale-[1.02] hover:-translate-y-1 relative overflow-hidden group`}>

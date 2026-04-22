@@ -19,8 +19,7 @@ import {
     Activity,
     Cloud
 } from 'lucide-react';
-import { getAppSettings, saveAppSettings, clearAllData } from '../../utils/dataService';
-import { createClient } from '@supabase/supabase-js';
+import { getAppSettings, saveAppSettings, clearAllData, getStudents, getCommittees, getObservers, getOmrExams, getOmrResults, saveStudentsBulk, saveOmrExam, saveOmrResult, supabase } from '../../utils/dataService';
 
 const Settings = () => {
     const [activeTab, setActiveTab] = useState('identity');
@@ -28,51 +27,6 @@ const Settings = () => {
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [status, setStatus] = useState({ type: '', msg: '' });
-    const [syncing, setSyncing] = useState(false);
-    const [syncResult, setSyncResult] = useState(null);
-
-    const syncLocalToSupabase = async () => {
-        // Create a fresh Supabase client with known credentials
-        const SUPABASE_URL = 'https://onyycbkxuzztwjnztgtw.supabase.co';
-        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ueXljYmt4dXp6dHdqbnp0Z3R3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYwNzQ0MzMsImV4cCI6MjA5MTY1MDQzM30.FVpmDl8DClaIZHQcKSQ7OoqpYlUgv36PLdMYEVI2fXI';
-        let client;
-        try {
-            client = createClient(SUPABASE_URL, SUPABASE_KEY);
-        } catch (e) {
-            setSyncResult({ ok: false, msg: `❌ فشل إنشاء الاتصال: ${e.message}` });
-            return;
-        }
-        setSyncing(true);
-        setSyncResult(null);
-        const tables = ['students', 'omr_exams', 'omr_results'];
-        let total = 0;
-        let errors = [];
-        for (const table of tables) {
-            try {
-                const raw = localStorage.getItem(table);
-                if (!raw) { continue; }
-                const items = JSON.parse(raw);
-                if (!Array.isArray(items) || items.length === 0) continue;
-                // Upload in batches of 100 to avoid timeouts
-                const batchSize = 100;
-                for (let i = 0; i < items.length; i += batchSize) {
-                    const batch = items.slice(i, i + batchSize);
-                    const rows = batch.map(item => ({ id: String(item.id), data: item }));
-                    const { error } = await client.from(table).upsert(rows, { onConflict: 'id' });
-                    if (error) { errors.push(`${table}: ${error.message}`); break; }
-                    else { total += rows.length; }
-                }
-            } catch (e) {
-                errors.push(`${table}: ${e.message}`);
-            }
-        }
-        setSyncing(false);
-        if (errors.length > 0) {
-            setSyncResult({ ok: false, msg: `⚠️ بعض الجداول فشلت: ${errors.join(' | ')}` });
-        } else {
-            setSyncResult({ ok: true, msg: `✅ تمت مزامنة ${total} سجل إلى Supabase بنجاح!` });
-        }
-    };
 
     useEffect(() => {
         loadSettings();
@@ -109,36 +63,41 @@ const Settings = () => {
         });
     };
 
-    const exportData = () => {
-        const data = {};
-        const keys = ['students', 'committees', 'observers', 'locations', 'assignments', 'omr_exams', 'omr_results', 'app_config'];
-        keys.forEach(key => {
-            data[key] = JSON.parse(localStorage.getItem(key)) || [];
-        });
-        
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `control_backup_${new Date().toISOString().split('T')[0]}.json`;
-        a.click();
+    const exportData = async () => {
+        try {
+            setStatus({ type: '', msg: '' });
+            const [students, committees, observers, omrExams, omrResults, appConfig] = await Promise.all([
+                getStudents(), getCommittees(), getObservers(), getOmrExams(), getOmrResults(), getAppSettings()
+            ]);
+            const data = { students, committees, observers, omr_exams: omrExams, omr_results: omrResults, app_config: appConfig };
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `control_backup_${new Date().toISOString().split('T')[0]}.json`;
+            a.click();
+        } catch (err) {
+            setStatus({ type: 'error', msg: 'فشل تصدير البيانات: ' + err.message });
+        }
     };
 
-    const importData = (e) => {
+    const importData = async (e) => {
         const file = e.target.files[0];
         if (!file) return;
-        
         const reader = new FileReader();
-        reader.onload = (event) => {
+        reader.onload = async (event) => {
             try {
                 const data = JSON.parse(event.target.result);
-                Object.entries(data).forEach(([key, value]) => {
-                    localStorage.setItem(key, JSON.stringify(value));
-                });
-                alert('تم استيراد البيانات بنجاح! سيتم إعادة تحميل الصفحة.');
+                const ops = [];
+                if (data.students?.length)      ops.push(saveStudentsBulk(data.students));
+                if (data.omr_exams?.length)     data.omr_exams.forEach(ex => ops.push(saveOmrExam(ex)));
+                if (data.omr_results?.length)   data.omr_results.forEach(r  => ops.push(saveOmrResult(r)));
+                if (data.app_config)            ops.push(saveAppSettings(data.app_config));
+                await Promise.all(ops);
+                alert('✅ تم استيراد البيانات إلى Supabase بنجاح! سيتم إعادة تحميل الصفحة.');
                 window.location.reload();
             } catch (err) {
-                alert('خطأ في تنسيق الملف');
+                alert('خطأ في تنسيق الملف: ' + err.message);
             }
         };
         reader.readAsText(file);
@@ -427,31 +386,21 @@ const Settings = () => {
                                         </div>
                                     </div>
 
-                                    {/* ── Sync to Supabase ── */}
+                                    {/* ── Supabase Status ── */}
                                     <div className="p-10 bg-indigo-50 rounded-[3rem] border border-indigo-100 border-dashed mb-6">
-                                        <div className="flex items-center gap-4 mb-6">
+                                        <div className="flex items-center gap-4 mb-4">
                                             <div className="w-10 h-10 bg-indigo-600 text-white rounded-xl flex items-center justify-center shadow-lg shadow-indigo-200">
                                                 <Cloud size={20} />
                                             </div>
                                             <div>
-                                                <h3 className="text-xl font-black text-indigo-900 font-header">مزامنة البيانات مع Supabase</h3>
-                                                <p className="text-indigo-500 font-bold text-[10px] uppercase tracking-widest mt-0.5">رفع جميع البيانات المحلية إلى السحابة</p>
+                                                <h3 className="text-xl font-black text-indigo-900 font-header">حالة قاعدة البيانات</h3>
+                                                <p className="text-indigo-500 font-bold text-[10px] uppercase tracking-widest mt-0.5">Supabase Cloud — التخزين الرئيسي</p>
                                             </div>
                                         </div>
-                                        <p className="text-indigo-600/70 text-xs font-bold leading-relaxed mb-6 max-w-xl">ارفع بيانات الطلاب والاختبارات والنتائج إلى Supabase لتتمكن بوابة الطلاب على الإنترنت من عرضها. تأكد أن جداول Supabase موجودة قبل المزامنة.</p>
-                                        {syncResult && (
-                                            <div className={`mb-4 p-4 rounded-2xl text-sm font-bold text-right ${syncResult.ok ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
-                                                {syncResult.msg}
-                                            </div>
-                                        )}
-                                        <button 
-                                            onClick={syncLocalToSupabase}
-                                            disabled={syncing}
-                                            className="px-8 py-4 bg-indigo-600 text-white rounded-[1.5rem] font-black text-sm hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 flex items-center gap-3 disabled:opacity-60"
-                                        >
-                                            {syncing ? <RefreshCcw size={18} className="animate-spin" /> : <Cloud size={18} />}
-                                            {syncing ? 'جاري المزامنة...' : 'رفع البيانات إلى Supabase'}
-                                        </button>
+                                        <div className="flex items-center gap-3 bg-emerald-50 p-4 rounded-2xl border border-emerald-100">
+                                            <div className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse"></div>
+                                            <p className="text-emerald-700 text-sm font-black">جميع البيانات تُحفظ مباشرةً في Supabase — لا يوجد تخزين محلي.</p>
+                                        </div>
                                     </div>
 
                                     <div className="p-10 bg-rose-50 rounded-[3rem] border border-rose-100 border-dashed">
@@ -460,7 +409,7 @@ const Settings = () => {
                                                 <AlertCircle size={20} />
                                             </div>
                                             <div>
-                                                <h3 className="text-xl font-black text-rose-900 font-header">تطهير المخازن المحلية</h3>
+                                                <h3 className="text-xl font-black text-rose-900 font-header">تطهير المخازن السحابية</h3>
                                                 <p className="text-rose-500 font-bold text-[10px] uppercase tracking-widest mt-0.5">منطقة مخاطر تقنية - إجراء غير قابل للتراجع</p>
                                             </div>
                                         </div>

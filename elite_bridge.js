@@ -1,15 +1,15 @@
 import express from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
-import ngrok from 'ngrok';
-import fs from 'fs';
-import path from 'path';
 
 const app = express();
 const PORT = 9000;
 
-// إعدادات Ngrok التي زودتني بها
-const NGROK_AUTH_TOKEN = '3BtZTn3cUsjJjdT0GjIFJspvhWN_5vSeiWJRBdAbrFrvdQqGb';
-const STATIC_DOMAIN = 'vigilantly-contortioned-jayce.ngrok-free.dev';
+// IMPORTANT: لا تضع أسرار (Tokens) داخل الكود.
+// استخدم متغيرات البيئة عند الحاجة (مثال):
+// - NGROK_AUTH_TOKEN
+// - STATIC_DOMAIN
+const NGROK_AUTH_TOKEN = process.env.NGROK_AUTH_TOKEN || '';
+const STATIC_DOMAIN = process.env.STATIC_DOMAIN || '';
 
 // 1. توجيه طلبات محرك التصحيح (OMR Engine)
 app.use('/api/omr', createProxyMiddleware({

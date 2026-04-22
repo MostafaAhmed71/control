@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Search, FileText, CheckCircle2, Printer, Trophy,
   Users, BookOpen, ChevronDown, AlertCircle, Download,
-  Filter, Star, TrendingUp, ClipboardList, RefreshCcw
+  Filter, Star, TrendingUp, ClipboardList, RefreshCcw, Wrench, Loader2, Edit2, X, Trash2, Calendar
 } from 'lucide-react';
-import { getOmrResults, getOmrExams } from '../../utils/dataService';
+import { getOmrResults, getOmrExams, getStudents, saveOmrResult, deleteOmrResult } from '../../utils/dataService';
 
 /* ── Grade helpers ── */
 const getGradeLabel = (pct) => {
@@ -269,6 +269,21 @@ const ApprovedResults = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
   const [gradeFilter, setGradeFilter] = useState('all');
+  const [isRepairing, setIsRepairing] = useState(false);
+  const [repairReport, setRepairReport] = useState(null);
+  const [editingResult, setEditingResult] = useState(null);
+  const [editScore, setEditScore] = useState('');
+  const [editTotal, setEditTotal] = useState('');
+  const [editDate, setEditDate] = useState('');
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+  const [bulkDeletedCount, setBulkDeletedCount] = useState(0);
+  const [showBulkDateModal, setShowBulkDateModal] = useState(false);
+  const [bulkDateValue, setBulkDateValue] = useState(new Date().toISOString().split('T')[0]);
+  const [isSavingBulkDate, setIsSavingBulkDate] = useState(false);
+  const [bulkDateIndex, setBulkDateIndex] = useState(0);
 
   useEffect(() => {
     loadData();
@@ -277,14 +292,10 @@ const ApprovedResults = () => {
   const loadData = async () => {
     setLoading(true);
     const [results, examList] = await Promise.all([getOmrResults(), getOmrExams()]);
-    // All saved results in omr_results are considered approved
-    // (they were saved via saveOmrResult only after confirmation)
-    // Also accept results explicitly flagged as approved/confirmed
-    const approved = results.filter(r => 
-      r.approved === true || 
-      r.confirmed === true || 
+    const approved = results.filter(r =>
+      r.approved === true ||
+      r.confirmed === true ||
       r.approvedAt != null ||
-      // Legacy: any result saved to database is considered confirmed
       (r.studentId && r.score != null)
     );
     approved.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -293,29 +304,94 @@ const ApprovedResults = () => {
     setLoading(false);
   };
 
+  /* ── Repair: Re-match all saved results to students ── */
+  const handleRepair = async () => {
+    if (!window.confirm('سيقوم النظام بفحص جميع النتائج المحفوظة وإعادة ربطها بالطلاب تلقائياً. هل تريد المتابعة؟')) return;
+    setIsRepairing(true);
+    setRepairReport(null);
+    try {
+      const [results, students] = await Promise.all([getOmrResults(), getStudents()]);
+
+      // Build a lookup: every possible ID → student
+      const byId = {};
+      students.forEach(s => {
+        [
+          (s.id          || '').toString().trim(),
+          (s.seatNumber  || s.seat_number  || '').toString().trim(),
+          (s.nationalId  || s.national_id  || '').toString().trim(),
+        ].filter(Boolean).forEach(key => { byId[key] = s; });
+      });
+
+      let fixed = 0, skipped = 0;
+      for (const r of results) {
+        const rawId  = (r.studentId || '').toString().trim();
+        const cleanId = rawId.replace(/^0+/, '');
+        const found = byId[rawId] || byId[cleanId];
+        if (found) {
+          const alreadyOk = r.studentName && r.studentName !== 'طالب غير معروف';
+          if (!alreadyOk) {
+            await saveOmrResult({
+              ...r,
+              studentName:  found.name  || r.studentName,
+              studentGrade: found.grade || found.classroom || r.studentGrade || '',
+              phone:        found.phone || r.phone || '',
+              systemViewImage: undefined,
+              reviewRois:  undefined,
+            });
+            fixed++;
+          } else {
+            skipped++;
+          }
+        } else {
+          skipped++;
+        }
+      }
+      setRepairReport({ fixed, skipped, total: results.length });
+      await loadData();
+    } catch (e) {
+      alert('حدث خطأ أثناء الإصلاح: ' + e.message);
+    } finally {
+      setIsRepairing(false);
+    }
+  };
+
   /* Derived data */
-  const filteredByExam = selectedExamId
-    ? allResults.filter(r => r.examId === selectedExamId || r.examTitle === exams.find(e => e.id === selectedExamId)?.title)
-    : allResults;
+  const filteredByExam = useMemo(() => {
+    return selectedExamId
+      ? allResults.filter(r => r.examId === selectedExamId || r.examTitle === exams.find(e => e.id === selectedExamId)?.title)
+      : allResults;
+  }, [allResults, selectedExamId, exams]);
 
-  const selectedExam = exams.find(e => e.id === selectedExamId);
+  const selectedExam = useMemo(() => exams.find(e => e.id === selectedExamId), [exams, selectedExamId]);
 
-  const filteredResults = filteredByExam.filter(r => {
-    const matchSearch =
-      (r.studentName || '').includes(searchTerm) ||
-      (r.studentId || '').includes(searchTerm) ||
-      (r.examTitle || '').includes(searchTerm);
+  const filteredResults = useMemo(() => {
+    return filteredByExam.filter(r => {
+      const matchSearch =
+        (r.studentName || '').includes(searchTerm) ||
+        (r.studentId || '').includes(searchTerm) ||
+        (r.examTitle || '').includes(searchTerm);
 
-    const pct = parseFloat(r.percentage);
-    const matchGrade =
-      gradeFilter === 'all' ? true :
-      gradeFilter === 'pass' ? pct >= 50 :
-      gradeFilter === 'fail' ? pct < 50 :
-      gradeFilter === 'excellent' ? pct >= 90 :
-      gradeFilter === 'good' ? pct >= 70 && pct < 90 : true;
+      const pct = parseFloat(r.percentage);
+      const matchGrade =
+        gradeFilter === 'all' ? true :
+        gradeFilter === 'pass' ? pct >= 50 :
+        gradeFilter === 'fail' ? pct < 50 :
+        gradeFilter === 'excellent' ? pct >= 90 :
+        gradeFilter === 'good' ? pct >= 70 && pct < 90 : true;
 
-    return matchSearch && matchGrade;
-  });
+      return matchSearch && matchGrade;
+    });
+  }, [filteredByExam, searchTerm, gradeFilter]);
+  
+  // Keep selection valid as filters/data change
+  useEffect(() => {
+    setSelectedIds(prev => {
+      const visible = new Set(filteredResults.map(r => r.id));
+      const next = new Set();
+      prev.forEach(id => { if (visible.has(id)) next.add(id); });
+      return next;
+    });
+  }, [filteredResults]);
 
   /* Stats */
   const totalApproved = filteredByExam.length;
@@ -352,6 +428,163 @@ const ApprovedResults = () => {
     document.body.removeChild(link);
   };
 
+  const openEditModal = (result) => {
+    setEditingResult(result);
+    setEditScore(result.score ?? '');
+    setEditTotal(result.total ?? '');
+    setEditDate(result.timestamp ? new Date(result.timestamp).toISOString().split('T')[0] : '');
+  };
+
+  const closeEditModal = () => {
+    if (isSavingEdit) return;
+    setEditingResult(null);
+    setEditScore('');
+    setEditTotal('');
+    setEditDate('');
+  };
+
+  const handleSaveEditedGrade = async (e) => {
+    e.preventDefault();
+    if (!editingResult) return;
+
+    const parsedScore = Number(editScore);
+    const parsedTotal = Number(editTotal);
+
+    if (!Number.isFinite(parsedScore) || !Number.isFinite(parsedTotal)) {
+      alert('الرجاء إدخال أرقام صحيحة للدرجة والإجمالي.');
+      return;
+    }
+    if (parsedTotal <= 0) {
+      alert('الإجمالي يجب أن يكون أكبر من صفر.');
+      return;
+    }
+    if (parsedScore < 0 || parsedScore > parsedTotal) {
+      alert('الدرجة يجب أن تكون بين 0 والإجمالي.');
+      return;
+    }
+
+    const percentage = ((parsedScore / parsedTotal) * 100).toFixed(1);
+
+    setIsSavingEdit(true);
+    try {
+      const newTimestamp = editDate ? new Date(editDate).toISOString() : editingResult.timestamp;
+      
+      await saveOmrResult({
+        ...editingResult,
+        score: parsedScore,
+        total: parsedTotal,
+        percentage,
+        timestamp: newTimestamp,
+      });
+      await loadData();
+      closeEditModal();
+    } catch (error) {
+      alert(`تعذر حفظ التعديل: ${error.message}`);
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  const handleDeleteResult = async (result) => {
+    if (!result?.id) return;
+    const name = result.studentName || result.studentId || 'هذا الطالب';
+    if (!window.confirm(`هل تريد حذف نتيجة ${name} نهائيًا؟`)) return;
+
+    setDeletingId(result.id);
+    try {
+      await deleteOmrResult(result.id);
+      await loadData();
+    } catch (error) {
+      alert(`تعذر حذف النتيجة: ${error.message}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const toggleSelected = (id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisible = (checked) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (checked) {
+        filteredResults.forEach(r => { if (r.id) next.add(r.id); });
+      } else {
+        filteredResults.forEach(r => { if (r.id) next.delete(r.id); });
+      }
+      return next;
+    });
+  };
+
+  const handleDeleteSelected = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!window.confirm(`هل تريد حذف ${ids.length} نتيجة محددة نهائياً؟`)) return;
+
+    setIsBulkDeleting(true);
+    setBulkDeletedCount(0);
+    try {
+      // Delete sequentially to avoid freezing/overloading storage
+      let done = 0;
+      for (const id of ids) {
+        await deleteOmrResult(id);
+        done++;
+        setBulkDeletedCount(done);
+      }
+      await loadData();
+      setSelectedIds(new Set());
+    } catch (error) {
+      alert(`تعذر حذف بعض النتائج: ${error.message}`);
+      await loadData();
+      setSelectedIds(new Set());
+    } finally {
+      setIsBulkDeleting(false);
+      setBulkDeletedCount(0);
+    }
+  };
+  
+  const handleBulkDateSave = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    
+    setIsSavingBulkDate(true);
+    setBulkDateIndex(0);
+    try {
+      let done = 0;
+      for (const id of ids) {
+        const original = allResults.find(r => r.id === id);
+        if (original) {
+          const isoDate = new Date(bulkDateValue);
+          // Preserve the original time if possible, otherwise use current time
+          const originalDate = new Date(original.timestamp || Date.now());
+          isoDate.setHours(originalDate.getHours(), originalDate.getMinutes(), originalDate.getSeconds());
+
+          await saveOmrResult({
+            ...original,
+            timestamp: isoDate.toISOString(),
+          });
+        }
+        done++;
+        setBulkDateIndex(done);
+      }
+      await loadData();
+      setSelectedIds(new Set());
+      setShowBulkDateModal(false);
+    } catch (error) {
+      alert(`تعذر تحديث بعض التواريخ: ${error.message}`);
+      await loadData();
+    } finally {
+      setIsSavingBulkDate(false);
+      setBulkDateIndex(0);
+    }
+  };
+
   return (
     <div className="max-w-7xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 pb-20">
       
@@ -378,6 +611,20 @@ const ApprovedResults = () => {
           >
             <RefreshCcw size={16} /> تحديث
           </button>
+          <button
+            onClick={handleRepair}
+            disabled={isRepairing}
+            title="إعادة ربط النتائج بالطلاب تلقائياً (للأوراق التي ظهرت كـ غير معروف)"
+            className="flex items-center gap-2 px-5 py-3 bg-amber-50 border border-amber-200 text-amber-700 rounded-2xl font-bold text-sm hover:bg-amber-100 transition-all active:scale-95 shadow-sm disabled:opacity-50"
+          >
+            {isRepairing ? <Loader2 size={16} className="animate-spin" /> : <Wrench size={16} />}
+            {isRepairing ? 'جاري الإصلاح...' : 'إصلاح الأسماء'}
+          </button>
+          {repairReport && (
+            <div className="px-4 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-2xl text-xs font-bold">
+              ✅ تم إصلاح {repairReport.fixed} نتيجة • {repairReport.skipped} موجودة مسبقاً
+            </div>
+          )}
           <button
             onClick={exportCSV}
             className="flex items-center gap-2 px-5 py-3 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold text-sm hover:border-indigo-300 hover:text-indigo-600 transition-all active:scale-95 shadow-sm"
@@ -524,13 +771,47 @@ const ApprovedResults = () => {
               <span className="text-xs font-black text-slate-400 uppercase tracking-widest">
                 نتائج معتمدة • {filteredResults.length} سجل
               </span>
-              <span className="text-xs font-bold text-indigo-500">
-                {selectedExam ? `اختبار: ${selectedExam.title}` : 'جميع الاختبارات'}
-              </span>
+              <div className="flex items-center gap-3">
+                {selectedIds.size > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setShowBulkDateModal(true)}
+                      disabled={isBulkDeleting || isSavingBulkDate}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-indigo-50 text-indigo-700 border border-indigo-100 font-black text-xs hover:bg-indigo-100 transition-all disabled:opacity-60"
+                      title="تغيير التاريخ للمحدد"
+                    >
+                      <Calendar size={16} />
+                      تغيير التاريخ ({selectedIds.size})
+                    </button>
+                    <button
+                      onClick={handleDeleteSelected}
+                      disabled={isBulkDeleting || isSavingBulkDate}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-rose-600 text-white font-black text-xs hover:bg-rose-700 transition-all disabled:opacity-60"
+                      title="حذف النتائج المحددة"
+                    >
+                      <Trash2 size={16} />
+                      {isBulkDeleting ? `جاري حذف ${bulkDeletedCount}/${selectedIds.size}` : `حذف المحدد (${selectedIds.size})`}
+                    </button>
+                  </div>
+                )}
+                <span className="text-xs font-bold text-indigo-500">
+                  {selectedExam ? `اختبار: ${selectedExam.title}` : 'جميع الاختبارات'}
+                </span>
+              </div>
             </div>
             <table className="premium-table w-full text-right">
               <thead>
                 <tr className="border-none text-slate-400 text-[11px] uppercase tracking-widest font-black">
+                  <th className="text-center px-4 py-4 w-14">
+                    <input
+                      type="checkbox"
+                      aria-label="تحديد الكل"
+                      disabled={filteredResults.length === 0 || isBulkDeleting}
+                      checked={filteredResults.length > 0 && filteredResults.every(r => selectedIds.has(r.id))}
+                      onChange={(e) => toggleSelectAllVisible(e.target.checked)}
+                      className="w-4 h-4 accent-indigo-600 cursor-pointer"
+                    />
+                  </th>
                   <th className="text-center px-5 py-4">#</th>
                   <th className="text-right px-5 py-4">الطالب</th>
                   <th className="text-center px-5 py-4">الصف</th>
@@ -539,6 +820,7 @@ const ApprovedResults = () => {
                   <th className="text-center px-5 py-4">النسبة</th>
                   <th className="text-center px-5 py-4">التقدير</th>
                   <th className="text-center px-5 py-4">التاريخ</th>
+                  <th className="text-center px-5 py-4">إجراء</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
@@ -546,8 +828,19 @@ const ApprovedResults = () => {
                   const g = getGradeLabel(res.percentage);
                   const pct = parseFloat(res.percentage).toFixed(1);
                   const isPass = parseFloat(res.percentage) >= 50;
+                  const isChecked = selectedIds.has(res.id);
                   return (
                     <tr key={res.id} className="hover:bg-indigo-50/20 transition-colors group">
+                      <td className="text-center px-4 py-4">
+                        <input
+                          type="checkbox"
+                          aria-label={`تحديد ${res.studentName || res.studentId}`}
+                          disabled={isBulkDeleting}
+                          checked={isChecked}
+                          onChange={() => toggleSelected(res.id)}
+                          className="w-4 h-4 accent-indigo-600 cursor-pointer"
+                        />
+                      </td>
                       <td className="w-12 text-center px-5 py-4">
                         <span className="text-sm font-black text-slate-300">{idx + 1}</span>
                       </td>
@@ -605,6 +898,28 @@ const ApprovedResults = () => {
                           {new Date(res.timestamp).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}
                         </div>
                       </td>
+                      <td className="px-5 py-4 text-center">
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            onClick={() => openEditModal(res)}
+                            disabled={isBulkDeleting}
+                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100 transition-all text-xs font-black"
+                            title="تعديل درجة الطالب"
+                          >
+                            <Edit2 size={14} />
+                            تعديل
+                          </button>
+                          <button
+                            onClick={() => handleDeleteResult(res)}
+                            disabled={deletingId === res.id || isBulkDeleting}
+                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-50 text-rose-700 border border-rose-100 hover:bg-rose-100 transition-all text-xs font-black disabled:opacity-60"
+                            title="حذف النتيجة"
+                          >
+                            <Trash2 size={14} />
+                            {deletingId === res.id ? 'جاري الحذف...' : 'حذف'}
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -642,6 +957,148 @@ const ApprovedResults = () => {
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {editingResult && (
+        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden">
+            <div className="px-6 py-5 bg-indigo-600 text-white flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-black">تعديل درجة الطالب</h3>
+                <p className="text-xs text-indigo-100 mt-1">{editingResult.studentName || editingResult.studentId}</p>
+              </div>
+              <button
+                onClick={closeEditModal}
+                disabled={isSavingEdit}
+                className="p-2 rounded-xl hover:bg-white/10 disabled:opacity-50"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditedGrade} className="p-6 space-y-4">
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1.5">الدرجة</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={editScore}
+                      onChange={(e) => setEditScore(e.target.value)}
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1.5">الإجمالي</label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="0.5"
+                      value={editTotal}
+                      onChange={(e) => setEditTotal(e.target.value)}
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1.5">تاريخ الاعتماد</label>
+                  <input
+                    type="date"
+                    value={editDate}
+                    onChange={(e) => setEditDate(e.target.value)}
+                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm"
+                    required
+                  />
+                </div>
+
+                <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-3">
+                  سيتم تحديث الدرجة والتاريخ والنسبة والتقدير تلقائياً بعد الحفظ.
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="submit"
+                  disabled={isSavingEdit}
+                  className="flex-1 py-3.5 rounded-2xl bg-indigo-600 text-white font-black hover:bg-indigo-700 transition-all disabled:opacity-60"
+                >
+                  {isSavingEdit ? 'جاري الحفظ...' : 'حفظ التعديل'}
+                </button>
+                <button
+                  type="button"
+                  onClick={closeEditModal}
+                  disabled={isSavingEdit}
+                  className="px-5 py-3.5 rounded-2xl bg-slate-100 text-slate-600 font-black hover:bg-slate-200 transition-all"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Bulk Date Edit Modal ── */}
+      {showBulkDateModal && (
+        <div className="fixed inset-0 z-[140] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden border-none text-right">
+             <div className="px-8 py-6 bg-indigo-600 text-white flex items-center justify-between">
+                <div>
+                   <h3 className="text-xl font-black font-header">تغيير تاريخ الاعتماد للمحدد</h3>
+                   <p className="text-xs text-indigo-100 mt-1">تحديث {selectedIds.size} سجل دفعة واحدة</p>
+                </div>
+                <button onClick={() => !isSavingBulkDate && setShowBulkDateModal(false)} className="p-2 hover:bg-white/10 rounded-xl transition-all"><X size={20}/></button>
+             </div>
+             <div className="p-8 space-y-6">
+                <div className="space-y-3">
+                   <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">اختر التاريخ الجديد</label>
+                   <input 
+                      type="date" 
+                      value={bulkDateValue}
+                      onChange={e => setBulkDateValue(e.target.value)}
+                      className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-black text-slate-700 text-center focus:bg-white focus:ring-8 focus:ring-indigo-50 transition-all"
+                   />
+                </div>
+                
+                {isSavingBulkDate && (
+                  <div className="space-y-3 animate-in fade-in duration-300">
+                    <div className="flex justify-between items-center text-xs font-black">
+                      <span className="text-indigo-600">جاري التحديث...</span>
+                      <span className="text-slate-400">{bulkDateIndex} / {selectedIds.size}</span>
+                    </div>
+                    <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-indigo-600 transition-all duration-300" 
+                        style={{ width: `${(bulkDateIndex / selectedIds.size) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex gap-4">
+                   <button 
+                      onClick={() => setShowBulkDateModal(false)} 
+                      disabled={isSavingBulkDate}
+                      className="px-8 py-4 bg-white text-slate-400 rounded-2xl font-black border border-slate-100 hover:bg-slate-50 transition-all shadow-sm"
+                   >
+                      تراجع
+                   </button>
+                   <button 
+                      onClick={handleBulkDateSave}
+                      disabled={isSavingBulkDate || !bulkDateValue}
+                      className="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-black hover:bg-indigo-700 shadow-xl shadow-indigo-100 transition-all disabled:opacity-40"
+                   >
+                      {isSavingBulkDate ? 'جاري الحفظ...' : `تحديث ${selectedIds.size} سجل`}
+                   </button>
+                </div>
+             </div>
           </div>
         </div>
       )}

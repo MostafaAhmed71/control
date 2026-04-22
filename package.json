@@ -45,7 +45,16 @@
         "from": "omr_engine",
         "to": "omr_engine",
         "filter": [
-          "**/*"
+          "**/*",
+          "!venv/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!debug_scans/**",
+          "!temp_sheets_custom/**",
+          "!*.pdf",
+          "!*.png",
+          "!*.jpg",
+          "!*.jpeg"
         ]
       },
       {

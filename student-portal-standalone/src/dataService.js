@@ -9,7 +9,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 export const getOmrResults = async () => {
   const { data, error } = await supabase.from('omr_results').select('*');
   if (error) return [];
-  return data.map(item => ({ id: item.id, ...item.data }));
+  return data.map(item => ({ id: item.id, _rowCreatedAt: item.created_at, ...item.data }));
 };
 
 export const getOmrExams = async () => {
