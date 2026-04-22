@@ -1,8 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
 
 // --- API Endpoints (Local services) ---
-export const OMR_API_BASE = 'http://localhost:8000';
-export const WHATSAPP_API_BASE = 'http://localhost:3001';
+// In production (behind Caddy/Nginx), prefer same-origin relative paths.
+// You can override these via Vite env vars at build-time.
+export const OMR_API_BASE = (import.meta.env.VITE_OMR_API_BASE || '/api/omr').replace(/\/$/, '');
+export const WHATSAPP_API_BASE = (import.meta.env.VITE_WHATSAPP_API_BASE || '/api/whatsapp').replace(/\/$/, '');
 
 // --- Supabase Configuration ---
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
