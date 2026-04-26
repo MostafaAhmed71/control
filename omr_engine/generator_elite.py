@@ -14,6 +14,18 @@ def ar(text):
         return str(text)
     return get_display(arabic_reshaper.reshape(str(text)), base_dir="R")
 
+
+_RAQM = has_raqm()
+_TXT_KW = {"direction": "rtl", "language": "ar"} if _RAQM else {}
+
+
+def _tl(draw, text, font):
+    return draw.textlength(text, font=font, **_TXT_KW)
+
+
+def _dt(draw, xy, text, font, fill=BLACK):
+    return draw.text(xy, text, fill=fill, font=font, **_TXT_KW)
+
 def fmt_date_parts(date_str):
     if not date_str: return ("", "", "")
     try:
@@ -60,8 +72,8 @@ def draw_elite_header(img, draw, student_info):
 
     # Centered Title
     title = ar(S_SCHOOL)
-    tw = draw.textlength(title, font=FONT_MD_B)
-    draw.text(((WIDTH - tw) // 2, HDR_TOP + (HDR_H - 80) // 2), title, fill=BLACK, font=FONT_MD_B)
+    tw = _tl(draw, title, font=FONT_MD_B)
+    _dt(draw, ((WIDTH - tw) // 2, HDR_TOP + (HDR_H - 80) // 2), title, fill=BLACK, font=FONT_MD_B)
 
     logo_h = HDR_H - 2 * PAD
     cx = WIDTH // 2
@@ -102,9 +114,9 @@ def draw_elite_header(img, draw, student_info):
     def draw_field(x_start, x_end, y, label, val):
         lbl_text = ar(label)
         val_text = ar(val)
-        lw = draw.textlength(lbl_text, font=FONT_SM)
-        draw.text((x_end - lw - 20, y + (row_h - 45) // 2), lbl_text, fill=BLACK, font=FONT_SM)
-        draw.text((x_start + 20, y + (row_h - 45) // 2), val_text, fill=BLACK, font=FONT_SM)
+        lw = _tl(draw, lbl_text, font=FONT_SM)
+        _dt(draw, (x_end - lw - 20, y + (row_h - 45) // 2), lbl_text, fill=BLACK, font=FONT_SM)
+        _dt(draw, (x_start + 20, y + (row_h - 45) // 2), val_text, fill=BLACK, font=FONT_SM)
 
     mid = WIDTH // 2
     draw_field(mid, MARGIN + box_w, info_y, u"\u0627\u0633\u0645 \u0627\u0644\u0637\u0627\u0644\u0628:", student_info.get("name",""))
@@ -119,14 +131,14 @@ def draw_elite_header(img, draw, student_info):
     y = info_y + row_h
     draw.rectangle([x_start, y, x_end, y + 60], outline=BLACK, width=3)
     draw.rectangle([x_end - 150, y, x_end, y + 60], outline=BLACK, width=3, fill=BLACK)
-    draw.text((x_end - 130, y + 5), ar(u"\u0627\u0644\u062a\u0627\u0631\u064a\u062e:"), fill=WHITE, font=FONT_SM)
+    _dt(draw, (x_end - 130, y + 5), ar(u"\u0627\u0644\u062a\u0627\u0631\u064a\u062e:"), fill=WHITE, font=FONT_SM)
     
     day, month, year = fmt_date_parts(student_info.get("date",""))
     if year:
         dv = ar(f"{day} - {month} - {year}")
     else:
         dv = ar(day)
-    draw.text((x_start + 20, y + 5), dv, fill=BLACK, font=FONT_SM)
+    _dt(draw, (x_start + 20, y + 5), dv, fill=BLACK, font=FONT_SM)
 
 def draw_questions_elite(draw, start_y, num_questions=30):
     col_w = (WIDTH - 2 * MARGIN) // 2
@@ -140,8 +152,9 @@ def draw_questions_elite(draw, start_y, num_questions=30):
     for col_x in [r_col_x, l_col_x]:
         for oi, t in enumerate(options):
             ox = col_x + (col_w - 120) - oi * 120
-            tw = draw.textlength(ar(t), font=FONT_SM)
-            draw.text((int(ox - tw // 2), start_y - 110), ar(t), fill=BLACK, font=FONT_SM)
+            at = ar(t)
+            tw = _tl(draw, at, font=FONT_SM)
+            _dt(draw, (int(ox - tw // 2), start_y - 110), at, fill=BLACK, font=FONT_SM)
 
     per_col = (num_questions + 1) // 2
     for q in range(num_questions):
@@ -152,8 +165,8 @@ def draw_questions_elite(draw, start_y, num_questions=30):
         
         y = start_y + r * row_spacing
         num_str = ar("%d." % q_num)
-        nw = draw.textlength(num_str, font=FONT_MD)
-        draw.text((col_x + col_w - int(nw), y - 30), num_str, fill=BLACK, font=FONT_MD)
+        nw = _tl(draw, num_str, font=FONT_MD)
+        _dt(draw, (col_x + col_w - int(nw), y - 30), num_str, fill=BLACK, font=FONT_MD)
 
         bubble_start_x = col_x + col_w - 120
         for oi in range(4):
@@ -187,11 +200,11 @@ def generate_personalized_sheet(student_info, filename=None):
     fy_bot = HEIGHT - MARGIN - 40
 
     pr = ar(S_PRINCIPAL)
-    draw.text((MARGIN + 100, fy_top), pr, fill=BLACK, font=FONT_MD)
+    _dt(draw, (MARGIN + 100, fy_top), pr, fill=BLACK, font=FONT_MD)
 
     st  = ar(S_FOOTER)
-    stw = draw.textlength(st, font=FONT_MD)
-    draw.text(((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
+    stw = _tl(draw, st, font=FONT_MD)
+    _dt(draw, ((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
     
     if filename:
         img.save(filename)

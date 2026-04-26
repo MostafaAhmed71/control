@@ -22,6 +22,18 @@ def ar(text):
         return str(text)
     return get_display(arabic_reshaper.reshape(str(text)), base_dir="R")
 
+
+_RAQM = has_raqm()
+_TXT_KW = {"direction": "rtl", "language": "ar"} if _RAQM else {}
+
+
+def _tl(draw, text, font):
+    return draw.textlength(text, font=font, **_TXT_KW)
+
+
+def _dt(draw, xy, text, font, fill=BLACK):
+    return draw.text(xy, text, fill=fill, font=font, **_TXT_KW)
+
 def fmt_date_parts(date_str):
     if not date_str: return ("", "", "")
     try:
@@ -97,8 +109,8 @@ def draw_header(img, draw, student_info, cfg):
     txt_start_y = HDR_TOP + 35
     max_tw = 0
     for idx, (t, font) in enumerate(lines):
-        tw = draw.textlength(t, font=font)
-        draw.text((int(cx - tw // 2), txt_start_y + idx * 75), t, fill=BLACK, font=font)
+        tw = _tl(draw, t, font=font)
+        _dt(draw, (int(cx - tw // 2), txt_start_y + idx * 75), t, fill=BLACK, font=font)
         max_tw = max(max_tw, tw)
 
     # Logos (Slightly Smaller)
@@ -144,16 +156,16 @@ def draw_header(img, draw, student_info, cfg):
 
     def rt(label, box_right, y_top, font=FONT_LABEL):
         t  = ar(label)
-        tw = draw.textlength(t, font=font)
+        tw = _tl(draw, t, font=font)
         ty = y_top + (row_h - 60) // 2
-        draw.text((box_right - tw - P, ty), t, fill=BLACK, font=font)
+        _dt(draw, (box_right - tw - P, ty), t, fill=BLACK, font=font)
         return box_right - tw - P * 2
 
     # Row 1: Name (always shown)
     draw.rectangle([x, start_y, x + w, start_y + row_h], outline=BLACK, width=3)
     ll = rt("اسم الطالب:", x + w, start_y)
     nv = ar(student_info.get("name", ""))
-    draw.text((ll - draw.textlength(nv, font=FONT_LG) - P,
+    _dt(draw, (ll - _tl(draw, nv, font=FONT_LG) - P,
                start_y + (row_h - 65) // 2), nv, fill=BLACK, font=FONT_LG)
 
     row_offset = 1
@@ -174,7 +186,7 @@ def draw_header(img, draw, student_info, cfg):
         def draw_cell(label, value, cell_left, cell_right):
             ll = rt(label, cell_right, y)
             vv = ar(value)
-            draw.text((ll - draw.textlength(vv, font=FONT_LG) - P,
+            _dt(draw, (ll - _tl(draw, vv, font=FONT_LG) - P,
                        y + (row_h - 65) // 2), vv, fill=BLACK, font=FONT_LG)
 
         draw_cell("التاريخ:", date_val, mid_x, x + w)
@@ -188,7 +200,7 @@ def draw_header(img, draw, student_info, cfg):
             lld = rt("التاريخ:", x + w, y)
             day_num, month, year_ar = fmt_date_parts(student_info.get("date", ""))
             dv = ar(f"{day_num} - {month} - {year_ar}") if year_ar else ar(day_num)
-            draw.text((lld - draw.textlength(dv, font=FONT_LG) - P,
+            _dt(draw, (lld - _tl(draw, dv, font=FONT_LG) - P,
                        y + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
             row_offset += 1
 
@@ -198,7 +210,7 @@ def draw_header(img, draw, student_info, cfg):
             draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
             lly = rt("اليوم:", x + w, y)
             dy_val = ar(student_info.get("day", ""))
-            draw.text((lly - draw.textlength(dy_val, font=FONT_LG) - P,
+            _dt(draw, (lly - _tl(draw, dy_val, font=FONT_LG) - P,
                        y + (row_h - 65) // 2), dy_val, fill=BLACK, font=FONT_LG)
             row_offset += 1
 
@@ -215,7 +227,7 @@ def draw_header(img, draw, student_info, cfg):
         def draw_cell(label, value, cell_left, cell_right):
             ll = rt(label, cell_right, y)
             vv = ar(value)
-            draw.text((ll - draw.textlength(vv, font=FONT_LG) - P,
+            _dt(draw, (ll - _tl(draw, vv, font=FONT_LG) - P,
                        y + (row_h - 65) // 2), vv, fill=BLACK, font=FONT_LG)
 
         draw_cell("الصف:", student_info.get("class", ""), mid_x, x + w)
@@ -228,7 +240,7 @@ def draw_header(img, draw, student_info, cfg):
             draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
             llc = rt("الصف:", x + w, y)
             cv = ar(student_info.get("class", ""))
-            draw.text((llc - draw.textlength(cv, font=FONT_LG) - P,
+            _dt(draw, (llc - _tl(draw, cv, font=FONT_LG) - P,
                        y + (row_h - 65) // 2), cv, fill=BLACK, font=FONT_LG)
             row_offset += 1
 
@@ -238,7 +250,7 @@ def draw_header(img, draw, student_info, cfg):
             draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
             lls = rt("المادة:", x + w, y)
             sv = ar(student_info.get("subject", ""))
-            draw.text((lls - draw.textlength(sv, font=FONT_LG) - P,
+            _dt(draw, (lls - _tl(draw, sv, font=FONT_LG) - P,
                        y + (row_h - 65) // 2), sv, fill=BLACK, font=FONT_LG)
 
 
@@ -277,8 +289,8 @@ def draw_questions_section(draw, start_y, num_questions=30):
         bub_right = num_right - NUM_AREA
         for oi, t in enumerate(opt_labels_ar):
             ox = bub_right - oi * QS_OPT_SPACING
-            tw = int(draw.textlength(t, font=FONT_SM))
-            draw.text((int(ox) - tw // 2, header_y), t, fill=BLACK, font=FONT_SM)
+            tw = int(_tl(draw, t, font=FONT_SM))
+            _dt(draw, (int(ox) - tw // 2, header_y), t, fill=BLACK, font=FONT_SM)
 
     per_col = (num_questions + 1) // 2
     for q in range(num_questions):
@@ -290,8 +302,8 @@ def draw_questions_section(draw, start_y, num_questions=30):
         bub_right = num_right - NUM_AREA
 
         nt  = ar("%d." % q_num)
-        ntw = draw.textlength(nt, font=FONT_SM)
-        draw.text((int(num_right - ntw), y - 18), nt, fill=BLACK, font=FONT_SM)
+        ntw = _tl(draw, nt, font=FONT_SM)
+        _dt(draw, (int(num_right - ntw), y - 18), nt, fill=BLACK, font=FONT_SM)
 
         for oi in range(4):
             ox = bub_right - oi * QS_OPT_SPACING
@@ -314,10 +326,10 @@ def generate_personalized_sheet(student_info, template_config=None, num_question
     fy_top = HEIGHT - MARGIN - 160
     fy_bot = HEIGHT - MARGIN - 40
     pt  = ar(cfg["principal"])
-    draw.text((MARGIN + 40, fy_top), pt, fill=BLACK, font=FONT_MD)
+    _dt(draw, (MARGIN + 40, fy_top), pt, fill=BLACK, font=FONT_MD)
     st  = ar(cfg["footer"])
-    stw = draw.textlength(st, font=FONT_MD)
-    draw.text(((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
+    stw = _tl(draw, st, font=FONT_MD)
+    _dt(draw, ((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
 
     if filename:
         img.save(filename)

@@ -14,6 +14,18 @@ def ar(text):
         return str(text)
     return get_display(arabic_reshaper.reshape(str(text)), base_dir="R")
 
+
+_RAQM = has_raqm()
+_TXT_KW = {"direction": "rtl", "language": "ar"} if _RAQM else {}
+
+
+def _tl(draw, text, font):
+    return draw.textlength(text, font=font, **_TXT_KW)
+
+
+def _dt(draw, xy, text, font, fill=BLACK):
+    return draw.text(xy, text, fill=fill, font=font, **_TXT_KW)
+
 def fmt_date_parts(date_str):
     if not date_str: return ("", "", "")
     try:
@@ -87,14 +99,14 @@ def draw_header(img, draw, student_info):
         (ar(S_EXAM),   FONT_SM),
         (ar(S_YEAR),   FONT_SM),
     ]
-    max_tw      = int(max(draw.textlength(t, font=f) for t, f in title_data))
+    max_tw      = int(max(_tl(draw, t, font=f) for t, f in title_data))
     total_h     = len(title_data) * 78
     txt_start_y = HDR_TOP + (HDR_H - total_h) // 2
     cx          = WIDTH // 2
 
     for idx, (t, font) in enumerate(title_data):
-        tw = draw.textlength(t, font=font)
-        draw.text((int(cx - tw // 2), txt_start_y + idx * 78), t, fill=BLACK, font=font)
+        tw = _tl(draw, t, font=font)
+        _dt(draw, (int(cx - tw // 2), txt_start_y + idx * 78), t, fill=BLACK, font=font)
 
     # ── Header Logos (Identical Sizing) ───────────────────────────────────────
     logo_h = HDR_H - 75
@@ -126,9 +138,9 @@ def draw_header(img, draw, student_info):
 
     def rt(label, box_right, y_top, font=FONT_SM):
         t  = ar(label)
-        tw = draw.textlength(t, font=font)
+        tw = _tl(draw, t, font=font)
         ty = y_top + (row_h - 60) // 2
-        draw.text((box_right - tw - P, ty), t, fill=BLACK, font=font)
+        _dt(draw, (box_right - tw - P, ty), t, fill=BLACK, font=font)
         return box_right - tw - P * 2     # left edge for value
 
     mid_x = x + w // 2
@@ -137,33 +149,33 @@ def draw_header(img, draw, student_info):
     draw.rectangle([x, start_y, x + w, start_y + row_h], outline=BLACK, width=3)
     ll = rt(S_NAME_LBL, x + w, start_y)
     nv = ar(student_info.get("name", ""))
-    draw.text((ll - draw.textlength(nv, font=FONT_MD) - P,
+    _dt(draw, (ll - _tl(draw, nv, font=FONT_MD) - P,
                start_y + (row_h - 65) // 2), nv, fill=BLACK, font=FONT_MD)
 
     # Row 2: class | subject
     draw.rectangle([mid_x, start_y + row_h, x + w, start_y + 2 * row_h], outline=BLACK, width=3)
     ll2 = rt(S_CLASS_LBL, x + w, start_y + row_h)
     cv  = ar(student_info.get("class", ""))
-    draw.text((ll2 - draw.textlength(cv, font=FONT_SM) - P,
+    _dt(draw, (ll2 - _tl(draw, cv, font=FONT_SM) - P,
                start_y + row_h + (row_h - 45) // 2), cv, fill=BLACK, font=FONT_SM)
 
     draw.rectangle([x, start_y + row_h, mid_x, start_y + 2 * row_h], outline=BLACK, width=3)
     ll3 = rt(S_SUBJ_LBL, mid_x, start_y + row_h)
     sv  = ar(student_info.get("subject", ""))
-    draw.text((ll3 - draw.textlength(sv, font=FONT_SM) - P,
+    _dt(draw, (ll3 - _tl(draw, sv, font=FONT_SM) - P,
                start_y + row_h + (row_h - 45) // 2), sv, fill=BLACK, font=FONT_SM)
 
     # Row 3: seat | committee
     draw.rectangle([mid_x, start_y + 2 * row_h, x + w, start_y + 3 * row_h], outline=BLACK, width=3)
     lls  = rt(S_SEAT_LBL, x + w, start_y + 2 * row_h)
     seatv = ar(student_info.get("seat_number", ""))
-    draw.text((lls - draw.textlength(seatv, font=FONT_SM) - P,
+    _dt(draw, (lls - _tl(draw, seatv, font=FONT_SM) - P,
                start_y + 2 * row_h + (row_h - 45) // 2), seatv, fill=BLACK, font=FONT_SM)
 
     draw.rectangle([x, start_y + 2 * row_h, mid_x, start_y + 3 * row_h], outline=BLACK, width=3)
     llc   = rt(S_COMM_LBL, mid_x, start_y + 2 * row_h)
     commv = ar(student_info.get("committee_number", ""))
-    draw.text((llc - draw.textlength(commv, font=FONT_SM) - P,
+    _dt(draw, (llc - _tl(draw, commv, font=FONT_SM) - P,
                start_y + 2 * row_h + (row_h - 45) // 2), commv, fill=BLACK, font=FONT_SM)
 
     # Row 4: date
@@ -176,7 +188,7 @@ def draw_header(img, draw, student_info):
     else:
         dv = ar(day)
         
-    draw.text((lld - draw.textlength(dv, font=FONT_SM) - P,
+    _dt(draw, (lld - _tl(draw, dv, font=FONT_SM) - P,
                start_y + 3 * row_h + (row_h - 45) // 2), dv, fill=BLACK, font=FONT_SM)
 
 
@@ -220,8 +232,8 @@ def draw_questions_section(draw, start_y, num_questions=30):
         bub_right = num_right - NUM_AREA
         for oi, t in enumerate(opt_labels_ar):
             ox = bub_right - oi * QS_OPT_SPACING
-            tw = int(draw.textlength(t, font=FONT_SM))
-            draw.text((int(ox) - tw // 2, header_y), t, fill=BLACK, font=FONT_SM)
+            tw = int(_tl(draw, t, font=FONT_SM))
+            _dt(draw, (int(ox) - tw // 2, header_y), t, fill=BLACK, font=FONT_SM)
 
     per_col = (num_questions + 1) // 2
     for q in range(num_questions):
@@ -237,8 +249,8 @@ def draw_questions_section(draw, start_y, num_questions=30):
         bub_right = num_right - NUM_AREA
 
         nt  = ar("%d." % (q + 1))
-        ntw = draw.textlength(nt, font=FONT_SM)
-        draw.text((int(num_right - ntw), y - 18), nt, fill=BLACK, font=FONT_SM)
+        ntw = _tl(draw, nt, font=FONT_SM)
+        _dt(draw, (int(num_right - ntw), y - 18), nt, fill=BLACK, font=FONT_SM)
 
         for oi in range(4):
             ox = bub_right - oi * QS_OPT_SPACING
@@ -261,11 +273,11 @@ def generate_personalized_sheet(student_info, num_questions=30, filename=None):
     fy_bot = HEIGHT - MARGIN - 40
 
     pt  = ar(S_PRINCIPAL)
-    draw.text((MARGIN + 40, fy_top), pt, fill=BLACK, font=FONT_MD)
+    _dt(draw, (MARGIN + 40, fy_top), pt, fill=BLACK, font=FONT_MD)
 
     st  = ar(S_FOOTER)
-    stw = draw.textlength(st, font=FONT_MD)
-    draw.text(((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
+    stw = _tl(draw, st, font=FONT_MD)
+    _dt(draw, ((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
 
     if filename:
         img.save(filename)

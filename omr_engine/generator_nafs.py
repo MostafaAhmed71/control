@@ -16,6 +16,19 @@ def ar(text):
         return str(text)
     return get_display(arabic_reshaper.reshape(str(text)), base_dir="R")
 
+
+# When RAQM is available, we must render text with explicit RTL direction
+_RAQM = has_raqm()
+_TXT_KW = {"direction": "rtl", "language": "ar"} if _RAQM else {}
+
+
+def _tl(draw, text, font):
+    return draw.textlength(text, font=font, **_TXT_KW)
+
+
+def _dt(draw, xy, text, font, fill=BLACK):
+    return draw.text(xy, text, fill=fill, font=font, **_TXT_KW)
+
 def fmt_date_parts(date_str):
     """Returns (day, month, year) in Arabic numerals."""
     if not date_str: return ("", "", "")
@@ -95,8 +108,8 @@ def draw_header(img, draw, student_info):
     cx = WIDTH // 2
     for idx, t in enumerate(lines):
         font = FONT_MD_B if idx == 0 else FONT_MD_S
-        tw = draw.textlength(t, font=font)
-        draw.text((int(cx - tw // 2), txt_start_y + idx * 75), t, fill=BLACK, font=font)
+        tw = _tl(draw, t, font=font)
+        _dt(draw, (int(cx - tw // 2), txt_start_y + idx * 75), t, fill=BLACK, font=font)
         max_tw = max(max_tw, tw)
 
     # ── Header Logos ──────────────────────────────────────────────────────────
@@ -129,9 +142,9 @@ def draw_header(img, draw, student_info):
 
     def rt(label, box_right, y_top, font=FONT_LABEL):
         t  = ar(label)
-        tw = draw.textlength(t, font=font)
+        tw = _tl(draw, t, font=font)
         ty = y_top + (row_h - 60) // 2
-        draw.text((box_right - tw - P, ty), t, fill=BLACK, font=font)
+        _dt(draw, (box_right - tw - P, ty), t, fill=BLACK, font=font)
         return box_right - tw - P * 2     # left edge for value
 
     mid_x = x + w // 2
@@ -140,7 +153,7 @@ def draw_header(img, draw, student_info):
     draw.rectangle([x, start_y, x + w, start_y + row_h], outline=BLACK, width=3)
     ll = rt(S_NAME_LBL, x + w, start_y)
     nv = ar(student_info.get("name", ""))
-    draw.text((ll - draw.textlength(nv, font=FONT_LG) - P,
+    _dt(draw, (ll - _tl(draw, nv, font=FONT_LG) - P,
                start_y + (row_h - 65) // 2), nv, fill=BLACK, font=FONT_LG)
 
     # Row 2: date
@@ -156,18 +169,18 @@ def draw_header(img, draw, student_info):
         
         date_str_full = f"{day} - {month} - {year}"
         dv = ar(date_str_full)
-        draw.text((lld - draw.textlength(dv, font=FONT_LG) - P,
+        _dt(draw, (lld - _tl(draw, dv, font=FONT_LG) - P,
                    start_y + row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
     else:
         dv = ar(day)
-        draw.text((lld - draw.textlength(dv, font=FONT_LG) - P,
+        _dt(draw, (lld - _tl(draw, dv, font=FONT_LG) - P,
                    start_y + row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
 
     # Row 3: day
     draw.rectangle([x, start_y + 2 * row_h, x + w, start_y + 3 * row_h], outline=BLACK, width=3)
     lly = rt("اليوم:", x + w, start_y + 2 * row_h)
     dy_val  = ar(student_info.get("day", ""))
-    draw.text((lly - draw.textlength(dy_val, font=FONT_LG) - P,
+    _dt(draw, (lly - _tl(draw, dy_val, font=FONT_LG) - P,
                start_y + 2 * row_h + (row_h - 65) // 2), dy_val, fill=BLACK, font=FONT_LG)
 
 
@@ -214,8 +227,8 @@ def draw_questions_section(draw, start_y, num_questions=30):
         bub_right = num_right - NUM_AREA   # center of أ bubble
         for oi, t in enumerate(opt_labels_ar):
             ox = bub_right - oi * QS_OPT_SPACING
-            tw = int(draw.textlength(t, font=FONT_SM))
-            draw.text((int(ox) - tw // 2, header_y), t, fill=BLACK, font=FONT_SM)
+            tw = int(_tl(draw, t, font=FONT_SM))
+            _dt(draw, (int(ox) - tw // 2, header_y), t, fill=BLACK, font=FONT_SM)
 
     per_col = (num_questions + 1) // 2   # questions per column (ceiling division)
     for q in range(num_questions):
@@ -234,8 +247,8 @@ def draw_questions_section(draw, start_y, num_questions=30):
 
         # Question number
         nt  = ar("%d." % q_num)
-        ntw = draw.textlength(nt, font=FONT_SM)
-        draw.text((int(num_right - ntw), y - 18), nt, fill=BLACK, font=FONT_SM)
+        ntw = _tl(draw, nt, font=FONT_SM)
+        _dt(draw, (int(num_right - ntw), y - 18), nt, fill=BLACK, font=FONT_SM)
 
         # Bubbles: أ at bub_right, each subsequent 1 step left
         for oi in range(4):
@@ -260,11 +273,11 @@ def generate_personalized_sheet(student_info, filename=None):
     fy_bot = HEIGHT - MARGIN - 40
 
     pt  = ar(S_PRINCIPAL)
-    draw.text((MARGIN + 40, fy_top), pt, fill=BLACK, font=FONT_MD)
+    _dt(draw, (MARGIN + 40, fy_top), pt, fill=BLACK, font=FONT_MD)
 
     st  = ar(S_FOOTER)
-    stw = draw.textlength(st, font=FONT_MD)
-    draw.text(((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
+    stw = _tl(draw, st, font=FONT_MD)
+    _dt(draw, ((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
 
     if filename:
         img.save(filename)
