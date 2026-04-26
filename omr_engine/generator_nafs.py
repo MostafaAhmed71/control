@@ -58,6 +58,12 @@ OPT_LABELS  = ["\u0623", "\u0628", "\u062c", "\u062f"]   # أ ب ج د
 
 LOGO_SCH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "public", "شعار المدرسة.jpeg")
 
+# PDF sizing: constants are in pixels at ~300 DPI. FPDF "pt" units are 1/72 inch.
+# Convert px → pt so the resulting PDF page is true A4 (≈595x842 pt).
+_DPI = 300
+PDF_W_PT = int(round(WIDTH * 72 / _DPI))
+PDF_H_PT = int(round(HEIGHT * 72 / _DPI))
+
 def draw_corner_markers(draw):
     ms = CORNER_MARKER_SIZE
     draw.rectangle([MARGIN, MARGIN, MARGIN + ms, MARGIN + ms], fill=BLACK)
@@ -264,7 +270,7 @@ def generate_personalized_sheet(student_info, filename=None):
 def create_bulk_pdf(students_list, output_pdf="omr_batch.pdf"):
     """PDF generation using temp files (fpdf 1.x compatibility)."""
     import tempfile
-    pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
+    pdf = FPDF(unit="pt", format=(PDF_W_PT, PDF_H_PT))
     total = len(students_list)
     tmp_files = []
     try:
@@ -275,7 +281,7 @@ def create_bulk_pdf(students_list, output_pdf="omr_batch.pdf"):
             img.save(tmp.name, format="JPEG", quality=95)
             tmp_files.append(tmp.name)
             pdf.add_page()
-            pdf.image(tmp.name, 0, 0, WIDTH, HEIGHT)
+            pdf.image(tmp.name, 0, 0, PDF_W_PT, PDF_H_PT)
         pdf.output(output_pdf)
     finally:
         for f in tmp_files:
@@ -289,7 +295,7 @@ def create_bulk_pdf(students_list, output_pdf="omr_batch.pdf"):
 def create_bulk_pdf_stream(students_list, output_pdf="omr_batch.pdf"):
     """Generator: yields progress dicts then finished. Uses temp files for fpdf 1.x."""
     import tempfile
-    pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
+    pdf = FPDF(unit="pt", format=(PDF_W_PT, PDF_H_PT))
     total = len(students_list)
     tmp_files = []
     try:
@@ -300,7 +306,7 @@ def create_bulk_pdf_stream(students_list, output_pdf="omr_batch.pdf"):
             img.save(tmp.name, format="JPEG", quality=95)
             tmp_files.append(tmp.name)
             pdf.add_page()
-            pdf.image(tmp.name, 0, 0, WIDTH, HEIGHT)
+            pdf.image(tmp.name, 0, 0, PDF_W_PT, PDF_H_PT)
             yield {"done": idx + 1, "total": total, "name": student.get("name", "")}
         pdf.output(output_pdf)
     finally:

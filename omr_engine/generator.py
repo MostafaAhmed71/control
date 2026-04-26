@@ -53,6 +53,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_MIN = os.path.join(os.path.dirname(BASE_DIR), "public", "شعار الوزارة.png")
 LOGO_SCH = os.path.join(os.path.dirname(BASE_DIR), "public", "شعار المدرسة.jpeg")
 
+# PDF sizing: constants are in pixels at ~300 DPI. FPDF "pt" units are 1/72 inch.
+# Convert px → pt so the resulting PDF page is true A4 (≈595x842 pt).
+_DPI = 300
+PDF_W_PT = int(round(WIDTH * 72 / _DPI))
+PDF_H_PT = int(round(HEIGHT * 72 / _DPI))
+
 def draw_corner_markers(draw):
     ms = CORNER_MARKER_SIZE
     draw.rectangle([MARGIN, MARGIN, MARGIN + ms, MARGIN + ms], fill=BLACK)
@@ -265,7 +271,7 @@ def generate_personalized_sheet(student_info, num_questions=30, filename=None):
 
 
 def create_bulk_pdf(students_list, output_pdf="omr_batch.pdf"):
-    pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
+    pdf = FPDF(unit="pt", format=(PDF_W_PT, PDF_H_PT))
     temp_dir = "temp_sheets"
     if not os.path.exists(temp_dir):
         os.makedirs(temp_dir)
@@ -276,7 +282,7 @@ def create_bulk_pdf(students_list, output_pdf="omr_batch.pdf"):
         img_path = os.path.join(temp_dir, f"sheet_{idx}.png")
         img.save(img_path)
         pdf.add_page()
-        pdf.image(img_path, 0, 0, WIDTH, HEIGHT)
+        pdf.image(img_path, 0, 0, PDF_W_PT, PDF_H_PT)
         
     pdf.output(output_pdf)
     return output_pdf

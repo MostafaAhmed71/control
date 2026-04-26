@@ -49,6 +49,12 @@ except:
 
 OPT_LABELS = ["أ", "ب", "ج", "د"]
 
+# PDF sizing: constants are in pixels at ~300 DPI. FPDF "pt" units are 1/72 inch.
+# Convert px → pt so the resulting PDF page is true A4 (≈595x842 pt).
+_DPI = 300
+PDF_W_PT = int(round(WIDTH * 72 / _DPI))
+PDF_H_PT = int(round(HEIGHT * 72 / _DPI))
+
 # Default config — mirrors the NAFS template, override any field
 DEFAULT_CONFIG = {
     "school_name":   "متوسطة وثانوية نخبة الشمال الأهلية",
@@ -320,7 +326,7 @@ def create_bulk_pdf(students_list, template_config=None, output_pdf="omr_custom_
     """PDF generation using temp files (fpdf 1.x compatibility)."""
     import tempfile
     cfg = {**DEFAULT_CONFIG, **(template_config or {})}
-    pdf = FPDF(unit="pt", format=(WIDTH, HEIGHT))
+    pdf = FPDF(unit="pt", format=(PDF_W_PT, PDF_H_PT))
     tmp_files = []
     try:
         for idx, student in enumerate(students_list):
@@ -331,7 +337,7 @@ def create_bulk_pdf(students_list, template_config=None, output_pdf="omr_custom_
             img.save(tmp.name, format="JPEG", quality=95)
             tmp_files.append(tmp.name)
             pdf.add_page()
-            pdf.image(tmp.name, 0, 0, WIDTH, HEIGHT)
+            pdf.image(tmp.name, 0, 0, PDF_W_PT, PDF_H_PT)
         pdf.output(output_pdf)
     finally:
         for f in tmp_files:
@@ -346,7 +352,7 @@ def create_bulk_pdf_stream(students_list, template_config=None, output_pdf="omr_
     """Generator: yields progress dicts then finished. Uses temp files for fpdf 1.x."""
     import tempfile
     cfg   = {**DEFAULT_CONFIG, **(template_config or {})}
-    pdf   = FPDF(unit="pt", format=(WIDTH, HEIGHT))
+    pdf   = FPDF(unit="pt", format=(PDF_W_PT, PDF_H_PT))
     total = len(students_list)
     tmp_files = []
     try:
@@ -358,7 +364,7 @@ def create_bulk_pdf_stream(students_list, template_config=None, output_pdf="omr_
             img.save(tmp.name, format="JPEG", quality=95)
             tmp_files.append(tmp.name)
             pdf.add_page()
-            pdf.image(tmp.name, 0, 0, WIDTH, HEIGHT)
+            pdf.image(tmp.name, 0, 0, PDF_W_PT, PDF_H_PT)
             yield {"done": idx + 1, "total": total, "name": student.get("name", "")}
         pdf.output(output_pdf)
     finally:
