@@ -14,10 +14,12 @@ from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
 from omr_constants import *
-from font_utils import truetype
+from font_utils import truetype, has_raqm
 
 def ar(text):
     if not text: return ""
+    if has_raqm():
+        return str(text)
     return get_display(arabic_reshaper.reshape(str(text)), base_dir="R")
 
 def fmt_date_parts(date_str):
