@@ -14,6 +14,7 @@ from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
 from omr_constants import *
+from font_utils import truetype
 
 def ar(text):
     if not text: return ""
@@ -35,15 +36,14 @@ def fmt_date_parts(date_str):
     except: pass
     return (str(date_str), "", "")
 
-FONT_PATH = "C:\\Windows\\Fonts\\arial.ttf"
 try:
-    FONT_XS    = ImageFont.truetype(FONT_PATH, 25)
-    FONT_SM    = ImageFont.truetype(FONT_PATH, 35)
-    FONT_MD_S  = ImageFont.truetype(FONT_PATH, 48)
-    FONT_MD    = ImageFont.truetype(FONT_PATH, 55)
-    FONT_MD_B  = ImageFont.truetype("C:\\Windows\\Fonts\\arialbd.ttf", 60)
-    FONT_LG    = ImageFont.truetype(FONT_PATH, 65)
-    FONT_LABEL = ImageFont.truetype(FONT_PATH, 42)
+    FONT_XS    = truetype(25)
+    FONT_SM    = truetype(35)
+    FONT_MD_S  = truetype(48)
+    FONT_MD    = truetype(55)
+    FONT_MD_B  = truetype(60, bold=True)
+    FONT_LG    = truetype(65)
+    FONT_LABEL = truetype(42)
 except:
     FONT_XS = FONT_SM = FONT_MD_S = FONT_MD = FONT_MD_B = FONT_LG = FONT_LABEL = None
 
