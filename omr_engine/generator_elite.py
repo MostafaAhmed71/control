@@ -10,7 +10,7 @@ from font_utils import truetype
 
 def ar(text):
     if not text: return ""
-    return get_display(arabic_reshaper.reshape(str(text)))
+    return get_display(arabic_reshaper.reshape(str(text)), base_dir="R")
 
 def fmt_date_parts(date_str):
     if not date_str: return ("", "", "")
