@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Save, FileText, CheckCircle2, XCircle, Download, Users, X, Loader2, Search, CheckSquare, Square, ScanLine, Wifi, WifiOff, AlertCircle, ChevronRight, ChevronDown, Check, Edit2, Settings, Layout, BookOpen, Clock, Calendar, Image as ImageIcon, Layers, FileStack, Printer, RefreshCw, BarChart2, Trophy, Flag, ShieldCheck, Languages } from 'lucide-react';
+import { Plus, Trash2, Save, FileText, CheckCircle2, XCircle, Download, Users, X, Loader2, Search, CheckSquare, Square, ScanLine, Wifi, WifiOff, AlertCircle, ChevronRight, ChevronDown, Check, Edit2, Settings, Layout, BookOpen, Clock, Calendar, Image as ImageIcon, Layers, FileStack, Printer, RefreshCw, BarChart2, Trophy, Flag, ShieldCheck, Languages, Archive, ArchiveRestore } from 'lucide-react';
 import { getOmrExams, saveOmrExam, deleteOmrExam, getStudents, saveOmrResult, getOmrSubjects, saveOmrSubjects, OMR_API_BASE } from '../../utils/dataService';
 import { useToast } from '../../components/Toast';
 
@@ -117,6 +117,12 @@ const templateOptionsByStage = (stage, customTemplates = []) => {
   ];
 };
 
+/** يتعامل مع archived كقيمة منطقية أو نصاً من JSON القديم */
+const examArchived = (e) => {
+  const v = e?.archived;
+  return v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true';
+};
+
 const getSubjectIcon = (subject = '', size = 24) => {
   const s = String(subject).toLowerCase();
   if (s.includes('رياضيات')) return <BarChart2 size={size} />;
@@ -148,6 +154,8 @@ const OMRExams = () => {
   const [filterStage, setFilterStage] = useState('All');
   const [filterGrade, setFilterGrade] = useState('All');
   const [filterSubject, setFilterSubject] = useState('All');
+  /** 'active' = الاختبارات الجارية، 'archive' = المؤرشفة */
+  const [examArchiveTab, setExamArchiveTab] = useState('active');
 
   /* New exam form */
   /* New exam form */
@@ -273,7 +281,7 @@ const OMRExams = () => {
   const load = async () => {
     setLoading(true);
     try {
-      const [ed, sd, subs] = await Promise.all([getOmrExams(), getStudents(), getOmrSubjects()]);
+      const [ed, sd, subs] = await Promise.all([getOmrExams({ includeArchived: true }), getStudents(), getOmrSubjects()]);
       setExams(ed);
       setStudents(sd);
       setSubjects(subs);
@@ -363,11 +371,14 @@ const OMRExams = () => {
   };
 
   const visibleExams = useMemo(() => exams.filter(e => {
+    const archived = examArchived(e);
+    if (examArchiveTab === 'active' && archived) return false;
+    if (examArchiveTab === 'archive' && !archived) return false;
     if (filterStage !== 'All' && e.stage !== filterStage) return false;
     if (filterGrade !== 'All' && e.grade !== filterGrade) return false;
     if (filterSubject !== 'All' && e.subject !== filterSubject) return false;
     return true;
-  }), [exams, filterStage, filterGrade, filterSubject]);
+  }), [exams, examArchiveTab, filterStage, filterGrade, filterSubject]);
 
   const filterGrades = filterStage !== 'All' ? STAGES[filterStage] || [] : [];
 
@@ -406,8 +417,36 @@ const OMRExams = () => {
     setIsAdding(true);
   };
 
-  const handleDelete = async (id) => {
-    if (window.confirm('هل أنت متأكد من حذف هذا الاختبار؟')) { await deleteOmrExam(id); load(); }
+  const handleArchiveExam = async (exam) => {
+    if (!exam?.id) return;
+    if (!window.confirm(`أرشفة الاختبار «${exam.title || ''}»؟ سيُخفى من القائمة الرئيسية ويمكن استعادته من «أرشيف الاختبارات».`)) return;
+    await saveOmrExam({
+      ...exam,
+      archived: true,
+      archivedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    load();
+    toast.success('تمت أرشفة الاختبار.', 'أرشيف');
+  };
+
+  const handleRestoreExam = async (exam) => {
+    if (!exam?.id) return;
+    await saveOmrExam({
+      ...exam,
+      archived: false,
+      archivedAt: null,
+      updatedAt: new Date().toISOString(),
+    });
+    load();
+    toast.success('تمت استعادة الاختبار إلى القائمة النشطة.', 'استعادة');
+  };
+
+  const handlePermanentDelete = async (id) => {
+    if (!window.confirm('حذف هذا الاختبار نهائياً من قاعدة البيانات؟ لا يمكن التراجع.')) return;
+    await deleteOmrExam(id);
+    load();
+    toast.success('تم الحذف النهائي.', 'حذف');
   };
 
   const handleKeyChange = (q, v) => setEditingExam(p => ({ ...p, keys: { ...(p.keys || {}), [String(q)]: v } }));
@@ -642,7 +681,7 @@ const OMRExams = () => {
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-6">
+        <div className="flex flex-wrap items-center gap-4 md:gap-6">
           <div className="flex items-center p-2 bg-slate-100/80 backdrop-blur-md rounded-3xl border border-white shadow-xl">
             <button onClick={() => setActiveTab('exams')} className={`flex items-center gap-3 px-8 py-4 rounded-2xl font-black transition-all duration-300 ${activeTab === 'exams' ? 'bg-white text-indigo-600 shadow-lg scale-105' : 'text-slate-400 hover:text-slate-600'}`}>
               <FileStack size={20} /> الاختبارات
@@ -651,6 +690,24 @@ const OMRExams = () => {
               <BookOpen size={18} /> المقررات
             </button>
           </div>
+          {activeTab === 'exams' && (
+            <div className="flex p-1 bg-amber-50/90 rounded-2xl border border-amber-100/80 shadow-inner ring-1 ring-amber-100/50 w-full sm:w-auto min-w-0">
+              <button
+                type="button"
+                onClick={() => setExamArchiveTab('active')}
+                className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-black text-sm transition-all ${examArchiveTab === 'active' ? 'bg-white text-indigo-600 shadow-md' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <FileStack size={18} /> نشطة
+              </button>
+              <button
+                type="button"
+                onClick={() => setExamArchiveTab('archive')}
+                className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-black text-sm transition-all ${examArchiveTab === 'archive' ? 'bg-white text-amber-800 shadow-md' : 'text-slate-500 hover:text-amber-900'}`}
+              >
+                <Archive size={18} /> أرشيف
+              </button>
+            </div>
+          )}
           <button onClick={() => { setActiveTab('exams'); setIsAdding(true); }} className="flex items-center gap-3 px-8 py-4 bg-slate-900 text-white rounded-2xl font-black hover:bg-slate-800 transition-all shadow-2xl shadow-slate-200 active:scale-95">
             <Plus size={20} className="text-indigo-400" /> اختبار جديد
           </button>
@@ -660,7 +717,8 @@ const OMRExams = () => {
       {activeTab === 'exams' ? (
         <>
           {/* ── Filter Bar ── */}
-          <div className="luxury-card p-6 border-none bg-white shadow-2xl ring-1 ring-slate-100 flex flex-col md:flex-row gap-6 items-center justify-between mb-10 animate-in slide-in-from-bottom-4 duration-500">
+          <div className="luxury-card p-6 border-none bg-white shadow-2xl ring-1 ring-slate-100 flex flex-col gap-6 mb-10 animate-in slide-in-from-bottom-4 duration-500">
+            <div className="flex flex-col md:flex-row gap-6 items-center justify-between">
             <div className="relative flex-1 w-full group">
               <Search className="absolute right-6 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-indigo-500 transition-colors" size={20} />
               <input type="text" placeholder="ابحث عن اختبار معين..." className="w-full pr-14 pl-8 py-4 bg-slate-50/50 border-2 border-transparent rounded-2xl outline-none focus:bg-white focus:border-indigo-100 focus:ring-8 focus:ring-indigo-50 font-bold transition-all text-right shadow-inner" />
@@ -680,6 +738,7 @@ const OMRExams = () => {
                 </div>
               ))}
             </div>
+            </div>
           </div>
 
           {/* ── Exam Grid ── */}
@@ -691,30 +750,47 @@ const OMRExams = () => {
           ) : visibleExams.length === 0 ? (
             <div className="luxury-card p-20 text-center bg-slate-50/50 border-2 border-dashed border-slate-200">
                <FileStack size={48} className="mx-auto text-slate-200 mb-4" />
-               <h3 className="text-xl font-black text-slate-400">لا توجد اختبارات مسجلة</h3>
+               <h3 className="text-xl font-black text-slate-400">{examArchiveTab === 'archive' ? 'لا توجد اختبارات في الأرشيف' : 'لا توجد اختبارات مسجلة'}</h3>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-6">
               {visibleExams.map(exam => (
                 <div key={exam.id} className="group relative">
                   <div className="absolute inset-0 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-[2rem] blur-2xl opacity-0 group-hover:opacity-10 transition-opacity duration-500"></div>
-                  <div className="luxury-card h-full bg-white border-2 border-transparent group-hover:border-indigo-100 rounded-[2rem] shadow-xl hover:shadow-2xl transition-all duration-500 overflow-hidden flex flex-col relative z-10 text-right">
+                  <div className={`luxury-card h-full bg-white border-2 border-transparent ${examArchiveTab === 'archive' ? 'opacity-95 border-amber-100/80' : 'group-hover:border-indigo-100'} rounded-[2rem] shadow-xl hover:shadow-2xl transition-all duration-500 overflow-hidden flex flex-col relative z-10 text-right`}>
                     <div className="p-6 pb-4">
                       <div className="flex justify-between items-start mb-6">
                         <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transform group-hover:scale-110 group-hover:rotate-12 transition-all duration-500 ${exam.template === 'nafs' ? 'bg-indigo-600 text-white shadow-indigo-100' : 'bg-purple-600 text-white shadow-purple-100'}`}>
                           {getSubjectIcon(exam.subject, 24)}
                         </div>
                         <div className="flex gap-1.5">
-                          <button onClick={() => openEditModal(exam)} className="p-2.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="تعديل البيانات">
-                            <Settings size={18} />
-                          </button>
-                          <button onClick={() => handleDelete(exam.id)} className="p-2.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="حذف">
-                            <Trash2 size={18} />
-                          </button>
+                          {examArchiveTab === 'active' && (
+                            <>
+                              <button onClick={() => openEditModal(exam)} className="p-2.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="تعديل البيانات">
+                                <Settings size={18} />
+                              </button>
+                              <button onClick={() => handleArchiveExam(exam)} className="p-2.5 text-slate-300 hover:text-amber-600 hover:bg-amber-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="أرشفة">
+                                <Archive size={18} />
+                              </button>
+                            </>
+                          )}
+                          {examArchiveTab === 'archive' && (
+                            <>
+                              <button onClick={() => handleRestoreExam(exam)} className="p-2.5 text-slate-300 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="استعادة">
+                                <ArchiveRestore size={18} />
+                              </button>
+                              <button onClick={() => handlePermanentDelete(exam.id)} className="p-2.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="حذف نهائي">
+                                <Trash2 size={18} />
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
                       <div className="space-y-2 mb-4">
                         <div className="flex flex-wrap gap-1.5 mb-2 justify-end items-center">
+                          {examArchiveTab === 'archive' && (
+                            <span className="px-3 py-1 rounded-lg bg-amber-50 text-amber-800 text-[9px] font-black uppercase tracking-widest">أرشيف</span>
+                          )}
                           <span className="px-3 py-1 rounded-lg bg-slate-50 text-slate-500 text-[9px] font-black uppercase tracking-widest">{exam.stage}</span>
                           <span className="px-3 py-1 rounded-lg bg-indigo-50 text-indigo-600 text-[9px] font-black uppercase tracking-widest">{exam.grade}</span>
                           {exam.date && (
@@ -726,11 +802,17 @@ const OMRExams = () => {
                         <h3 className="text-lg font-black text-slate-900 group-hover:text-indigo-600 transition-colors leading-tight line-clamp-2">{exam.title}</h3>
                       </div>
                     </div>
-                    <div className="p-5 pt-0 flex gap-2.5 mt-auto">
-                      <button onClick={() => openBulkModal(exam)} className="flex-1 py-3.5 bg-slate-900 text-white rounded-xl font-black text-[9px] hover:bg-black transition-all flex flex-col items-center justify-center gap-1.5"><Printer size={16} /> طباعة</button>
-                      <button onClick={() => openExamKeys(exam)} className="flex-1 py-3.5 bg-white text-slate-900 border border-slate-100 rounded-xl font-black text-[9px] hover:border-indigo-100 transition-all flex flex-col items-center justify-center gap-1.5"><Edit2 size={16} /> المفتاح</button>
-                      <button onClick={() => navigate(`/omr-scanner/${exam.id}`)} className="flex-1 py-3.5 bg-indigo-600 text-white rounded-xl font-black text-[9px] hover:bg-indigo-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-xl shadow-indigo-100"><ScanLine size={16} /> تصحيح</button>
-                    </div>
+                    {examArchiveTab === 'active' ? (
+                      <div className="p-5 pt-0 flex gap-2.5 mt-auto">
+                        <button onClick={() => openBulkModal(exam)} className="flex-1 py-3.5 bg-slate-900 text-white rounded-xl font-black text-[9px] hover:bg-black transition-all flex flex-col items-center justify-center gap-1.5"><Printer size={16} /> طباعة</button>
+                        <button onClick={() => openExamKeys(exam)} className="flex-1 py-3.5 bg-white text-slate-900 border border-slate-100 rounded-xl font-black text-[9px] hover:border-indigo-100 transition-all flex flex-col items-center justify-center gap-1.5"><Edit2 size={16} /> المفتاح</button>
+                        <button onClick={() => navigate(`/omr-scanner/${exam.id}`)} className="flex-1 py-3.5 bg-indigo-600 text-white rounded-xl font-black text-[9px] hover:bg-indigo-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-xl shadow-indigo-100"><ScanLine size={16} /> تصحيح</button>
+                      </div>
+                    ) : (
+                      <div className="p-5 pt-0 flex gap-2.5 mt-auto">
+                        <button onClick={() => handleRestoreExam(exam)} className="flex-1 py-3.5 bg-emerald-600 text-white rounded-xl font-black text-[9px] hover:bg-emerald-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-lg shadow-emerald-100"><ArchiveRestore size={16} /> استعادة</button>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}

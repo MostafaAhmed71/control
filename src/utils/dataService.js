@@ -276,7 +276,19 @@ export const saveOmrSubjects = async (subjects) => {
 };
 
 // --- OMR Methods ---
-export const getOmrExams    = () => fetchCollection('omr_exams');
+const examIsArchived = (e) => {
+    if (!e || typeof e !== 'object') return false;
+    const v = e.archived;
+    return v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true';
+};
+
+/** @param {{ includeArchived?: boolean }} [opts] — if false (default), rows with `archived: true` are omitted */
+export const getOmrExams = async (opts = {}) => {
+    const { includeArchived = false } = opts;
+    const rows = await fetchCollection('omr_exams');
+    if (includeArchived) return rows;
+    return rows.filter((e) => !examIsArchived(e));
+};
 export const saveOmrExam    = (e) => saveDocument('omr_exams', e);
 export const deleteOmrExam  = (id) => deleteDocument('omr_exams', id);
 
