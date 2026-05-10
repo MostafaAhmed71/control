@@ -122,13 +122,41 @@ export const saveStudent     = (s) => saveDocument('students', s);
 export const deleteStudent   = (id) => deleteDocument('students', id);
 
 export const saveStudentsBulk = async (studentList) => {
+    const list = Array.isArray(studentList) ? studentList : [];
+    const normalized = list.map((s) => ({
+        ...s,
+        id: String(s.id || `${Date.now()}${Math.floor(Math.random() * 10000)}`),
+    }));
+    const newIds = new Set(normalized.map((s) => String(s.id)));
+
+    const { data: existingRows, error: fetchErr } = await supabase
+        .from('students')
+        .select('id')
+        .range(0, 1999);
+
+    if (fetchErr) {
+        _setConnected(false);
+        throw new SupabaseError('students', 'bulk-sync-fetch', fetchErr.message);
+    }
+
+    const toDelete = (existingRows || [])
+        .map((r) => String(r.id))
+        .filter((id) => !newIds.has(id));
+
+    const DEL_CHUNK = 150;
+    for (let i = 0; i < toDelete.length; i += DEL_CHUNK) {
+        const chunk = toDelete.slice(i, i + DEL_CHUNK);
+        const { error: delErr } = await supabase.from('students').delete().in('id', chunk);
+        if (delErr) {
+            _setConnected(false);
+            throw new SupabaseError('students', 'bulk-sync-delete', delErr.message);
+        }
+    }
+
     const CHUNK = 100;
-    for (let i = 0; i < studentList.length; i += CHUNK) {
-        const batch = studentList.slice(i, i + CHUNK);
-        const rows = batch.map(s => ({
-            id: String(s.id || `${Date.now()}${Math.floor(Math.random() * 10000)}`),
-            data: s,
-        }));
+    for (let i = 0; i < normalized.length; i += CHUNK) {
+        const batch = normalized.slice(i, i + CHUNK);
+        const rows = batch.map((s) => ({ id: String(s.id), data: s }));
         const { error } = await supabase.from('students').upsert(rows);
         if (error) {
             _setConnected(false);
@@ -136,7 +164,7 @@ export const saveStudentsBulk = async (studentList) => {
         }
     }
     _setConnected(true);
-    return studentList;
+    return normalized;
 };
 
 // --- Assignments ---

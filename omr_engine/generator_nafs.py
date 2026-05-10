@@ -156,32 +156,40 @@ def draw_header(img, draw, student_info):
     _dt(draw, (ll - _tl(draw, nv, font=FONT_LG) - P,
                start_y + (row_h - 65) // 2), nv, fill=BLACK, font=FONT_LG)
 
-    # Row 2: date
-    draw.rectangle([x, start_y + row_h, x + w, start_y + 2 * row_h], outline=BLACK, width=3)
-    lld = rt("التاريخ:", x + w, start_y + row_h)
-    
-    # Radical fix for Arabic Date: Draw parts separately to avoid bidi mess
+    # Row 2: class | subject (matches HEADER_ROW_H × 4 layout in omr_constants)
+    draw.rectangle([mid_x, start_y + row_h, x + w, start_y + 2 * row_h], outline=BLACK, width=3)
+    ll2 = rt(S_CLASS_LBL, x + w, start_y + row_h, font=FONT_SM)
+    cv  = ar(student_info.get("class", ""))
+    _dt(draw, (ll2 - _tl(draw, cv, font=FONT_SM) - P,
+               start_y + row_h + (row_h - 45) // 2), cv, fill=BLACK, font=FONT_SM)
+
+    draw.rectangle([x, start_y + row_h, mid_x, start_y + 2 * row_h], outline=BLACK, width=3)
+    ll3 = rt(S_SUBJ_LBL, mid_x, start_y + row_h, font=FONT_SM)
+    sv  = ar(student_info.get("subject", ""))
+    _dt(draw, (ll3 - _tl(draw, sv, font=FONT_SM) - P,
+               start_y + row_h + (row_h - 45) // 2), sv, fill=BLACK, font=FONT_SM)
+
+    # Row 3: date
+    draw.rectangle([x, start_y + 2 * row_h, x + w, start_y + 3 * row_h], outline=BLACK, width=3)
+    lld = rt("التاريخ:", x + w, start_y + 2 * row_h)
+
     day, month, year = fmt_date_parts(student_info.get("date", ""))
     if year:
-        # We draw from right to left: [Year] - [Month] - [Day]
-        # But wait, in RTL the value is on the left of the label
-        # The rt function returned 'lld' which is the left edge for the value
-        
         date_str_full = f"{day} - {month} - {year}"
         dv = ar(date_str_full)
         _dt(draw, (lld - _tl(draw, dv, font=FONT_LG) - P,
-                   start_y + row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
+                   start_y + 2 * row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
     else:
         dv = ar(day)
         _dt(draw, (lld - _tl(draw, dv, font=FONT_LG) - P,
-                   start_y + row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
+                   start_y + 2 * row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
 
-    # Row 3: day
-    draw.rectangle([x, start_y + 2 * row_h, x + w, start_y + 3 * row_h], outline=BLACK, width=3)
-    lly = rt("اليوم:", x + w, start_y + 2 * row_h)
+    # Row 4: day
+    draw.rectangle([x, start_y + 3 * row_h, x + w, start_y + 4 * row_h], outline=BLACK, width=3)
+    lly = rt("اليوم:", x + w, start_y + 3 * row_h)
     dy_val  = ar(student_info.get("day", ""))
     _dt(draw, (lly - _tl(draw, dy_val, font=FONT_LG) - P,
-               start_y + 2 * row_h + (row_h - 65) // 2), dy_val, fill=BLACK, font=FONT_LG)
+               start_y + 3 * row_h + (row_h - 65) // 2), dy_val, fill=BLACK, font=FONT_LG)
 
 
 def build_qr_payload(student_info, num_questions=30, template="nafs"):

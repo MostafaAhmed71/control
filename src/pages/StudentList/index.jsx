@@ -12,10 +12,16 @@ const StudentList = () => {
     const [selectedStage, setSelectedStage] = useState('الكل');
     const [isGeneratorOpen, setIsGeneratorOpen] = useState(false);
     const [genConfig, setGenConfig] = useState({ stage: '', grade: '', startNumber: '' });
+    const [modalClassValue, setModalClassValue] = useState('');
 
     useEffect(() => {
         fetchStudents();
     }, []);
+
+    useEffect(() => {
+        if (!isModalOpen) return;
+        setModalClassValue((editingStudent?.class || '').toString());
+    }, [isModalOpen, editingStudent]);
 
     const fetchStudents = async () => {
         setLoading(true);
@@ -446,10 +452,11 @@ const StudentList = () => {
                                 >
                                     <option value="">-- اختر المرحلة --</option>
                                     {(() => {
-                                        const dataStages = [...new Set(students.map(s => s.stage).filter(Boolean))];
-                                        const displayStages = [...new Set(['الابتدائي', 'المتوسط', 'الثانوي', ...dataStages])];
+                                        const normalize = (v) => String(v || '').trim().replace(/^ال/, '');
+                                        const dataStages = [...new Set(students.map(s => normalize(s.stage)).filter(Boolean))];
+                                        const displayStages = [...new Set(['ابتدائي', 'متوسط', 'ثانوي', ...dataStages])];
                                         return displayStages.map(s => {
-                                            const count = students.filter(std => std.stage === s).length;
+                                            const count = students.filter(std => normalize(std.stage) === s).length;
                                             return <option key={s} value={s}>{s} ({count} طالب)</option>;
                                         });
                                     })()}
@@ -463,7 +470,10 @@ const StudentList = () => {
                                     onChange={(e) => setGenConfig({ ...genConfig, grade: e.target.value })}
                                 >
                                     <option value="">-- اختر الصف --</option>
-                                    {[...new Set(students.filter(s => s.stage === genConfig.stage).map(s => s.grade))].map(g => (
+                                    {(() => {
+                                        const normalize = (v) => String(v || '').trim().replace(/^ال/, '');
+                                        return [...new Set(students.filter(s => normalize(s.stage) === genConfig.stage).map(s => s.grade))].filter(Boolean);
+                                    })().map(g => (
                                         <option key={g} value={g}>{g}</option>
                                     ))}
                                 </select>
@@ -521,11 +531,11 @@ const StudentList = () => {
                                 </div>
                                 <div className="space-y-3">
                                     <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">المرحلة الأكاديمية</label>
-                                    <select required name="stage" defaultValue={editingStudent?.stage || 'الثانوي'} 
+                                    <select required name="stage" defaultValue={String(editingStudent?.stage || 'ثانوي').replace(/^ال/, '')} 
                                       className="w-full px-8 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-bold transition-all appearance-none">
-                                        <option value="الابتدائي">الابتدائي</option>
-                                        <option value="المتوسط">المتوسط</option>
-                                        <option value="الثانوي">الثانوي</option>
+                                        <option value="ابتدائي">ابتدائي</option>
+                                        <option value="متوسط">متوسط</option>
+                                        <option value="ثانوي">ثانوي</option>
                                     </select>
                                 </div>
                             </div>
@@ -542,8 +552,45 @@ const StudentList = () => {
                                 </div>
                                 <div className="space-y-3">
                                     <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">الفصل / الشعبة</label>
-                                    <input required name="class" defaultValue={editingStudent?.class} 
-                                      className="w-full px-6 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-bold text-sm text-center transition-all" placeholder="أ، ب..." />
+                                    <div className="space-y-3">
+                                        <div className="flex flex-wrap gap-2 justify-end">
+                                            {[
+                                                { id: 'guest', label: 'زائر', value: 'زائر' },
+                                            ].map((opt) => (
+                                                <button
+                                                    key={opt.id}
+                                                    type="button"
+                                                    onClick={() => setModalClassValue(opt.value)}
+                                                    className={`px-4 py-2 rounded-xl text-xs font-black transition-all border ${
+                                                        (modalClassValue || '').trim() === opt.value
+                                                            ? 'bg-amber-600 text-white border-amber-600 shadow-lg shadow-amber-100'
+                                                            : 'bg-white text-slate-600 border-slate-100 hover:bg-slate-50 hover:border-slate-200'
+                                                    }`}
+                                                >
+                                                    {opt.label}
+                                                </button>
+                                            ))}
+                                            <button
+                                                type="button"
+                                                onClick={() => setModalClassValue('')}
+                                                className="px-4 py-2 rounded-xl text-xs font-black transition-all border bg-white text-slate-500 border-slate-100 hover:bg-slate-50 hover:border-slate-200"
+                                                title="إلغاء تصنيف زائر"
+                                            >
+                                                طالب مدرسة
+                                            </button>
+                                        </div>
+                                        <input
+                                            required
+                                            name="class"
+                                            value={modalClassValue}
+                                            onChange={(e) => setModalClassValue(e.target.value)}
+                                            className="w-full px-6 py-5 bg-slate-50 border border-transparent rounded-[1.5rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-50 text-slate-900 font-bold text-sm text-center transition-all"
+                                            placeholder="أ، ب... أو زائر"
+                                        />
+                                        <p className="text-[10px] text-slate-400 font-bold text-right">
+                                            اختيار «زائر» يساعدك لاحقاً في نافذة الطباعة لإظهارهم بزر «طلاب زوار».
+                                        </p>
+                                    </div>
                                 </div>
                                 <div className="space-y-3">
                                     <label className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mr-1">رقم اللجنة</label>

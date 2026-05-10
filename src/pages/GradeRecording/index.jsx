@@ -106,6 +106,12 @@ const GradeRecording = () => {
 
   useEffect(() => { loadData(); }, []);
 
+  /* إن أُرشف الاختبار المحدد في الفلتر، أعد الفلتر إلى «الكل» */
+  useEffect(() => {
+    if (filterExamId === 'All') return;
+    if (!exams.some((e) => e.id === filterExamId)) setFilterExamId('All');
+  }, [exams, filterExamId]);
+
   const loadData = async () => {
     setLoading(true);
     try {
@@ -138,6 +144,8 @@ const GradeRecording = () => {
   const availableDates = useMemo(() => {
     const dateMap = {}; // 'ar-EG string' -> timestamp
     results.forEach(r => {
+      const exam = exams.find(e => e.id === r.examId);
+      if (!exam) return;
       const ts = r.timestamp || r.scannedAt;
       if (!ts) return;
       const d = new Date(ts);
@@ -148,7 +156,7 @@ const GradeRecording = () => {
     });
     
     return Object.keys(dateMap).sort((a, b) => new Date(dateMap[b]) - new Date(dateMap[a]));
-  }, [results]);
+  }, [results, exams]);
 
   /* Available Exams (Tests) */
   const availableExams = useMemo(() => {
@@ -178,6 +186,9 @@ const GradeRecording = () => {
     // 2. Build the main index keyed by student DB-id
     const idx = {}; // { studentDbId: { subject: result } }
     results.forEach(r => {
+      const exam = exams.find(e => e.id === r.examId);
+      if (!exam) return;
+
       if (filterDate !== 'All') {
         const rDate = new Date(r.timestamp || r.scannedAt).toLocaleDateString('ar-EG');
         if (rDate !== filterDate) return;
@@ -189,8 +200,7 @@ const GradeRecording = () => {
       const matchedStudent = studentByAnyId[rStudentIdStr];
       const canonicalKey = matchedStudent ? matchedStudent.id : rStudentIdStr;
 
-      const exam = exams.find(e => e.id === r.examId);
-      const subject = exam?.title || exam?.subject || r.examTitle || '؟';
+      const subject = exam.title || exam.subject || r.examTitle || '؟';
 
       if (!idx[canonicalKey]) idx[canonicalKey] = {};
 

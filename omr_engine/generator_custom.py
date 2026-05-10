@@ -78,8 +78,8 @@ DEFAULT_CONFIG = {
     "footer":        "نظام التصحيح الآلي بمتوسطة وثانوية نخبة الشمال الأهلية",
     "show_date_row": True,
     "show_day_row":  True,
-    "show_class_row": False,
-    "show_subject_row": False,
+    "show_class_row": True,
+    "show_subject_row": True,
 }
 
 
@@ -147,7 +147,7 @@ def draw_header(img, draw, student_info, cfg):
                 img.paste(logo, (lx, ly), logo)
         except: pass
 
-    # Student info rows (NAFS layout: Name, Date, Day)
+    # Student info rows (NAFS order: Name → Class|Subject → Date|Day)
     start_y = HEADER_START_Y
     row_h   = HEADER_ROW_H
     w       = HEADER_WIDTH
@@ -170,10 +170,48 @@ def draw_header(img, draw, student_info, cfg):
 
     row_offset = 1
 
+    show_class = bool(cfg.get("show_class_row", True))
+    show_subject = bool(cfg.get("show_subject_row", True))
+
+    # Class / subject (same row when both on — matches NAFS header placement)
+    if show_class and show_subject:
+        y = start_y + row_offset * row_h
+        draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
+        mid_x = x + w // 2
+        draw.line([(mid_x, y), (mid_x, y + row_h)], fill=BLACK, width=3)
+
+        def draw_cell_cs(label, value, cell_left, cell_right):
+            ll = rt(label, cell_right, y)
+            vv = ar(value)
+            _dt(draw, (ll - _tl(draw, vv, font=FONT_LG) - P,
+                       y + (row_h - 65) // 2), vv, fill=BLACK, font=FONT_LG)
+
+        draw_cell_cs("الصف:", student_info.get("class", ""), mid_x, x + w)
+        draw_cell_cs("المادة:", student_info.get("subject", ""), x, mid_x)
+        row_offset += 1
+    else:
+        if show_class:
+            y = start_y + row_offset * row_h
+            draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
+            llc = rt("الصف:", x + w, y)
+            cv = ar(student_info.get("class", ""))
+            _dt(draw, (llc - _tl(draw, cv, font=FONT_LG) - P,
+                       y + (row_h - 65) // 2), cv, fill=BLACK, font=FONT_LG)
+            row_offset += 1
+
+        if show_subject:
+            y = start_y + row_offset * row_h
+            draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
+            lls = rt("المادة:", x + w, y)
+            sv = ar(student_info.get("subject", ""))
+            _dt(draw, (lls - _tl(draw, sv, font=FONT_LG) - P,
+                       y + (row_h - 65) // 2), sv, fill=BLACK, font=FONT_LG)
+            row_offset += 1
+
     show_date = bool(cfg.get("show_date_row", True))
     show_day = bool(cfg.get("show_day_row", True))
 
-    # Render date/day in one compact row when both are enabled.
+    # Date / day (one compact row when both enabled)
     if show_date and show_day:
         y = start_y + row_offset * row_h
         draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
@@ -183,17 +221,16 @@ def draw_header(img, draw, student_info, cfg):
         day_num, month, year_ar = fmt_date_parts(student_info.get("date", ""))
         date_val = f"{day_num} - {month} - {year_ar}" if year_ar else day_num
 
-        def draw_cell(label, value, cell_left, cell_right):
+        def draw_cell_dt(label, value, cell_left, cell_right):
             ll = rt(label, cell_right, y)
             vv = ar(value)
             _dt(draw, (ll - _tl(draw, vv, font=FONT_LG) - P,
                        y + (row_h - 65) // 2), vv, fill=BLACK, font=FONT_LG)
 
-        draw_cell("التاريخ:", date_val, mid_x, x + w)
-        draw_cell("اليوم:", student_info.get("day", ""), x, mid_x)
+        draw_cell_dt("التاريخ:", date_val, mid_x, x + w)
+        draw_cell_dt("اليوم:", student_info.get("day", ""), x, mid_x)
         row_offset += 1
     else:
-        # Row: Date
         if show_date:
             y = start_y + row_offset * row_h
             draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
@@ -204,7 +241,6 @@ def draw_header(img, draw, student_info, cfg):
                        y + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
             row_offset += 1
 
-        # Row: Day
         if show_day:
             y = start_y + row_offset * row_h
             draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
@@ -213,45 +249,6 @@ def draw_header(img, draw, student_info, cfg):
             _dt(draw, (lly - _tl(draw, dy_val, font=FONT_LG) - P,
                        y + (row_h - 65) // 2), dy_val, fill=BLACK, font=FONT_LG)
             row_offset += 1
-
-    show_class = bool(cfg.get("show_class_row", False))
-    show_subject = bool(cfg.get("show_subject_row", False))
-
-    # Render class/subject in one compact row when both are enabled.
-    if show_class and show_subject:
-        y = start_y + row_offset * row_h
-        draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
-        mid_x = x + w // 2
-        draw.line([(mid_x, y), (mid_x, y + row_h)], fill=BLACK, width=3)
-
-        def draw_cell(label, value, cell_left, cell_right):
-            ll = rt(label, cell_right, y)
-            vv = ar(value)
-            _dt(draw, (ll - _tl(draw, vv, font=FONT_LG) - P,
-                       y + (row_h - 65) // 2), vv, fill=BLACK, font=FONT_LG)
-
-        draw_cell("الصف:", student_info.get("class", ""), mid_x, x + w)
-        draw_cell("المادة:", student_info.get("subject", ""), x, mid_x)
-        row_offset += 1
-    else:
-        # Row: Class (optional)
-        if show_class:
-            y = start_y + row_offset * row_h
-            draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
-            llc = rt("الصف:", x + w, y)
-            cv = ar(student_info.get("class", ""))
-            _dt(draw, (llc - _tl(draw, cv, font=FONT_LG) - P,
-                       y + (row_h - 65) // 2), cv, fill=BLACK, font=FONT_LG)
-            row_offset += 1
-
-        # Row: Subject (optional)
-        if show_subject:
-            y = start_y + row_offset * row_h
-            draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
-            lls = rt("المادة:", x + w, y)
-            sv = ar(student_info.get("subject", ""))
-            _dt(draw, (lls - _tl(draw, sv, font=FONT_LG) - P,
-                       y + (row_h - 65) // 2), sv, fill=BLACK, font=FONT_LG)
 
 
 def build_qr_payload(student_info, num_questions=30, template="custom"):

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Save, FileText, CheckCircle2, XCircle, Download, Users, X, Loader2, Search, CheckSquare, Square, ScanLine, Wifi, WifiOff, AlertCircle, ChevronRight, ChevronDown, Check, Edit2, Settings, Layout, BookOpen, Clock, Calendar, Image as ImageIcon, Layers, FileStack, Printer, RefreshCw, BarChart2, Trophy, Flag, ShieldCheck, Languages, Archive, ArchiveRestore } from 'lucide-react';
+import { Plus, Trash2, Save, FileText, CheckCircle2, XCircle, Download, Users, X, Loader2, Search, CheckSquare, Square, ScanLine, Wifi, WifiOff, AlertCircle, ChevronRight, ChevronDown, Check, Edit2, Settings, Layout, BookOpen, Clock, Calendar, Image as ImageIcon, Layers, FileStack, Printer, RefreshCw, BarChart2, Trophy, Flag, ShieldCheck, Languages, Archive, ArchiveRestore, Folder, Tag } from 'lucide-react';
 import { getOmrExams, saveOmrExam, deleteOmrExam, getStudents, saveOmrResult, getOmrSubjects, saveOmrSubjects, OMR_API_BASE } from '../../utils/dataService';
 import { useToast } from '../../components/Toast';
 
@@ -123,6 +123,32 @@ const examArchived = (e) => {
   return v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true';
 };
 
+const normalizeArchiveFolder = (v) => {
+  if (v == null || v === undefined) return '';
+  return String(v).trim();
+};
+
+const examGrades = (e) => {
+  if (!e || typeof e !== 'object') return [];
+  if (Array.isArray(e.grades) && e.grades.length) return e.grades.filter(Boolean);
+  if (e.grade) return [e.grade];
+  return [];
+};
+
+const escapeHtmlSticker = (s) =>
+  String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+/** نص الصف/الصفوف لعرضه على الملصق */
+const stickerGradeLabel = (exam) => {
+  const arr = examGrades(exam);
+  if (arr.length) return arr.join('، ');
+  return String(exam?.grade || '').trim() || '—';
+};
+
 const getSubjectIcon = (subject = '', size = 24) => {
   const s = String(subject).toLowerCase();
   if (s.includes('رياضيات')) return <BarChart2 size={size} />;
@@ -156,10 +182,15 @@ const OMRExams = () => {
   const [filterSubject, setFilterSubject] = useState('All');
   /** 'active' = الاختبارات الجارية، 'archive' = المؤرشفة */
   const [examArchiveTab, setExamArchiveTab] = useState('active');
+  /** نافذة: اختيار مجلد داخل الأرشيف قبل التأكيد */
+  const [archiveTargetModal, setArchiveTargetModal] = useState(null);
+  const [archiveTargetFolderInput, setArchiveTargetFolderInput] = useState('');
+  /** طي/فتح أقسام المجلدات في الأرشيف — المفتاح غائب = مفتوح */
+  const [archiveFolderOpen, setArchiveFolderOpen] = useState({});
 
   /* New exam form */
   /* New exam form */
-  const [newExam, setNewExam] = useState({ stage: '', grade: '', subject: '', qCount: 30, template: 'nafs', title: '', classroom: '', date: '' });
+  const [newExam, setNewExam] = useState({ stage: '', grade: '', grades: [], subject: '', qCount: 30, template: 'nafs', title: '', classroom: '', date: '' });
 
   /* Dynamic subjects list (persisted in Supabase) */
   const [subjects, setSubjects] = useState([...DEFAULT_SUBJECTS]);
@@ -200,8 +231,8 @@ const OMRExams = () => {
     year: 'العام الدراسي ١٤٤٧ هــ',
     principal: 'مدير المدرسة : محمد نصر الدين',
     footer: 'نظام التصحيح الآلي بمدارس نخبة الشمال الأهلية والعالمية',
-    show_class_row: false,
-    show_subject_row: false,
+    show_class_row: true,
+    show_subject_row: true,
     logoDataUrl: '',
   };
   const [customConfig, setCustomConfig] = useState({ ...defaultCustomConfig });
@@ -220,7 +251,9 @@ const OMRExams = () => {
   const [selectedClass, setSelectedClass] = useState('All');
   const [selectedStudentIds, setSelectedStudentIds] = useState(new Set());
   const [studentSearch, setStudentSearch] = useState('');
+  const [studentGroupFilter, setStudentGroupFilter] = useState('all'); // 'all' | 'school' | 'guest'
   const [modalStage, setModalStage] = useState('All');
+  const [modalGrade, setModalGrade] = useState('All'); // فلتر الصف داخل نافذة الطباعة
   const [examDate, setExamDate] = useState(() => new Date().toLocaleDateString('ar-SA'));
   const [examDay, setExamDay] = useState(() => {
     const days = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
@@ -375,25 +408,65 @@ const OMRExams = () => {
     if (examArchiveTab === 'active' && archived) return false;
     if (examArchiveTab === 'archive' && !archived) return false;
     if (filterStage !== 'All' && e.stage !== filterStage) return false;
-    if (filterGrade !== 'All' && e.grade !== filterGrade) return false;
+    if (filterGrade !== 'All' && !examGrades(e).some(g => g === filterGrade)) return false;
     if (filterSubject !== 'All' && e.subject !== filterSubject) return false;
     return true;
   }), [exams, examArchiveTab, filterStage, filterGrade, filterSubject]);
 
+  const existingArchiveFolders = useMemo(() => {
+    const set = new Set();
+    for (const e of exams) {
+      if (!examArchived(e)) continue;
+      const f = normalizeArchiveFolder(e.archiveFolder);
+      if (f) set.add(f);
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, 'ar'));
+  }, [exams]);
+
+  const archivedFolderGroups = useMemo(() => {
+    if (examArchiveTab !== 'archive') return [];
+    const map = new Map();
+    for (const e of visibleExams) {
+      const key = normalizeArchiveFolder(e.archiveFolder);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(e);
+    }
+    const pairs = [...map.entries()];
+    pairs.sort((a, b) => {
+      if (a[0] === '') return 1;
+      if (b[0] === '') return -1;
+      return a[0].localeCompare(b[0], 'ar');
+    });
+    return pairs.map(([folder, list]) => ({
+      folder,
+      label: folder === '' ? 'بدون مجلد' : folder,
+      exams: list,
+    }));
+  }, [visibleExams, examArchiveTab]);
+
+  const isArchiveFolderSectionOpen = (key) => archiveFolderOpen[key] !== false;
+  const toggleArchiveFolderSection = (key) => {
+    setArchiveFolderOpen((p) => ({ ...p, [key]: p[key] === false ? true : false }));
+  };
+
   const filterGrades = filterStage !== 'All' ? STAGES[filterStage] || [] : [];
 
   const handleAddExam = async () => {
-    if (!newExam.stage || !newExam.grade || !newExam.subject) return;
+    const selectedGrades = Array.isArray(newExam.grades) && newExam.grades.length ? newExam.grades : (newExam.grade ? [newExam.grade] : []);
+    if (!newExam.stage || selectedGrades.length === 0 || !newExam.subject) return;
     
     // Use manually entered title if provided, otherwise generate it
     const isNafs = newExam.template === 'nafs';
     // Use chosen subject if provided, default to 'اختبار مجمع' ONLY if template is nafs and no subject chosen
     const finalSubject = newExam.subject || (isNafs ? 'اختبار مجمع' : '');
-    const generatedTitle = isNafs ? `اختبار نافس - ${newExam.grade}` : `${finalSubject || 'اختبار'} - ${newExam.grade}`;
+    const gradeLabel = selectedGrades.length === 1 ? selectedGrades[0] : `(${selectedGrades.length} صفوف)`;
+    const generatedTitle = isNafs ? `اختبار نافس - ${gradeLabel}` : `${finalSubject || 'اختبار'} - ${gradeLabel}`;
     const title = newExam.title || generatedTitle;
 
     const payload = { 
-      ...newExam, 
+      ...newExam,
+      grades: selectedGrades,
+      grade: selectedGrades[0] || newExam.grade || '',
       subject: finalSubject, 
       title, 
       classroom: newExam.classroom || '',
@@ -408,26 +481,71 @@ const OMRExams = () => {
     
     await saveOmrExam(payload);
     setIsAdding(false);
-    setNewExam({ stage: '', grade: '', subject: '', qCount: 30, template: 'nafs', title: '', classroom: '', date: '' });
+    setNewExam({ stage: '', grade: '', grades: [], subject: '', qCount: 30, template: 'nafs', title: '', classroom: '', date: '' });
     load();
   };
 
   const openEditModal = (exam) => {
-    setNewExam({ ...exam });
+    const eg = examGrades(exam);
+    setNewExam({ ...exam, grades: eg, grade: eg[0] || exam.grade || '' });
     setIsAdding(true);
   };
 
-  const handleArchiveExam = async (exam) => {
+  const openArchiveFolderModal = (exam) => {
     if (!exam?.id) return;
-    if (!window.confirm(`أرشفة الاختبار «${exam.title || ''}»؟ سيُخفى من القائمة الرئيسية ويمكن استعادته من «أرشيف الاختبارات».`)) return;
+    setArchiveTargetModal(exam);
+    setArchiveTargetFolderInput('');
+  };
+
+  const closeArchiveFolderModal = () => {
+    setArchiveTargetModal(null);
+    setArchiveTargetFolderInput('');
+  };
+
+  const confirmArchiveToFolder = async () => {
+    if (!archiveTargetModal?.id) return;
+    const folder = normalizeArchiveFolder(archiveTargetFolderInput);
     await saveOmrExam({
-      ...exam,
+      ...archiveTargetModal,
       archived: true,
       archivedAt: new Date().toISOString(),
+      archiveFolder: folder || undefined,
+      updatedAt: new Date().toISOString(),
+    });
+    closeArchiveFolderModal();
+    load();
+    toast.success(folder ? `تمت الأرشفة داخل المجلد «${folder}».` : 'تمت أرشفة الاختبار (بدون مجلد).', 'أرشيف');
+  };
+
+  const handleMoveArchivedExamFolder = async (exam, folderRaw) => {
+    if (!exam?.id) return;
+    const folder = normalizeArchiveFolder(folderRaw);
+    if (folder === normalizeArchiveFolder(exam.archiveFolder)) return;
+    await saveOmrExam({
+      ...exam,
+      archiveFolder: folder || undefined,
       updatedAt: new Date().toISOString(),
     });
     load();
-    toast.success('تمت أرشفة الاختبار.', 'أرشيف');
+    toast.success('تم نقل الاختبار بين المجلدات.', 'أرشيف');
+  };
+
+  const handleRenameArchiveFolderGroup = async (oldFolderKey) => {
+    const oldK = normalizeArchiveFolder(oldFolderKey);
+    const suggested = oldK || '';
+    const next = window.prompt('اسم المجلد الجديد (فارغ = بدون مجلد):', suggested);
+    if (next === null) return;
+    const newF = normalizeArchiveFolder(next);
+    if (newF === oldK) return;
+    const list = exams.filter((e) => examArchived(e) && normalizeArchiveFolder(e.archiveFolder) === oldK);
+    if (list.length === 0) return;
+    if (!window.confirm(`سيتم نقل ${list.length} اختبار إلى «${newF || 'بدون مجلد'}». متابعة؟`)) return;
+    const now = new Date().toISOString();
+    for (const e of list) {
+      await saveOmrExam({ ...e, archiveFolder: newF || undefined, updatedAt: now });
+    }
+    load();
+    toast.success('تمت إعادة تسمية المجلد.', 'أرشيف');
   };
 
   const handleRestoreExam = async (exam) => {
@@ -436,6 +554,7 @@ const OMRExams = () => {
       ...exam,
       archived: false,
       archivedAt: null,
+      archiveFolder: undefined,
       updatedAt: new Date().toISOString(),
     });
     load();
@@ -512,29 +631,78 @@ const OMRExams = () => {
     });
   }, [students, selectedBulkExam, modalStage]);
 
+  const modalGrades = useMemo(() => {
+    const set = new Set();
+    stageStudents.forEach((s) => {
+      const g = String(s.grade || s.classroom || '').trim();
+      if (g) set.add(g);
+    });
+    return [...set].sort((a, b) => a.localeCompare(b, 'ar'));
+  }, [stageStudents]);
+
+  const allowedExamGrades = useMemo(() => {
+    if (!selectedBulkExam) return [];
+    const eg = examGrades(selectedBulkExam);
+    return eg.length ? eg : [];
+  }, [selectedBulkExam]);
+
+  const isGuestStudent = useCallback((s) => {
+    const cls = String(s?.classroom ?? s?.class ?? '').trim().toLowerCase();
+    const stage = String(s?.stage ?? '').trim().toLowerCase();
+    const grade = String(s?.grade ?? '').trim().toLowerCase();
+    // Keywords for visiting students only (as requested)
+    const guestKeywords = ['زائر', 'زوار', 'visitor'];
+    const hay = `${cls} ${stage} ${grade}`;
+    return guestKeywords.some(k => hay.includes(String(k).toLowerCase()));
+  }, []);
+
   const filteredModalStudents = useMemo(() => {
+    const raw = (studentSearch || '').trim();
+    const needle = raw.toLowerCase();
     return stageStudents.filter(s => {
-      // 1. Grade Match (Primary)
-      const gradeMatch = !selectedBulkExam?.grade || isLevelMatch(s.grade, selectedBulkExam.grade) || isLevelMatch(s.stage, selectedBulkExam.grade);
+      // 1. Grade Match (Primary) — restrict to grades chosen in the exam (multi-grade supported)
+      const baseGradeMatch = allowedExamGrades.length === 0
+        ? true
+        : allowedExamGrades.some(g => isLevelMatch(s.grade, g) || isLevelMatch(s.classroom, g) || isLevelMatch(s.stage, g));
+
+      // Optional narrowing by a specific grade
+      const gradeMatch =
+        modalGrade === 'All'
+          ? baseGradeMatch
+          : (baseGradeMatch && (isLevelMatch(s.grade, modalGrade) || isLevelMatch(s.classroom, modalGrade) || isLevelMatch(s.stage, modalGrade)));
       
       // 2. Room/Class Match (Optional Filter)
       const roomMatch = selectedClass === 'All' || 
                         isLevelMatch(s.classroom, selectedClass) || 
                         isLevelMatch(s.class, selectedClass);
+
+      // 2.5 Group filter (School/Guest)
+      const guest = isGuestStudent(s);
+      const groupMatch =
+        studentGroupFilter === 'all' ||
+        (studentGroupFilter === 'guest' && guest) ||
+        (studentGroupFilter === 'school' && !guest);
       
-      // 3. Search text
-      const searchMatch = !studentSearch || s.name.toLowerCase().includes(studentSearch.toLowerCase()) || s.id.includes(studentSearch);
+      // 3. Search (اسم / رقم الطالب / جلوس / هوية)
+      const searchMatch = !raw ||
+        (s.name || '').toLowerCase().includes(needle) ||
+        String(s.id || '').includes(raw) ||
+        String(s.seatNumber ?? s.seat_number ?? '').includes(raw) ||
+        String(s.nationalId ?? s.national_id ?? '').includes(raw);
       
-      return gradeMatch && roomMatch && searchMatch;
+      return gradeMatch && roomMatch && groupMatch && searchMatch;
     });
-  }, [stageStudents, selectedClass, studentSearch, selectedBulkExam]);
+  }, [stageStudents, selectedClass, studentSearch, modalGrade, studentGroupFilter, isGuestStudent, allowedExamGrades]);
 
   const openBulkModal = (exam) => {
     setSelectedBulkExam(exam);
     setModalStage(normalizeStage(exam.stage || 'All'));
+    setModalGrade('All');
     // Default the class selection to the classroom specified in the exam, or 'All'
-    setSelectedClass(exam.classroom || 'All');
+    setSelectedClass('All');
     setSelectedStudentIds(new Set());
+    setStudentSearch('');
+    setStudentGroupFilter('all');
     // Pre-fill date from exam if available
     if (exam.date) {
         setDateInputValue(exam.date);
@@ -547,6 +715,93 @@ const OMRExams = () => {
     setCustomTemplateName('');
     setShowBulkModal(true);
   };
+
+  /** صفحة A4 من ملصقات متطابقة (مادة + صف) للصقها على أوراق OMR طُبعت سابقًا بدون هذه البيانات */
+  const printExamStickers = useCallback((exam) => {
+    const subject = escapeHtmlSticker(exam.subject || '—');
+    const gradeLine = escapeHtmlSticker(stickerGradeLabel(exam));
+    const titleHint = escapeHtmlSticker((exam.title || '').trim());
+    const COLS = 3;
+    const ROWS = 6;
+    const total = COLS * ROWS;
+    const stickerCells = Array.from({ length: total }, () => `
+      <div class="sticker">
+        <div class="line subj"><span class="lbl">المادة</span> ${subject}</div>
+        <div class="line gr"><span class="lbl">الصف</span> ${gradeLine}</div>
+        ${titleHint ? `<div class="hint">${titleHint}</div>` : ''}
+      </div>
+    `).join('');
+
+    const html = `<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+<meta charset="utf-8"/>
+<title>ملصقات OMR</title>
+<style>
+  @page { size: A4 portrait; margin: 10mm; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', 'Tahoma', sans-serif;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  h1 { font-size: 11pt; text-align: center; margin: 0 0 6mm; color: #334155; font-weight: 800; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(${COLS}, 1fr);
+    gap: 5mm;
+  }
+  .sticker {
+    border: 1.2px dashed #475569;
+    border-radius: 6px;
+    padding: 4mm 5mm;
+    min-height: 26mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2mm;
+    background: #fafafa;
+  }
+  .line { font-size: 11pt; font-weight: 800; color: #0f172a; line-height: 1.35; }
+  .line.gr { font-size: 10pt; font-weight: 700; color: #1e293b; }
+  .lbl { color: #64748b; font-weight: 700; font-size: 9pt; margin-left: 3mm; }
+  .hint {
+    font-size: 7.5pt;
+    color: #64748b;
+    font-weight: 600;
+    margin-top: 1mm;
+    line-height: 1.25;
+    overflow: hidden;
+    max-height: 9mm;
+  }
+  @media print {
+    .no-print { display: none !important; }
+  }
+</style>
+</head>
+<body>
+  <p class="no-print" style="text-align:center;font-size:10pt;color:#64748b;margin:0 0 4mm;padding:0 4mm">اقطع على الخطوط المتقطعة ثم الصق على الورقة. يمكنك طباعة عدة نسخ من نفس الصفحة من نافذة الطابعة.</p>
+  <h1>ملصقات التعريف (${total} ملصق)</h1>
+  <div class="grid">${stickerCells}</div>
+</body>
+</html>`;
+
+    const w = window.open('', '_blank');
+    if (!w) {
+      toast.error('فتح نافذة الطباعة فشل. اسمح بالنوافذ المنبثقة لهذا الموقع.', 'طباعة الملصقات');
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => {
+      try {
+        w.focus();
+        w.print();
+      } catch (_) { /* ignore */ }
+    }, 250);
+  }, [toast]);
 
   const toggleStudent = (id) => setSelectedStudentIds(prev => {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
@@ -599,7 +854,14 @@ const OMRExams = () => {
           subject: selectedBulkExam.subject,
           template_config: effectiveCustomConfig,
           num_questions: selectedBulkExam.qCount || 30,
-          students: target.map(s => ({ id: getStudentQRId(s), name: s.name, class_name: selectedBulkExam.grade, date: examDate, day: examDay }))
+          students: target.map(s => ({
+            id: getStudentQRId(s),
+            name: s.name,
+            class_name: (s.grade || s.classroom || selectedBulkExam.grade || ''),
+            subject: selectedBulkExam.subject || '',
+            date: examDate,
+            day: examDay
+          }))
         });
       } else {
         url  = `${OMR_API_BASE}/generate-batch-stream`;
@@ -607,7 +869,14 @@ const OMRExams = () => {
           subject: selectedBulkExam.subject,
           template: selectedTemplate,
           num_questions: selectedBulkExam.qCount || 30,
-          students: target.map(s => ({ id: getStudentQRId(s), name: s.name, class_name: selectedBulkExam.grade, date: examDate, day: examDay }))
+          students: target.map(s => ({
+            id: getStudentQRId(s),
+            name: s.name,
+            class_name: (s.grade || s.classroom || selectedBulkExam.grade || ''),
+            subject: selectedBulkExam.subject || '',
+            date: examDate,
+            day: examDay
+          }))
         });
       }
 
@@ -752,45 +1021,28 @@ const OMRExams = () => {
                <FileStack size={48} className="mx-auto text-slate-200 mb-4" />
                <h3 className="text-xl font-black text-slate-400">{examArchiveTab === 'archive' ? 'لا توجد اختبارات في الأرشيف' : 'لا توجد اختبارات مسجلة'}</h3>
             </div>
-          ) : (
+          ) : examArchiveTab === 'active' ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-6">
               {visibleExams.map(exam => (
                 <div key={exam.id} className="group relative">
                   <div className="absolute inset-0 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-[2rem] blur-2xl opacity-0 group-hover:opacity-10 transition-opacity duration-500"></div>
-                  <div className={`luxury-card h-full bg-white border-2 border-transparent ${examArchiveTab === 'archive' ? 'opacity-95 border-amber-100/80' : 'group-hover:border-indigo-100'} rounded-[2rem] shadow-xl hover:shadow-2xl transition-all duration-500 overflow-hidden flex flex-col relative z-10 text-right`}>
+                  <div className="luxury-card h-full bg-white border-2 border-transparent group-hover:border-indigo-100 rounded-[2rem] shadow-xl hover:shadow-2xl transition-all duration-500 overflow-hidden flex flex-col relative z-10 text-right">
                     <div className="p-6 pb-4">
                       <div className="flex justify-between items-start mb-6">
                         <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transform group-hover:scale-110 group-hover:rotate-12 transition-all duration-500 ${exam.template === 'nafs' ? 'bg-indigo-600 text-white shadow-indigo-100' : 'bg-purple-600 text-white shadow-purple-100'}`}>
                           {getSubjectIcon(exam.subject, 24)}
                         </div>
                         <div className="flex gap-1.5">
-                          {examArchiveTab === 'active' && (
-                            <>
-                              <button onClick={() => openEditModal(exam)} className="p-2.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="تعديل البيانات">
-                                <Settings size={18} />
-                              </button>
-                              <button onClick={() => handleArchiveExam(exam)} className="p-2.5 text-slate-300 hover:text-amber-600 hover:bg-amber-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="أرشفة">
-                                <Archive size={18} />
-                              </button>
-                            </>
-                          )}
-                          {examArchiveTab === 'archive' && (
-                            <>
-                              <button onClick={() => handleRestoreExam(exam)} className="p-2.5 text-slate-300 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="استعادة">
-                                <ArchiveRestore size={18} />
-                              </button>
-                              <button onClick={() => handlePermanentDelete(exam.id)} className="p-2.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="حذف نهائي">
-                                <Trash2 size={18} />
-                              </button>
-                            </>
-                          )}
+                          <button onClick={() => openEditModal(exam)} className="p-2.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="تعديل البيانات">
+                            <Settings size={18} />
+                          </button>
+                          <button onClick={() => openArchiveFolderModal(exam)} className="p-2.5 text-slate-300 hover:text-amber-600 hover:bg-amber-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="أرشفة">
+                            <Archive size={18} />
+                          </button>
                         </div>
                       </div>
                       <div className="space-y-2 mb-4">
                         <div className="flex flex-wrap gap-1.5 mb-2 justify-end items-center">
-                          {examArchiveTab === 'archive' && (
-                            <span className="px-3 py-1 rounded-lg bg-amber-50 text-amber-800 text-[9px] font-black uppercase tracking-widest">أرشيف</span>
-                          )}
                           <span className="px-3 py-1 rounded-lg bg-slate-50 text-slate-500 text-[9px] font-black uppercase tracking-widest">{exam.stage}</span>
                           <span className="px-3 py-1 rounded-lg bg-indigo-50 text-indigo-600 text-[9px] font-black uppercase tracking-widest">{exam.grade}</span>
                           {exam.date && (
@@ -802,20 +1054,164 @@ const OMRExams = () => {
                         <h3 className="text-lg font-black text-slate-900 group-hover:text-indigo-600 transition-colors leading-tight line-clamp-2">{exam.title}</h3>
                       </div>
                     </div>
-                    {examArchiveTab === 'active' ? (
-                      <div className="p-5 pt-0 flex gap-2.5 mt-auto">
-                        <button onClick={() => openBulkModal(exam)} className="flex-1 py-3.5 bg-slate-900 text-white rounded-xl font-black text-[9px] hover:bg-black transition-all flex flex-col items-center justify-center gap-1.5"><Printer size={16} /> طباعة</button>
-                        <button onClick={() => openExamKeys(exam)} className="flex-1 py-3.5 bg-white text-slate-900 border border-slate-100 rounded-xl font-black text-[9px] hover:border-indigo-100 transition-all flex flex-col items-center justify-center gap-1.5"><Edit2 size={16} /> المفتاح</button>
-                        <button onClick={() => navigate(`/omr-scanner/${exam.id}`)} className="flex-1 py-3.5 bg-indigo-600 text-white rounded-xl font-black text-[9px] hover:bg-indigo-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-xl shadow-indigo-100"><ScanLine size={16} /> تصحيح</button>
+                    <div className="p-5 pt-0 mt-auto flex flex-col gap-2">
+                      <div className="flex gap-2.5">
+                        <button type="button" onClick={() => openBulkModal(exam)} className="flex-1 py-3.5 bg-slate-900 text-white rounded-xl font-black text-[9px] hover:bg-black transition-all flex flex-col items-center justify-center gap-1.5"><Printer size={16} /> طباعة</button>
+                        <button type="button" onClick={() => openExamKeys(exam)} className="flex-1 py-3.5 bg-white text-slate-900 border border-slate-100 rounded-xl font-black text-[9px] hover:border-indigo-100 transition-all flex flex-col items-center justify-center gap-1.5"><Edit2 size={16} /> المفتاح</button>
+                        <button type="button" onClick={() => navigate(`/omr-scanner/${exam.id}`)} className="flex-1 py-3.5 bg-indigo-600 text-white rounded-xl font-black text-[9px] hover:bg-indigo-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-xl shadow-indigo-100"><ScanLine size={16} /> تصحيح</button>
                       </div>
-                    ) : (
-                      <div className="p-5 pt-0 flex gap-2.5 mt-auto">
-                        <button onClick={() => handleRestoreExam(exam)} className="flex-1 py-3.5 bg-emerald-600 text-white rounded-xl font-black text-[9px] hover:bg-emerald-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-lg shadow-emerald-100"><ArchiveRestore size={16} /> استعادة</button>
-                      </div>
-                    )}
+                      <button
+                        type="button"
+                        onClick={() => printExamStickers(exam)}
+                        title="طباعة ملصقات مادة وصف للصقها على أوراق مطبوعة سابقاً دون هذه البيانات"
+                        className="w-full py-2.5 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/90 text-slate-600 hover:border-amber-300 hover:bg-amber-50/90 hover:text-amber-950 transition-all flex items-center justify-center gap-2 font-black text-[9px]"
+                      >
+                        <Tag size={14} className="shrink-0 text-amber-700/90" />
+                        ملصق مادة وصف (أوراق قديمة)
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
+            </div>
+          ) : (
+            <div className="space-y-10">
+              {archivedFolderGroups.map(({ folder, label, exams: folderExams }) => (
+                <div key={folder || '__none__'} className="space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-gradient-to-l from-amber-50 to-white border border-amber-100 rounded-2xl px-5 py-4 shadow-sm">
+                    <button
+                      type="button"
+                      onClick={() => toggleArchiveFolderSection(folder)}
+                      className="flex items-center gap-3 text-right font-black text-slate-800 min-w-0"
+                    >
+                      {isArchiveFolderSectionOpen(folder) ? <ChevronDown size={22} className="text-amber-700 shrink-0" /> : <ChevronRight size={22} className="text-amber-700 shrink-0" />}
+                      <Folder size={22} className="text-amber-600 shrink-0" />
+                      <span className="truncate">{label}</span>
+                      <span className="text-xs font-black text-amber-700/80 bg-amber-100/80 px-2 py-0.5 rounded-lg shrink-0">{folderExams.length}</span>
+                    </button>
+                    <div className="flex flex-wrap gap-2 justify-end">
+                      <button
+                        type="button"
+                        onClick={() => handleRenameArchiveFolderGroup(folder)}
+                        className="px-4 py-2 rounded-xl bg-white border border-amber-200 text-amber-900 text-xs font-black hover:bg-amber-50 transition-all"
+                      >
+                        إعادة تسمية المجلد
+                      </button>
+                    </div>
+                  </div>
+                  {isArchiveFolderSectionOpen(folder) && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+                      {folderExams.map(exam => (
+                        <div key={exam.id} className="group relative">
+                          <div className="absolute inset-0 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-[2rem] blur-2xl opacity-0 group-hover:opacity-10 transition-opacity duration-500"></div>
+                          <div className="luxury-card h-full bg-white border-2 border-amber-100/80 opacity-95 rounded-[2rem] shadow-xl hover:shadow-2xl transition-all duration-500 overflow-hidden flex flex-col relative z-10 text-right">
+                            <div className="p-6 pb-4">
+                              <div className="flex justify-between items-start mb-6">
+                                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transform group-hover:scale-110 group-hover:rotate-12 transition-all duration-500 ${exam.template === 'nafs' ? 'bg-indigo-600 text-white shadow-indigo-100' : 'bg-purple-600 text-white shadow-purple-100'}`}>
+                                  {getSubjectIcon(exam.subject, 24)}
+                                </div>
+                                <div className="flex gap-1.5">
+                                  <button onClick={() => handleRestoreExam(exam)} className="p-2.5 text-slate-300 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="استعادة">
+                                    <ArchiveRestore size={18} />
+                                  </button>
+                                  <button onClick={() => handlePermanentDelete(exam.id)} className="p-2.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="حذف نهائي">
+                                    <Trash2 size={18} />
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="space-y-2 mb-4">
+                                <div className="flex flex-wrap gap-1.5 mb-2 justify-end items-center">
+                                  <span className="px-3 py-1 rounded-lg bg-amber-50 text-amber-800 text-[9px] font-black uppercase tracking-widest">أرشيف</span>
+                                  <span className="px-3 py-1 rounded-lg bg-slate-50 text-slate-500 text-[9px] font-black uppercase tracking-widest">{exam.stage}</span>
+                                  <span className="px-3 py-1 rounded-lg bg-indigo-50 text-indigo-600 text-[9px] font-black uppercase tracking-widest">{exam.grade}</span>
+                                  {exam.date && (
+                                    <span className="px-3 py-1 rounded-lg bg-emerald-50 text-emerald-600 text-[9px] font-black flex items-center gap-1">
+                                      <Calendar size={10} /> {new Date(exam.date).toLocaleDateString('ar-SA')}
+                                    </span>
+                                  )}
+                                </div>
+                                <h3 className="text-lg font-black text-slate-900 group-hover:text-indigo-600 transition-colors leading-tight line-clamp-2">{exam.title}</h3>
+                              </div>
+                            </div>
+                            <div className="p-5 pt-0 flex flex-col gap-2.5 mt-auto">
+                              <label className="text-[9px] font-black text-slate-400 text-right tracking-wide">نقل إلى مجلد</label>
+                              <div className="flex gap-2">
+                                <select
+                                  className="flex-1 min-w-0 py-2.5 px-3 rounded-xl border border-slate-200 text-right font-bold text-xs bg-white outline-none focus:ring-2 focus:ring-amber-100"
+                                  value={normalizeArchiveFolder(exam.archiveFolder)}
+                                  onChange={(ev) => handleMoveArchivedExamFolder(exam, ev.target.value)}
+                                >
+                                  <option value="">بدون مجلد</option>
+                                  {existingArchiveFolders.map((f) => (
+                                    <option key={f} value={f}>{f}</option>
+                                  ))}
+                                </select>
+                                <button
+                                  type="button"
+                                  title="مجلد جديد"
+                                  onClick={async () => {
+                                    const n = window.prompt('اسم المجلد الجديد:');
+                                    if (n == null) return;
+                                    await handleMoveArchivedExamFolder(exam, n);
+                                  }}
+                                  className="shrink-0 px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 text-amber-900 font-black text-[10px] hover:bg-amber-100 transition-all"
+                                >
+                                  +
+                                </button>
+                              </div>
+                              <button type="button" onClick={() => handleRestoreExam(exam)} className="w-full py-3.5 bg-emerald-600 text-white rounded-xl font-black text-[9px] hover:bg-emerald-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-lg shadow-emerald-100"><ArchiveRestore size={16} /> استعادة للنشطة</button>
+                              <button
+                                type="button"
+                                onClick={() => printExamStickers(exam)}
+                                title="طباعة ملصقات مادة وصف للأوراق المطبوعة سابقاً"
+                                className="w-full py-2.5 rounded-xl border-2 border-dashed border-amber-200/80 bg-amber-50/60 text-amber-950 hover:bg-amber-100/90 transition-all flex items-center justify-center gap-2 font-black text-[9px]"
+                              >
+                                <Tag size={14} className="shrink-0" />
+                                ملصق مادة وصف
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {archiveTargetModal && (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in">
+              <div className="bg-white w-full max-w-md rounded-[2rem] shadow-2xl p-8 space-y-6 text-right border border-slate-100">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-xl font-black text-slate-900 font-header">أرشفة الاختبار</h3>
+                    <p className="text-sm font-bold text-slate-500 mt-2 line-clamp-2">{archiveTargetModal.title}</p>
+                  </div>
+                  <button type="button" onClick={closeArchiveFolderModal} className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 hover:text-rose-500 shrink-0"><X size={22} /></button>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest">مجلد داخل الأرشيف (اختياري)</label>
+                  <input
+                    type="text"
+                    list="omr-archive-folder-suggestions"
+                    value={archiveTargetFolderInput}
+                    onChange={(e) => setArchiveTargetFolderInput(e.target.value)}
+                    placeholder="مثال: نافس 2026 — الفصل الأول"
+                    className="w-full px-4 py-3.5 rounded-xl border-2 border-slate-100 focus:border-amber-200 focus:ring-4 focus:ring-amber-50 font-bold text-slate-800 text-right outline-none transition-all"
+                  />
+                  <datalist id="omr-archive-folder-suggestions">
+                    {existingArchiveFolders.map((f) => (
+                      <option key={f} value={f} />
+                    ))}
+                  </datalist>
+                  <p className="text-xs font-bold text-slate-400 leading-relaxed">اتركه فارغاً لوضع الاختبار في «بدون مجلد»، أو اكتب اسماً جديداً لإنشاء مجلد.</p>
+                </div>
+                <div className="flex gap-3 justify-end flex-wrap-reverse">
+                  <button type="button" onClick={closeArchiveFolderModal} className="px-6 py-3 rounded-xl font-black text-sm text-slate-500 hover:bg-slate-50 transition-all">إلغاء</button>
+                  <button type="button" onClick={confirmArchiveToFolder} className="px-6 py-3 rounded-xl font-black text-sm bg-amber-600 text-white hover:bg-amber-700 shadow-lg shadow-amber-100 transition-all">تأكيد الأرشفة</button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -847,13 +1243,24 @@ const OMRExams = () => {
                       </div>
                       
                       <div className="flex-1 w-full space-y-3">
-                         <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">فلترة حسب الفصل (اختياري)</label>
-                         <select value={selectedClass} onChange={e => setSelectedClass(e.target.value)} className="w-full px-8 py-5 bg-white border-none rounded-[2rem] outline-none focus:ring-4 focus:ring-indigo-50 transition-all font-black text-slate-700 text-right shadow-sm">
-                            <option value="All">عرض كل الطلاب بالمرحلة/الصف</option>
-                            {[...new Set(stageStudents.map(s => s.classroom || s.class || s.grade).filter(Boolean))].map(room => (
-                               <option key={room} value={room}>فصل: {room}</option>
-                            ))}
-                         </select>
+                         <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">فلترة حسب الصف / الفصل (اختياري)</label>
+                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                           <select value={modalGrade} onChange={e => { setModalGrade(e.target.value); setSelectedClass('All'); }} className="w-full px-8 py-5 bg-white border-none rounded-[2rem] outline-none focus:ring-4 focus:ring-indigo-50 transition-all font-black text-slate-700 text-right shadow-sm">
+                              <option value="All">كل الصفوف</option>
+                              {modalGrades.map(g => (
+                                 <option key={g} value={g}>{g}</option>
+                              ))}
+                           </select>
+                           <select value={selectedClass} onChange={e => setSelectedClass(e.target.value)} className="w-full px-8 py-5 bg-white border-none rounded-[2rem] outline-none focus:ring-4 focus:ring-indigo-50 transition-all font-black text-slate-700 text-right shadow-sm">
+                              <option value="All">كل الفصول</option>
+                              {[...new Set(stageStudents
+                                .filter(s => modalGrade === 'All' ? true : (isLevelMatch(s.grade, modalGrade) || isLevelMatch(s.classroom, modalGrade) || isLevelMatch(s.stage, modalGrade)))
+                                .map(s => s.classroom || s.class)
+                                .filter(Boolean))].map(room => (
+                                 <option key={room} value={room}>فصل: {room}</option>
+                              ))}
+                           </select>
+                         </div>
                       </div>
                    </div>
 
@@ -896,28 +1303,52 @@ const OMRExams = () => {
                       </div>
                    </div>
                    <div className="space-y-6">
-                      <div className="flex items-center justify-between px-2">
-                         <h4 className="text-xl font-black text-slate-800">اختيار الطلاب ({selectedStudentIds.size})</h4>
-                         <button onClick={toggleAll} className="px-6 py-2 bg-slate-100 text-slate-500 rounded-xl text-xs font-black hover:bg-slate-200 transition-all">{allFilteredSel ? 'إلغاء الكل' : 'تحديد الكل'}</button>
-                      </div>
-                      
-                      {/* ── DEBUG PANEL (remove after fixing) ── */}
-                      {filteredModalStudents.length === 0 && students.length > 0 && (
-                        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-sm font-mono text-right space-y-2">
-                          <p className="font-black text-amber-800 mb-3">🔍 تشخيص — لماذا لا يظهر الطلاب؟</p>
-                          <p className="text-amber-700">الاختبار: الصف = <strong>"{selectedBulkExam?.grade}"</strong> | المرحلة = <strong>"{selectedBulkExam?.stage}"</strong></p>
-                          <p className="text-amber-700">إجمالي الطلاب: <strong>{students.length}</strong> | بعد فلتر المرحلة: <strong>{stageStudents.length}</strong></p>
-                          <p className="text-amber-700">نماذج من بيانات الطلاب الموجودة:</p>
-                          {students.slice(0, 5).map((s, i) => (
-                            <div key={i} className="bg-white rounded-xl p-2 border border-amber-100 text-xs">
-                              <span className="text-slate-600">{s.name} — </span>
-                              <span>grade: <strong>"{s.grade}"</strong></span> | 
-                              <span> stage: <strong>"{s.stage}"</strong></span> | 
-                              <span> class: <strong>"{s.class}"</strong></span>
-                            </div>
+                      <div className="flex flex-col gap-4 px-2">
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                          <h4 className="text-xl font-black text-slate-800">اختيار الطلاب ({selectedStudentIds.size})</h4>
+                          <button type="button" onClick={toggleAll} className="px-6 py-2 bg-slate-100 text-slate-500 rounded-xl text-xs font-black hover:bg-slate-200 transition-all w-full sm:w-auto">{allFilteredSel ? 'إلغاء الكل' : 'تحديد الكل'}</button>
+                        </div>
+                        <div className="flex flex-wrap gap-2 justify-end">
+                          {[
+                            { id: 'all', label: 'الكل' },
+                            { id: 'school', label: 'طلاب المدرسة' },
+                            { id: 'guest', label: 'طلاب زوار' },
+                          ].map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => {
+                                setStudentGroupFilter(opt.id);
+                                // لضمان ظهور الزوار حتى لو كان فلتر الفصل مضبوطاً على فصل معيّن
+                                if (opt.id === 'guest') setSelectedClass('All');
+                              }}
+                              className={`px-4 py-2 rounded-xl text-xs font-black transition-all border ${
+                                studentGroupFilter === opt.id
+                                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-100'
+                                  : 'bg-white text-slate-600 border-slate-100 hover:bg-slate-50 hover:border-slate-200'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
                           ))}
                         </div>
-                      )}
+                        <div className="relative group">
+                          <Search className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-indigo-500 transition-colors" size={20} />
+                          <input
+                            type="text"
+                            dir="rtl"
+                            placeholder="ابحث باسم الطالب أو رقم الجلوس أو الهوية..."
+                            value={studentSearch}
+                            onChange={(e) => setStudentSearch(e.target.value)}
+                            className="w-full pr-12 pl-4 py-4 bg-white border-2 border-slate-100 rounded-2xl font-bold text-sm text-slate-800 text-right outline-none focus:border-indigo-200 focus:ring-4 focus:ring-indigo-50/80 transition-all shadow-sm"
+                          />
+                        </div>
+                        {studentSearch.trim() ? (
+                          <p className="text-xs font-bold text-slate-400 text-right">
+                            نتائج البحث: {filteredModalStudents.length} طالب
+                          </p>
+                        ) : null}
+                      </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {filteredModalStudents.map(s => (
@@ -1031,17 +1462,43 @@ const OMRExams = () => {
                       <div className="grid grid-cols-2 gap-8">
                          <div className="space-y-3">
                             <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">المرحلة الدراسية</label>
-                            <select value={newExam.stage} onChange={e => setNewExam({...newExam, stage: e.target.value, grade: ''})} className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 transition-all font-black text-slate-700 text-right shadow-sm">
+                            <select value={newExam.stage} onChange={e => setNewExam({...newExam, stage: e.target.value, grade: '', grades: [], subject: ''})} className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 transition-all font-black text-slate-700 text-right shadow-sm">
                               <option value="">اختر المرحلة...</option>
                               {Object.keys(STAGES).map(s => <option key={s} value={s}>{s}</option>)}
                             </select>
                          </div>
                          <div className="space-y-3">
-                            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">الصف الدراسي</label>
-                            <select value={newExam.grade} onChange={e => setNewExam({...newExam, grade: e.target.value, subject: ''})} className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 transition-all font-black text-slate-700 text-right shadow-sm" disabled={!newExam.stage}>
-                              <option value="">اختر الصف...</option>
-                              {(STAGES[newExam.stage] || []).map(g => <option key={g} value={g}>{g}</option>)}
-                            </select>
+                            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">الصفوف الدراسية (يمكن اختيار أكثر من صف)</label>
+                            <div className={`w-full px-6 py-5 bg-slate-50 border-none rounded-[2rem] ${!newExam.stage ? 'opacity-50 pointer-events-none' : ''}`}>
+                              <div className="flex flex-wrap gap-2 justify-end">
+                                {(STAGES[newExam.stage] || []).map(g => {
+                                  const sel = (newExam.grades || []).includes(g);
+                                  return (
+                                    <button
+                                      key={g}
+                                      type="button"
+                                      onClick={() => {
+                                        const next = new Set(newExam.grades || []);
+                                        if (next.has(g)) next.delete(g); else next.add(g);
+                                        const arr = [...next];
+                                        setNewExam({ ...newExam, grades: arr, grade: arr[0] || '', subject: '' });
+                                      }}
+                                      className={`px-4 py-2 rounded-xl text-xs font-black transition-all border ${
+                                        sel ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-100' : 'bg-white text-slate-600 border-slate-100 hover:bg-slate-50 hover:border-slate-200'
+                                      }`}
+                                      title={sel ? 'إزالة' : 'إضافة'}
+                                    >
+                                      {g}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <div className="mt-3 text-right">
+                                <span className="text-[10px] font-black text-slate-400">
+                                  المختار: {(newExam.grades || []).length ? (newExam.grades || []).join('، ') : '—'}
+                                </span>
+                              </div>
+                            </div>
                          </div>
                       </div>
 
@@ -1070,9 +1527,9 @@ const OMRExams = () => {
                       <div className="grid grid-cols-2 gap-8">
                         <div className="space-y-3">
                            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">المادة الدراسية</label>
-                           <select value={newExam.subject} onChange={e => setNewExam({...newExam, subject: e.target.value})} className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 transition-all font-black text-slate-700 text-right shadow-sm" disabled={!newExam.grade}>
+                           <select value={newExam.subject} onChange={e => setNewExam({...newExam, subject: e.target.value})} className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 transition-all font-black text-slate-700 text-right shadow-sm" disabled={(newExam.grades || []).length === 0}>
                              <option value="">اختر المادة...</option>
-                             {subjects.filter(s => s.grades.includes('All') || s.grades.includes(newExam.grade)).map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                             {subjects.filter(s => s.grades.includes('All') || (newExam.grades || []).some(g => s.grades.includes(g))).map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
                            </select>
                         </div>
                         <div className="space-y-3">

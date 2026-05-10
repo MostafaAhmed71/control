@@ -16,6 +16,12 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 
+def _merged_student_subject(student_subject: Optional[str], batch_subject: str) -> str:
+    s = (student_subject or "").strip()
+    if s:
+        return s
+    return (batch_subject or "").strip() or "عام"
+
 # Shared thread pool for CPU-bound OMR processing
 _omr_executor = ThreadPoolExecutor(max_workers=4)
 DEBUG_SCANS_DIR = os.getenv("OMR_DEBUG_DIR", os.path.join(tempfile.gettempdir(), "omr_debug_scans"))
@@ -34,7 +40,7 @@ class Student(BaseModel):
     id: str
     name: str
     class_name: str = "غير محدد"
-    subject: str = "عام"
+    subject: Optional[str] = None
     date: str = "2024"
     day: str = ""
     seat_number: str = ""
@@ -95,7 +101,8 @@ async def generate_batch(request: BatchRequest):
     try:
         output_filename = f"batch_{request.subject}.pdf"
         student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
-                          "subject": s.subject, "date": s.date, "day": s.day,
+                          "subject": _merged_student_subject(s.subject, request.subject),
+                          "date": s.date, "day": s.day,
                           "seat_number": s.seat_number,
                           "committee_number": s.committee_number,
                           "num_questions": request.num_questions}
@@ -123,7 +130,8 @@ async def generate_batch_stream(request: BatchRequest):
 
     output_filename = f"batch_{request.subject}.pdf"
     student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
-                      "subject": s.subject, "date": s.date, "day": s.day,
+                      "subject": _merged_student_subject(s.subject, request.subject),
+                      "date": s.date, "day": s.day,
                       "seat_number": s.seat_number,
                       "committee_number": s.committee_number,
                       "num_questions": request.num_questions}
@@ -191,7 +199,8 @@ async def generate_custom_batch(request: CustomBatchRequest):
             except:
                 pass
         student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
-                          "subject": s.subject, "date": s.date, "day": s.day,
+                          "subject": _merged_student_subject(s.subject, request.subject),
+                          "date": s.date, "day": s.day,
                           "seat_number": s.seat_number,
                           "committee_number": s.committee_number,
                           "num_questions": request.num_questions}
@@ -225,7 +234,8 @@ async def generate_custom_batch_stream(request: CustomBatchRequest):
         except:
             pass
     student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
-                      "subject": s.subject, "date": s.date, "day": s.day,
+                      "subject": _merged_student_subject(s.subject, request.subject),
+                      "date": s.date, "day": s.day,
                       "seat_number": s.seat_number,
                       "committee_number": s.committee_number,
                       "num_questions": request.num_questions}
