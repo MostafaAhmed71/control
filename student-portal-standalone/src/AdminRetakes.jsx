@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
+import schoolLogo from './assets/school_logo.jpeg';
 import {
   getAllRetakeRequests,
   deleteRetakeRequest,
@@ -509,12 +510,9 @@ export default function AdminRetakes() {
           <div className="flex items-center gap-3">
             <div className="w-12 h-12 bg-white rounded-2xl shadow-md border border-slate-100 flex items-center justify-center overflow-hidden p-1 shrink-0">
               <img
-                src="/school_logo.jpeg"
+                src={schoolLogo}
                 alt="logo"
                 className="w-full h-full object-contain"
-                onError={(e) => {
-                  e.target.src = 'https://ui-avatars.com/api/?name=A&background=1e1b4b&color=fff';
-                }}
               />
             </div>
             <div className="text-right">
@@ -1262,7 +1260,7 @@ export default function AdminRetakes() {
             )}
           </div>
           <div className="w-20 h-20 bg-white border border-slate-200 rounded-2xl p-1 flex items-center justify-center">
-            <img src="/school_logo.jpeg" alt="logo" className="w-full h-full object-contain" />
+            <img src={schoolLogo} alt="logo" className="w-full h-full object-contain" />
           </div>
         </div>
 

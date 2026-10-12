@@ -22,6 +22,8 @@ import {
   Clock, ShieldCheck, CheckCircle2, Sparkles
 } from 'lucide-react';
 import html2canvas from 'html2canvas';
+import schoolLogo from './assets/school_logo.jpeg';
+
 
 /* ── helpers ── */
 const getGradeLabel = (pct) => {
@@ -354,8 +356,7 @@ const ResultSlip = ({
             <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
               <div className="flex items-center gap-3 sm:gap-5 text-right min-w-0">
                 <div className="w-12 h-12 sm:w-16 sm:h-16 bg-white rounded-xl sm:rounded-2xl p-1.5 shadow-2xl flex items-center justify-center overflow-hidden shrink-0">
-                  <img src="/school_logo.jpeg" alt="Logo" className="w-full h-full object-contain"
-                    onError={e => { e.target.src = 'https://ui-avatars.com/api/?name=S&background=1e1b4b&color=fff'; }} />
+                  <img src={schoolLogo} alt="Logo" className="w-full h-full object-contain" />
                 </div>
                 <div className="min-w-0 flex-1 text-right">
                   <h2 className="text-sm sm:text-2xl font-black tracking-tight font-header leading-snug break-words">{schoolName}</h2>
@@ -965,22 +966,41 @@ export default function StudentPortal() {
       <div className="p-4 sm:p-6">
         <div className="print:hidden">
           {/* Page Header */}
-          <header className="max-w-4xl mx-auto py-8 sm:py-12">
-            <div className="flex items-center justify-center gap-3 sm:gap-5 mb-4 flex-wrap">
-              <div className="w-16 h-16 sm:w-20 sm:h-20 bg-white rounded-2xl p-1.5 shadow-xl border border-slate-100 flex items-center justify-center overflow-hidden shrink-0">
+          <header className="max-w-3xl mx-auto pt-8 pb-6 sm:pt-12 sm:pb-8 text-center">
+            {/* School Logo */}
+            <div className="inline-block relative mb-3">
+              <div className="w-24 h-24 sm:w-28 sm:h-28 mx-auto bg-white rounded-3xl p-2 shadow-2xl border border-slate-200/80 flex items-center justify-center overflow-hidden ring-8 ring-indigo-50/80 transition-transform hover:scale-105 duration-300">
                 <img
-                  src="/school_logo.jpeg"
-                  alt="شعار المدرسة"
+                  src={schoolLogo}
+                  alt={schoolName}
                   className="w-full h-full object-contain"
-                  onError={e => { e.target.src = 'https://ui-avatars.com/api/?name=S&background=1e1b4b&color=fff'; }}
                 />
               </div>
-              <h1 className="text-xl sm:text-3xl md:text-4xl font-black text-slate-900 tracking-tight font-header leading-snug text-right">
-                نتائج <span className="text-indigo-700">اختبارات الفترة الأولى من الفصل الدراسي الأول</span>
-              </h1>
             </div>
-            <p className="text-sm sm:text-base text-slate-500 font-bold max-w-lg mx-auto leading-relaxed text-center">
-              أدخل رقم الهوية فقط.
+
+            {/* School Name Badge */}
+            <div className="mb-3">
+              <span className="inline-flex items-center gap-1.5 bg-white border border-slate-200/90 text-slate-800 px-4 py-1.5 rounded-full text-xs sm:text-sm font-black shadow-sm">
+                <School className="w-4 h-4 text-indigo-700" />
+                <span>{schoolName}</span>
+              </span>
+            </div>
+
+            {/* Main Title & Semester */}
+            <div className="space-y-2">
+              <h1 className="text-2xl sm:text-4xl font-black text-slate-900 font-header tracking-tight leading-tight">
+                نتائج اختبارات الفترة الأولى
+              </h1>
+              <div className="inline-block">
+                <span className="inline-flex items-center gap-1.5 bg-indigo-50 border border-indigo-100 text-indigo-900 text-xs sm:text-sm font-black px-4 py-1.5 rounded-2xl shadow-xs">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  الفصل الدراسي الأول
+                </span>
+              </div>
+            </div>
+
+            <p className="text-xs sm:text-sm text-slate-500 font-bold max-w-md mx-auto leading-relaxed mt-3">
+              أدخل رقم الهوية فقط للاستعلام عن النتيجة الرسمية.
             </p>
           </header>
 

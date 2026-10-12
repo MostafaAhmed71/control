@@ -21,3 +21,10 @@ supabase/old/
 .DS_Store
 Thumbs.db
 *.log
+
+# Allow image assets
+!public/school_logo.jpeg
+!src/assets/school_logo.jpeg
+!*.png
+!*.jpeg
+!*.jpg
