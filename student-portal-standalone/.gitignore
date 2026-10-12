@@ -1,0 +1,23 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Production build
+dist
+dist-ssr
+*.local
+
+# Environment variables
+.env
+.env*.local
+!.env.example
+
+# Large SQL dump files (> 100MB exceeds GitHub limits)
+supabase/omr_results_rows.sql
+supabase/old/
+
+# Editor & OS files
+.DS_Store
+Thumbs.db
+*.log
