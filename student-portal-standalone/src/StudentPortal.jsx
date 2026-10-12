@@ -976,7 +976,7 @@ export default function StudentPortal() {
                 />
               </div>
               <h1 className="text-xl sm:text-3xl md:text-4xl font-black text-slate-900 tracking-tight font-header leading-snug text-right">
-                نتائج <span className="text-indigo-700">الاختبار التشخيصي للقسم اللفظي</span>
+                نتائج <span className="text-indigo-700">اختبارات الفترة الأولى من الفصل الدراسي الأول</span>
               </h1>
             </div>
             <p className="text-sm sm:text-base text-slate-500 font-bold max-w-lg mx-auto leading-relaxed text-center">
