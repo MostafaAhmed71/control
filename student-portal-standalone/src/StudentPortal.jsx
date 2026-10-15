@@ -1,3 +1,4 @@
+import { getRetakeRange, isRetakeDayAllowed } from './retakeSchedule';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   fetchOmrResultsForPortalLookup,
@@ -212,16 +213,18 @@ const dedupeStudentResults = (results) => {
 const fmtRetakeDate = (isoOrSchedule) => {
   if (!isoOrSchedule) return 'موعد يحدده الكنترول';
   let d;
-  if (typeof isoOrSchedule === 'object' && isoOrSchedule.date) {
-    d = new Date(`${isoOrSchedule.date}T${isoOrSchedule.time || '08:00'}:00`);
-  } else {
-    d = new Date(isoOrSchedule);
+  if (typeof isoOrSchedule === 'object') {
+    const { startDate, endDate } = getRetakeRange(isoOrSchedule);
+    if (!startDate || !endDate) return 'موعد يحدده الكنترول';
+    const formatDay = (day) => new Date(`${day}T12:00:00`).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    return `${startDate === endDate ? formatDay(startDate) : `من ${formatDay(startDate)} إلى ${formatDay(endDate)}`} (الساعة ${isoOrSchedule.time || '08:00'})`;
   }
+  d = new Date(isoOrSchedule);
   if (isNaN(d.getTime())) return String(isoOrSchedule || '');
-  const dayName = d.toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const dayName = d.toLocaleDateString('ar-EG', { timeZone: 'Asia/Riyadh', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0;
   if (hasTime) {
-    const timeStr = d.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+    const timeStr = d.toLocaleTimeString('ar-EG', { timeZone: 'Asia/Riyadh', hour: '2-digit', minute: '2-digit' });
     return `${dayName} (${timeStr})`;
   }
   return dayName;
@@ -535,7 +538,7 @@ const ResultSlip = ({
                         </div>
                         <div className="text-xs font-bold text-emerald-800 flex items-center gap-1.5 flex-wrap">
                           <Calendar className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>موعد الإعادة المحدد من الإدارة: <strong>{fmtRetakeDate(existingRetake.scheduledDate || retakeSchedule)}</strong></span>
+                          <span>موعد الإعادة المسجل: <strong>{fmtRetakeDate(existingRetake.scheduledDate || retakeSchedule)}</strong></span>
                         </div>
                         {retakeSchedule?.notes && (
                           <p className="text-[11px] font-bold text-emerald-900 bg-white/80 p-2.5 rounded-xl border border-emerald-100 mt-1">
@@ -567,7 +570,7 @@ const ResultSlip = ({
                         </div>
                         <div className="text-xs font-bold text-indigo-700 flex items-center gap-1.5 flex-wrap">
                           <Calendar className="w-3.5 h-3.5 text-indigo-600" />
-                          <span>موعد الاختبار القادم المعتمد من الإدارة: <strong>{fmtRetakeDate(retakeSchedule)}</strong></span>
+                          <span>فترة الإعادة المتاحة لاختيار يوم: <strong>{fmtRetakeDate(retakeSchedule)}</strong></span>
                         </div>
                         {retakeSchedule?.notes && (
                           <p className="text-[11px] font-bold text-slate-500">
@@ -622,6 +625,9 @@ export default function StudentPortal() {
   const [myRetakes, setMyRetakes] = useState([]);
   const [retakeModalResult, setRetakeModalResult] = useState(null);
   const [retakeSubmitting, setRetakeSubmitting] = useState(false);
+  const [retakeDay, setRetakeDay] = useState('');
+  const retakeRange = getRetakeRange(config?.retakeSchedule);
+  const retakeDayValid = isRetakeDayAllowed(config?.retakeSchedule, retakeDay);
   const [retakeToastMsg, setRetakeToastMsg] = useState('');
 
   /* filters */
@@ -630,7 +636,7 @@ export default function StudentPortal() {
   useEffect(() => { getAppSettings().then(setConfig); }, []);
 
   const handleConfirmRetake = async () => {
-    if (!retakeModalResult) return;
+    if (!retakeModalResult || retakeSubmitting || !retakeDayValid) return;
     setRetakeSubmitting(true);
     try {
       const studentName = searchedStudent?.name || retakeModalResult?.studentName || '';
@@ -656,13 +662,13 @@ export default function StudentPortal() {
         status: 'pending',
       };
 
-      const newRecord = await requestRetake(payload);
+      const newRecord = await requestRetake(payload, retakeDay);
       setMyRetakes((prev) => [newRecord, ...prev]);
       setRetakeModalResult(null);
       setRetakeToastMsg(`تم تسجيل رغبتك في إعادة اختبار "${examTitle}" بنجاح!`);
       setTimeout(() => setRetakeToastMsg(''), 5000);
-    } catch {
-      alert('تعذر إرسال طلب إعادة الاختبار. يرجى المحاولة مرة أخرى.');
+    } catch (err) {
+      alert(err.message || 'تعذر إرسال طلب إعادة الاختبار. يرجى المحاولة مرة أخرى.');
     } finally {
       setRetakeSubmitting(false);
     }
@@ -1112,7 +1118,7 @@ export default function StudentPortal() {
                     portalSeatNumber={searchedStudent?.seatNumber != null ? String(searchedStudent.seatNumber) : ''}
                     retakeSchedule={config?.retakeSchedule}
                     existingRetake={myRetakes.find((rt) => retakeMatchesResult(rt, r))}
-                    onRequestRetake={(res) => setRetakeModalResult(res)}
+                    onRequestRetake={(res) => { setRetakeDay(''); setRetakeModalResult(res); }}
                     onCancelRetake={handleCancelRetake}
                   />
                 ))}
@@ -1124,7 +1130,7 @@ export default function StudentPortal() {
         {/* ── نافذة تأكيد تسجيل طلب إعادة الاختبار (Retake Confirmation Modal) ── */}
         {retakeModalResult && (
           <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 print:hidden" dir="rtl">
-            <div className="bg-white rounded-3xl p-6 sm:p-8 w-full max-w-lg shadow-2xl border border-slate-200 space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="bg-white rounded-3xl p-6 sm:p-8 w-full max-w-lg max-h-[90dvh] overflow-y-auto shadow-2xl border border-slate-200 space-y-5 animate-in fade-in zoom-in-95 duration-200">
               <div className="flex items-center justify-between border-b border-slate-100 pb-4">
                 <div className="flex items-center gap-3">
                   <div className="w-12 h-12 bg-indigo-950 text-white rounded-2xl flex items-center justify-center shadow-md">
@@ -1170,7 +1176,7 @@ export default function StudentPortal() {
               <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl space-y-1.5 text-right">
                 <div className="text-[11px] font-black text-emerald-800 uppercase tracking-wider flex items-center gap-1.5">
                   <Calendar className="w-4 h-4 text-emerald-600" />
-                  <span>موعد الاختبار المعتمد من إدارة الكنترول</span>
+                  <span>فترة الإعادة المعتمدة من إدارة الكنترول</span>
                 </div>
                 <div className="text-base font-black text-emerald-950">
                   {fmtRetakeDate(config?.retakeSchedule)}
@@ -1182,6 +1188,19 @@ export default function StudentPortal() {
                 )}
               </div>
 
+              <div className="space-y-2">
+                <label htmlFor="retake-day" className="block text-sm font-black text-slate-800">اختر يوم الاختبار داخل الفترة *</label>
+                <input id="retake-day" type="date" value={retakeDay}
+                  min={retakeRange.startDate || undefined} max={retakeRange.endDate || undefined}
+                  onChange={(e) => setRetakeDay(e.target.value)} required disabled={retakeSubmitting}
+                  aria-describedby="retake-day-help"
+                  className="w-full rounded-2xl border-2 border-indigo-200 bg-white p-3 font-bold text-slate-900" />
+                <p id="retake-day-help" className="text-xs font-bold text-slate-500">
+                  سيُسجّل اليوم الذي تختاره في كشف الكنترول. وقت الاختبار: {config?.retakeSchedule?.time || '08:00'}.
+                </p>
+                {retakeDay && !retakeDayValid && <p role="alert" className="text-xs text-rose-700">اختر يومًا داخل الفترة المعتمدة، ويجب أن يكون استقبال الطلبات مفتوحًا.</p>}
+              </div>
+
               <p className="text-[11px] font-bold text-slate-500 leading-relaxed bg-amber-50/70 border border-amber-200/70 p-3 rounded-xl text-amber-900">
                 💡 بالضغط على «تأكيد الطلب»، سيتم تسجيل اسمك فوراً لدى إدارة الكنترول في كشف الطلاب الراغبين في إعادة الاختبار.
               </p>
@@ -1191,7 +1210,7 @@ export default function StudentPortal() {
                 <button
                   type="button"
                   onClick={handleConfirmRetake}
-                  disabled={retakeSubmitting}
+                  disabled={retakeSubmitting || !retakeDayValid}
                   className="flex-1 bg-indigo-950 hover:bg-indigo-900 text-white py-3.5 px-4 rounded-2xl font-black text-sm transition-all shadow-lg shadow-indigo-950/20 active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   {retakeSubmitting ? (
@@ -1239,3 +1258,4 @@ export default function StudentPortal() {
     </div>
   );
 }
+

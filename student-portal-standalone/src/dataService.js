@@ -1,3 +1,4 @@
+import { getRetakeRange, isDateKey, selectedRetakeDate } from './retakeSchedule';
 import { createClient } from '@supabase/supabase-js';
 
 export const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -777,7 +778,12 @@ export const toLocalDateKey = (isoOrDate) => {
 
 /** حفظ موعد وتعليمات إعادة الاختبار في إعدادات النظام */
 export const updateRetakeSchedule = async (schedule) => {
-  const { data: currentRecord } = await supabase.from('settings').select('*').eq('id', 'app_config').single();
+  const { startDate, endDate } = getRetakeRange(schedule);
+  if (!isDateKey(startDate) || !isDateKey(endDate) || endDate < startDate) {
+    throw new Error('فترة إعادة الاختبار غير صحيحة.');
+  }
+  const { data: currentRecord, error: readError } = await supabase.from('settings').select('*').eq('id', 'app_config').single();
+  if (readError && readError.code !== 'PGRST116') throw readError;
   const currentData = currentRecord?.data || {};
   const merged = {
     ...currentData,
@@ -811,29 +817,12 @@ export const retakeMatchesResult = (retake, result) => {
 };
 
 /** تقديم أو تسجيل رغبة الطالب في إعادة الاختبار */
-export const requestRetake = async (payload, explicitDate) => {
-  let scheduledDate = explicitDate;
-
-  // إذا لم يُمرر موعد صريح، نتحقق من موعد الإعادة المعتمد في إعدادات الإدارة
-  if (!scheduledDate) {
-    try {
-      const cfg = await getAppSettings();
-      const sched = cfg?.retakeSchedule;
-      if (sched?.date) {
-        const time = sched.time || '08:00';
-        scheduledDate = `${sched.date}T${time}:00`;
-      }
-    } catch {
-      // fallback
-    }
-  }
-
-  // الاحتياطي التلقائي: الاثنين القادم
-  if (!scheduledDate) {
-    scheduledDate = getNextMonday().toISOString();
-  } else if (scheduledDate instanceof Date) {
-    scheduledDate = scheduledDate.toISOString();
-  }
+export const requestRetake = async (payload, selectedDay) => {
+  // Refresh settings at submission: a stale tab must not accept a closed/changed range.
+  const { data: settings, error: settingsError } = await supabase
+    .from('settings').select('data').eq('id', 'app_config').single();
+  if (settingsError) throw settingsError;
+  const scheduledDate = selectedRetakeDate(settings?.data?.retakeSchedule, selectedDay);
 
   const record = {
     ...payload,
@@ -930,4 +919,5 @@ export const deleteRetakeRequest = async (id) => {
   return true;
 };
 export const cancelRetakeRequest = deleteRetakeRequest;
+
 
