@@ -1,3 +1,4 @@
+import { getRetakeRange, isDateKey } from './retakeSchedule';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   RotateCcw, RefreshCw, Trash2, Search, Calendar, BookOpen,
@@ -27,6 +28,7 @@ const fmtDate = (iso) => {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '—';
   const dateStr = d.toLocaleDateString('ar-EG', {
+    timeZone: 'Asia/Riyadh',
     weekday: 'long',
     day: 'numeric',
     month: 'long',
@@ -35,7 +37,7 @@ const fmtDate = (iso) => {
   // إذا وجد وقت محدد
   const hasSpecificTime = d.getHours() !== 0 || d.getMinutes() !== 0;
   if (hasSpecificTime) {
-    const timeStr = d.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+    const timeStr = d.toLocaleTimeString('ar-EG', { timeZone: 'Asia/Riyadh', hour: '2-digit', minute: '2-digit' });
     return `${dateStr} (${timeStr})`;
   }
   return dateStr;
@@ -60,6 +62,7 @@ export default function AdminRetakes() {
 
   /* ── إدارة موعد إعادة الاختبار (Schedule Management) ── */
   const [schedDate, setSchedDate] = useState('');
+  const [schedEndDate, setSchedEndDate] = useState('');
   const [schedTime, setSchedTime] = useState('08:00');
   const [schedNotes, setSchedNotes] = useState('');
   const [schedIsOpen, setSchedIsOpen] = useState(true);
@@ -93,13 +96,17 @@ export default function AdminRetakes() {
       setConfig(cfg);
       const s = cfg?.retakeSchedule;
       if (s) {
-        if (s.date) setSchedDate(s.date);
+        const range = getRetakeRange(s);
+        setSchedDate(range.startDate);
+        setSchedEndDate(range.endDate);
         if (s.time) setSchedTime(s.time);
         if (s.notes != null) setSchedNotes(s.notes);
         if (s.isOpen != null) setSchedIsOpen(s.isOpen);
       } else {
         // افتراضي الاثنين القادم
-        setSchedDate(getNextMonday().toISOString().slice(0, 10));
+        const day = getNextMonday().toISOString().slice(0, 10);
+        setSchedDate(day);
+        setSchedEndDate(day);
         setSchedTime('08:00');
         setSchedNotes('يرجى الحضور بالزي المدرسي قبل بدء الاختبار بـ 15 دقيقة مصطحبين الأدوات اللازمة.');
       }
@@ -144,8 +151,8 @@ export default function AdminRetakes() {
   /* ── حفظ موعد إعادة الاختبار في إعدادات النظام ── */
   const handleSaveSchedule = async (e) => {
     if (e) e.preventDefault();
-    if (!schedDate) {
-      alert('يرجى تحديد تاريخ موعد إعادة الاختبار.');
+    if (!isDateKey(schedDate) || !isDateKey(schedEndDate) || schedEndDate < schedDate) {
+      alert('يرجى تحديد فترة صحيحة: تاريخ النهاية لا يسبق تاريخ البداية.');
       return;
     }
     setSchedSaving(true);
@@ -153,6 +160,8 @@ export default function AdminRetakes() {
     try {
       const updated = await updateRetakeSchedule({
         date: schedDate,
+        startDate: schedDate,
+        endDate: schedEndDate,
         time: schedTime || '08:00',
         notes: schedNotes.trim(),
         isOpen: Boolean(schedIsOpen),
@@ -172,6 +181,10 @@ export default function AdminRetakes() {
 
   /* ── تطبيق الموعد المعتمد على جميع الطلبات الحالية ── */
   const handleApplyScheduleToAll = async () => {
+    if (!schedDate || schedDate !== schedEndDate) {
+      alert('خلال فترة متعددة الأيام يختار كل طالب يومه؛ يمكن تعديل موعد طالب من كشف الطلبات.');
+      return;
+    }
     if (!schedDate) {
       alert('يرجى تحديد موعد الاختبار أولاً ثم الضغط على حفظ.');
       return;
@@ -212,6 +225,10 @@ export default function AdminRetakes() {
 
   /* ── تطبيق الموعد على الطلبات المحددة فقط ── */
   const handleApplyScheduleToSelected = async () => {
+    if (!schedDate || schedDate !== schedEndDate) {
+      alert('خلال فترة متعددة الأيام يختار كل طالب يومه؛ يمكن تعديل موعد طالب من كشف الطلبات.');
+      return;
+    }
     if (selectedIds.size === 0) return;
     const combinedDate = `${schedDate}T${schedTime || '08:00'}:00`;
     if (!window.confirm(`هل تريد تحديث موعد الطلاب المحددين (${selectedIds.size} طالب) إلى الموعد المعتمد؟`)) {
@@ -577,21 +594,21 @@ export default function AdminRetakes() {
                 </div>
                 <div>
                   <h2 className="text-lg sm:text-xl font-black text-white flex items-center gap-2">
-                    تحديد موعد إعادة الاختبار المعتمد
+                    تحديد فترة إعادة الاختبار المعتمدة
                     <Sparkles className="w-4 h-4 text-amber-400" />
                   </h2>
                   <p className="text-xs font-bold text-indigo-200 mt-0.5">
-                    حدد تاريخ ووقت اختبار الإعادة القادم؛ يظهر للطلاب في البوابة ويُعتمد لطلباتهم
+                    حدد الفترة من وإلى ووقت الاختبار؛ يختار الطالب يومًا داخل الفترة عند تقديم طلبه
                   </p>
                 </div>
               </div>
 
               {/* شارة الموعد الحالي المفعل */}
               <div className="bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl px-4 py-2 text-right">
-                <div className="text-[10px] font-bold text-indigo-300 uppercase tracking-wider">الموعد المعتمد حالياً</div>
+                <div className="text-[10px] font-bold text-indigo-300 uppercase tracking-wider">الفترة المختارة</div>
                 <div className="text-sm font-black text-white mt-0.5 flex items-center gap-1.5">
                   <Clock className="w-3.5 h-3.5 text-amber-400" />
-                  <span>{schedFriendlyPreview}</span>
+                  <span>من {schedFriendlyPreview} إلى {schedEndDate ? fmtDate(`${schedEndDate}T00:00:00`) : "—"}</span>
                   {schedTime && <span className="text-indigo-200 font-mono text-xs">({schedTime})</span>}
                 </div>
               </div>
@@ -599,19 +616,28 @@ export default function AdminRetakes() {
 
             {/* نموذج تحديد الموعد */}
             <form onSubmit={handleSaveSchedule} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 {/* تاريخ الاختبار */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-black text-indigo-200 flex items-center gap-1">
-                    <Calendar className="w-3.5 h-3.5 text-amber-300" /> تاريخ الاختبار *
+                    <Calendar className="w-3.5 h-3.5 text-amber-300" /> تاريخ البداية (من) *
                   </label>
                   <input
                     type="date"
                     value={schedDate}
+                    aria-label="تاريخ بداية فترة الإعادة"
+                    max={schedEndDate || undefined}
                     onChange={(e) => setSchedDate(e.target.value)}
                     required
                     className="w-full bg-white/10 border border-white/20 rounded-2xl px-4 py-3 font-bold text-sm text-white focus:bg-white focus:text-slate-900 focus:border-white outline-none transition-all"
                   />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label htmlFor="retake-end" className="text-xs font-black text-indigo-200 block">تاريخ النهاية (إلى) *</label>
+                  <input id="retake-end" type="date" value={schedEndDate} min={schedDate || undefined}
+                    onChange={(e) => setSchedEndDate(e.target.value)} required
+                    className="w-full bg-white/10 border border-white/20 rounded-2xl px-4 py-3 font-bold text-sm text-white focus:bg-white focus:text-slate-900 outline-none" />
                 </div>
 
                 {/* وقت الاختبار */}
@@ -679,7 +705,7 @@ export default function AdminRetakes() {
                   <button
                     type="button"
                     onClick={handleApplyScheduleToAll}
-                    disabled={batchActionLoading || items.length === 0}
+                    disabled={batchActionLoading || items.length === 0 || schedDate !== schedEndDate}
                     title="تحديث موعد جميع الطلاب المسجلين حالياً إلى هذا الموعد المعتمد"
                     className="w-full bg-white/15 hover:bg-white/25 border border-white/30 text-white py-2.5 px-3 rounded-2xl font-black text-xs transition-all active:scale-[0.98] flex items-center justify-center gap-1.5 disabled:opacity-40"
                   >
@@ -1333,3 +1359,4 @@ const StatCard = ({ label, value, sub, color, icon }) => (
     {sub && <div className="text-[10px] text-slate-400 font-bold mt-1 truncate">{sub}</div>}
   </div>
 );
+
