@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Save, FileText, CheckCircle2, XCircle, Download, Users, X, Loader2, Search, CheckSquare, Square, ScanLine, Wifi, WifiOff, AlertCircle, ChevronRight, ChevronDown, Check, Edit2, Settings, Layout, BookOpen, Clock, Calendar, Image as ImageIcon, Layers, FileStack, Printer, RefreshCw, BarChart2, Trophy, Flag, ShieldCheck, Languages, Archive, ArchiveRestore, Folder, Tag } from 'lucide-react';
+import { Plus, Trash2, Save, FileText, CheckCircle2, XCircle, Download, Users, X, Loader2, Search, CheckSquare, Square, ScanLine, Wifi, WifiOff, AlertCircle, ChevronRight, ChevronDown, Check, Edit2, Settings, Layout, BookOpen, Clock, Calendar, Image as ImageIcon, Layers, FileStack, Printer, RefreshCw, BarChart2, Trophy, Flag, ShieldCheck, Languages, Archive, ArchiveRestore, Folder, Tag, KeyRound } from 'lucide-react';
 import { getOmrExams, saveOmrExam, deleteOmrExam, getStudents, saveOmrResult, getOmrSubjects, saveOmrSubjects, OMR_API_BASE } from '../../utils/dataService';
 import { useToast } from '../../components/Toast';
+import { exportAnswerKeyArchive } from '../../utils/answerKeyExport';
+import { withOmrTemplateSnapshot } from '../../utils/omrTemplateSnapshot';
 
 /* ── Constants ── */
 const STAGES = {
@@ -170,6 +172,7 @@ const OMRExams = () => {
   const toast = useToast();
   const [exams, setExams] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [exportingAnswerKeys, setExportingAnswerKeys] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
   const [editingExam, setEditingExam] = useState(null);
   const [students, setStudents] = useState([]);
@@ -315,7 +318,25 @@ const OMRExams = () => {
     setLoading(true);
     try {
       const [ed, sd, subs] = await Promise.all([getOmrExams({ includeArchived: true }), getStudents(), getOmrSubjects()]);
-      setExams(ed);
+      // Backfill older exams from the templates saved on this control computer.
+      let savedTemplates = [];
+      try {
+        const stored = JSON.parse(localStorage.getItem(CUSTOM_TEMPLATES_KEY) || '[]');
+        if (Array.isArray(stored)) savedTemplates = stored;
+      } catch { /* Keep existing snapshots when local storage is unavailable. */ }
+      const syncedExams = await Promise.all(ed.map(async (exam) => {
+        const next = withOmrTemplateSnapshot(exam, savedTemplates, defaultCustomConfig);
+        if (!exam.template_config && !exam.customConfig && next.template_config) {
+          try {
+            await saveOmrExam(next);
+            return next;
+          } catch (error) {
+            console.warn('Unable to sync exam template:', exam.id, error);
+          }
+        }
+        return exam;
+      }));
+      setExams(syncedExams);
       setStudents(sd);
       setSubjects(subs);
     } catch (err) {
@@ -479,7 +500,7 @@ const OMRExams = () => {
       payload.keys = {}; 
     }
     
-    await saveOmrExam(payload);
+    await saveOmrExam(withOmrTemplateSnapshot(payload, customTemplates, customConfig, payload.template !== exams.find((exam) => exam.id === payload.id)?.template));
     setIsAdding(false);
     setNewExam({ stage: '', grade: '', grades: [], subject: '', qCount: 30, template: 'nafs', title: '', classroom: '', date: '' });
     load();
@@ -803,6 +824,262 @@ const OMRExams = () => {
     }, 250);
   }, [toast]);
 
+  const printExamAnswerKeySheet = useCallback((exam, returnHtml = false) => {
+    if (!exam) return;
+    const keys = exam.keys || {};
+    const keyCount = Object.keys(keys).filter((k) => keys[k]).length;
+    if (keyCount === 0) {
+      toast.warning('أضف مفتاح الإجابة أولاً من زر «المفتاح».', 'تنبيه');
+      return;
+    }
+
+    const qCount = parseInt(exam.qCount, 10) || 30;
+    const weights = exam.weights || {};
+    const subject = escapeHtmlSticker(exam.subject || '—');
+    const title = escapeHtmlSticker(exam.title || '—');
+    const gradeLine = escapeHtmlSticker(stickerGradeLabel(exam));
+    const stage = escapeHtmlSticker(exam.stage || '—');
+    let metaDate = '';
+    if (exam.date) {
+      const t = new Date(exam.date);
+      if (!isNaN(t.getTime())) metaDate = escapeHtmlSticker(t.toLocaleDateString('ar-SA'));
+    }
+
+    const renderQuestionRow = (q) => {
+      const correct = String(keys[String(q)] || '').toUpperCase();
+      const wRaw = weights[String(q)];
+      const pts =
+        wRaw !== undefined && wRaw !== null && String(wRaw).trim() !== ''
+          ? escapeHtmlSticker(String(wRaw))
+          : '1';
+      const opts = ['A', 'B', 'C', 'D']
+        .map(
+          (o) =>
+            `<span class="opt ${correct === o ? 'correct' : ''}"><span class="letter">${o}</span><span class="bubble"></span></span>`
+        )
+        .join('');
+      return `<tr>
+        <td class="qnum">${q}</td>
+        <td class="opts">${opts}</td>
+        <td class="pts">${pts}</td>
+      </tr>`;
+    };
+
+    const half = Math.ceil(qCount / 2);
+    const leftRows = Array.from({ length: half }, (_, i) => renderQuestionRow(i + 1)).join('');
+    const rightRows = Array.from({ length: qCount - half }, (_, i) => renderQuestionRow(half + i + 1)).join('');
+
+    let totalPoints = 0;
+    for (let q = 1; q <= qCount; q++) {
+      const wRaw = weights[String(q)];
+      const n = parseFloat(String(wRaw ?? '1').replace(',', '.'));
+      totalPoints += Number.isFinite(n) ? n : 1;
+    }
+    const totalLabel = Number.isInteger(totalPoints) ? String(totalPoints) : totalPoints.toFixed(1);
+
+    const tableBlock = (rows, startLabel, endLabel) => `
+      <div class="col">
+        <div class="col-head">${startLabel}${endLabel !== startLabel ? ` — ${endLabel}` : ''}</div>
+        <table>
+          <thead>
+            <tr>
+              <th>س</th>
+              <th>الإجابة الصحيحة</th>
+              <th>درجة</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+
+    const html = `<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+<meta charset="utf-8"/>
+<title>نموذج الإجابات — ${subject}</title>
+<style>
+  @page { size: A4 portrait; margin: 10mm; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', 'Tahoma', sans-serif;
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .sheet {
+    border: 3px solid #6d28d9;
+    border-radius: 14px;
+    padding: 10mm;
+    background: linear-gradient(165deg, #faf5ff 0%, #fff 40%);
+  }
+  .ribbon {
+    display: inline-block;
+    font-size: 9pt;
+    font-weight: 800;
+    color: #6d28d9;
+    padding: 5px 12px;
+    background: #f3e8ff;
+    border-radius: 999px;
+    margin-bottom: 5mm;
+  }
+  h1 {
+    margin: 0 0 4mm;
+    font-size: 16pt;
+    font-weight: 900;
+    color: #0f172a;
+    text-align: center;
+    line-height: 1.35;
+  }
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 3mm;
+    margin-bottom: 6mm;
+  }
+  .meta {
+    border: 1px solid #e9d5ff;
+    border-radius: 8px;
+    padding: 2.5mm 3mm;
+    background: #fff;
+    text-align: center;
+  }
+  .meta .lbl { display: block; font-size: 7.5pt; font-weight: 800; color: #64748b; margin-bottom: 1mm; }
+  .meta .val { font-size: 9.5pt; font-weight: 900; color: #0f172a; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; }
+  .col-head {
+    font-size: 8pt;
+    font-weight: 800;
+    color: #6d28d9;
+    text-align: center;
+    margin-bottom: 2mm;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
+  th {
+    background: #6d28d9;
+    color: #fff;
+    font-weight: 800;
+    padding: 2mm 1.5mm;
+    text-align: center;
+  }
+  td { border-bottom: 1px solid #e2e8f0; padding: 1.8mm 1.5mm; vertical-align: middle; }
+  .qnum { width: 8mm; text-align: center; font-weight: 900; color: #475569; }
+  .pts { width: 10mm; text-align: center; font-weight: 800; color: #6d28d9; }
+  .opts { text-align: center; }
+  .opt {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5mm;
+    margin: 0 1.2mm;
+    opacity: 0.45;
+  }
+  .opt .letter { font-size: 7pt; font-weight: 800; color: #64748b; }
+  .opt .bubble {
+    width: 4.5mm;
+    height: 4.5mm;
+    border: 1.2px solid #94a3b8;
+    border-radius: 50%;
+    background: #fff;
+  }
+  .opt.correct {
+    opacity: 1;
+  }
+  .opt.correct .letter { color: #6d28d9; font-weight: 900; }
+  .opt.correct .bubble {
+    border-color: #6d28d9;
+    background: #6d28d9;
+    box-shadow: inset 0 0 0 1px #fff;
+  }
+  .footer {
+    margin-top: 5mm;
+    padding-top: 4mm;
+    border-top: 2px dashed #cbd5e1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 9pt;
+    font-weight: 800;
+    color: #334155;
+  }
+  .footer .total { color: #6d28d9; font-size: 11pt; }
+  .note {
+    margin-top: 3mm;
+    text-align: center;
+    font-size: 8pt;
+    color: #94a3b8;
+    font-weight: 600;
+  }
+  @media print { .no-print { display: none !important; } }
+</style>
+</head>
+<body>
+  <p class="no-print" style="text-align:center;font-size:10pt;color:#64748b;margin:0 0 4mm">نموذج الإجابات الصحيحة — للمراقب والمصحّح. لا يُوزَّع على الطلاب.</p>
+  <div class="sheet">
+    <span class="ribbon">نموذج الإجابات الصحيحة — مفتاح التصحيح</span>
+    <h1>${title}</h1>
+    <div class="meta-grid">
+      <div class="meta"><span class="lbl">المادة</span><span class="val">${subject}</span></div>
+      <div class="meta"><span class="lbl">الصف</span><span class="val">${gradeLine}</span></div>
+      <div class="meta"><span class="lbl">المرحلة</span><span class="val">${stage}</span></div>
+      <div class="meta"><span class="lbl">عدد الأسئلة</span><span class="val">${qCount}</span></div>
+    </div>
+    ${metaDate ? `<p style="text-align:center;font-size:9pt;font-weight:700;color:#475569;margin:0 0 5mm">${metaDate}</p>` : ''}
+    <div class="cols">
+      ${tableBlock(leftRows, '1', String(half))}
+      ${rightRows ? tableBlock(rightRows, String(half + 1), String(qCount)) : ''}
+    </div>
+    <div class="footer">
+      <span>الدائرة المظلّلة = الإجابة الصحيحة</span>
+      <span class="total">مجموع الدرجات: ${totalLabel}</span>
+    </div>
+    <p class="note">سري — للاستخدام الداخلي فقط · يُطبَع من مفتاح الإجابة المحفوظ في النظام</p>
+  </div>
+</body>
+</html>`;
+
+    if (returnHtml) return html;
+
+    const w = window.open('', '_blank');
+    if (!w) {
+      toast.error('فتح نافذة الطباعة فشل. اسمح بالنوافذ المنبثقة.', 'نموذج الإجابات');
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => {
+      try {
+        w.focus();
+        w.print();
+      } catch (_) { /* ignore */ }
+    }, 280);
+  }, [toast]);
+
+  const exportAllAnswerKeys = async () => {
+    const withKeys = visibleExams.filter((exam) => Object.values(exam.keys || {}).some(Boolean));
+    if (!withKeys.length) {
+      toast.warning('لا توجد مفاتيح إجابة محفوظة ضمن الاختبارات المعروضة.', 'تصدير الإجابات');
+      return;
+    }
+    setExportingAnswerKeys(true);
+    try {
+      const perGrade = withKeys.flatMap((exam) => {
+        const grades = [...new Set(examGrades(exam))].filter((grade) => filterGrade === 'All' || grade === filterGrade);
+        return grades.length ? grades.map((grade) => ({ ...exam, grade, grades: [grade] })) : [exam];
+      });
+      const count = await exportAnswerKeyArchive(perGrade, (exam) => printExamAnswerKeySheet(exam, true));
+      const skipped = visibleExams.length - withKeys.length;
+      toast.success(`تم تصدير ${count} ملف حسب المادة والصف${skipped ? `، وتخطي ${skipped} اختبار بدون مفتاح إجابة` : ''}.`, 'تصدير الإجابات');
+    } catch (error) {
+      console.error('Answer key export failed:', error);
+      toast.error('تعذر تصدير نماذج الإجابات. حاول مرة أخرى.', 'تصدير الإجابات');
+    } finally {
+      setExportingAnswerKeys(false);
+    }
+  };
+
+
   const toggleStudent = (id) => setSelectedStudentIds(prev => {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
@@ -911,6 +1188,16 @@ const OMRExams = () => {
       }
 
       if (pdfB64) {
+        const nextExam = {
+          ...selectedBulkExam,
+          template: selectedTemplate,
+          template_config: isTemplateCustom(selectedTemplate) ? effectiveCustomConfig : null,
+          customConfig: null,
+          updatedAt: new Date().toISOString(),
+        };
+        await saveOmrExam(nextExam);
+        setExams((prev) => prev.map((exam) => exam.id === nextExam.id ? nextExam : exam));
+        setSelectedBulkExam(nextExam);
         const byteChars = atob(pdfB64);
         const byteArr = new Uint8Array(byteChars.length);
         for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
@@ -985,6 +1272,18 @@ const OMRExams = () => {
 
       {activeTab === 'exams' ? (
         <>
+          <div className="flex flex-wrap items-center gap-3 mb-4">
+            <button
+              type="button"
+              onClick={exportAllAnswerKeys}
+              disabled={loading || exportingAnswerKeys || visibleExams.length === 0}
+              className="flex items-center gap-2 px-5 py-3 rounded-xl bg-purple-600 text-white font-black text-xs hover:bg-purple-700 disabled:opacity-40"
+            >
+              {exportingAnswerKeys ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+              {exportingAnswerKeys ? 'جاري تصدير نماذج الإجابات...' : 'تصدير نماذج الإجابات حسب الفلاتر'}
+            </button>
+            <span className="text-xs text-slate-500">حسب المرحلة والصف والمادة المعروضة · ملف PDF مستقل لكل مادة وصف داخل ZIP</span>
+          </div>
           {/* ── Filter Bar ── */}
           <div className="luxury-card p-6 border-none bg-white shadow-2xl ring-1 ring-slate-100 flex flex-col gap-6 mb-10 animate-in slide-in-from-bottom-4 duration-500">
             <div className="flex flex-col md:flex-row gap-6 items-center justify-between">
@@ -1060,6 +1359,15 @@ const OMRExams = () => {
                         <button type="button" onClick={() => openExamKeys(exam)} className="flex-1 py-3.5 bg-white text-slate-900 border border-slate-100 rounded-xl font-black text-[9px] hover:border-indigo-100 transition-all flex flex-col items-center justify-center gap-1.5"><Edit2 size={16} /> المفتاح</button>
                         <button type="button" onClick={() => navigate(`/omr-scanner/${exam.id}`)} className="flex-1 py-3.5 bg-indigo-600 text-white rounded-xl font-black text-[9px] hover:bg-indigo-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-xl shadow-indigo-100"><ScanLine size={16} /> تصحيح</button>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => printExamAnswerKeySheet(exam)}
+                        title="طباعة نموذج الإجابات الصحيحة للمراقب/المصحّح"
+                        className="w-full py-2.5 rounded-xl border-2 border-dashed border-purple-200/90 bg-purple-50/60 text-purple-900 hover:bg-purple-100/80 transition-all flex items-center justify-center gap-2 font-black text-[9px]"
+                      >
+                        <KeyRound size={14} className="shrink-0 text-purple-600" />
+                        نموذج الإجابات الصحيحة
+                      </button>
                       <button
                         type="button"
                         onClick={() => printExamStickers(exam)}
@@ -1161,6 +1469,15 @@ const OMRExams = () => {
                               </div>
                               <button type="button" onClick={() => handleRestoreExam(exam)} className="w-full py-3.5 bg-emerald-600 text-white rounded-xl font-black text-[9px] hover:bg-emerald-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-lg shadow-emerald-100"><ArchiveRestore size={16} /> استعادة للنشطة</button>
                               <button
+                        type="button"
+                        onClick={() => printExamAnswerKeySheet(exam)}
+                        title="طباعة نموذج الإجابات الصحيحة للمراقب/المصحّح"
+                        className="w-full py-2.5 rounded-xl border-2 border-dashed border-purple-200/90 bg-purple-50/60 text-purple-900 hover:bg-purple-100/80 transition-all flex items-center justify-center gap-2 font-black text-[9px]"
+                      >
+                        <KeyRound size={14} className="shrink-0 text-purple-600" />
+                        نموذج الإجابات الصحيحة
+                      </button>
+                      <button
                                 type="button"
                                 onClick={() => printExamStickers(exam)}
                                 title="طباعة ملصقات مادة وصف للأوراق المطبوعة سابقاً"

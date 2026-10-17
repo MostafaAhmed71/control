@@ -10,6 +10,7 @@ import {
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import schoolLogo from './assets/school_logo.jpeg';
+import { exportRetakeExams, prepareRetakeBatches, sameRetakeStudent } from './retakeExamExport';
 import {
   getAllRetakeRequests,
   deleteRetakeRequest,
@@ -18,6 +19,8 @@ import {
   updateRetakeRequest,
   batchUpdateRetakeScheduledDate,
   getNextMonday,
+  getOmrExams,
+  getStudents,
 } from './dataService';
 
 const PASS_KEY = 'mo_admin_passed';
@@ -89,6 +92,9 @@ export default function AdminRetakes() {
 
   /* ── تصدير PDF وطباعة ── */
   const [pdfExporting, setPdfExporting] = useState(false);
+  const [examExporting, setExamExporting] = useState(false);
+  const [examExportProgress, setExamExportProgress] = useState('');
+  const [examExportMessage, setExamExportMessage] = useState('');
   const pdfRef = useRef(null);
 
   useEffect(() => {
@@ -420,6 +426,26 @@ export default function AdminRetakes() {
     });
   };
 
+  const handleExportRetakeExams = async (studentRequest = null) => {
+    if (examExporting) return;
+    const requests = (studentRequest ? items.filter((item) => sameRetakeStudent(item, studentRequest)) : filtered)
+      .filter((item) => item.status === 'confirmed');
+    setExamExporting(true);
+    setExamExportMessage('');
+    setExamExportProgress('');
+    try {
+      const [exams, students, settings] = await Promise.all([getOmrExams(), getStudents(), getAppSettings()]);
+      const batches = prepareRetakeBatches(requests, exams, students, settings);
+      await exportRetakeExams(batches, setExamExportProgress);
+      setExamExportMessage(`تم تصدير ${batches.reduce((count, batch) => count + batch.body.students.length, 0)} ورقة اختبار في ${batches.length} ملف PDF داخل ZIP.`);
+    } catch (err) {
+      setExamExportMessage(err.message || 'تعذر تصدير اختبارات الإعادة.');
+    } finally {
+      setExamExporting(false);
+      setExamExportProgress('');
+    }
+  };
+
   /* ── تصدير PDF لكشف الأسماء ── */
   const handleExportPdf = async () => {
     if (!pdfRef.current || filtered.length === 0) return;
@@ -546,6 +572,16 @@ export default function AdminRetakes() {
           <div className="flex items-center gap-2 flex-wrap">
             <button
               type="button"
+              onClick={() => handleExportRetakeExams()}
+              disabled={loading || examExporting || confirmedCount === 0}
+              className="flex items-center gap-1.5 bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-50 px-3.5 py-2 rounded-xl font-bold text-xs sm:text-sm"
+              title="تصدير أوراق اختبارات الطلبات المؤكدة حسب الفلاتر الحالية"
+            >
+              <FileDown className={`w-4 h-4 ${examExporting ? 'animate-pulse' : ''}`} />
+              {examExporting ? `جاري تجهيز الاختبارات ${examExportProgress}` : `تصدير اختبارات المؤكدين (${confirmedCount})`}
+            </button>
+            <button
+              type="button"
               onClick={handleExportPdf}
               disabled={pdfExporting || filtered.length === 0}
               className="flex items-center gap-1.5 bg-indigo-950 text-white hover:bg-indigo-900 disabled:opacity-50 disabled:cursor-not-allowed px-3.5 py-2 rounded-xl font-bold text-xs sm:text-sm shadow-sm transition-all"
@@ -581,6 +617,7 @@ export default function AdminRetakes() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-6 space-y-6">
+        {examExportMessage && <p role="status" className="bg-white border border-indigo-200 rounded-xl p-4 text-sm font-bold text-indigo-950">{examExportMessage}</p>}
         {/* ── قسم تحديد موعد إعادة الاختبار (Schedule Management Card) ── */}
         <section className="bg-gradient-to-br from-indigo-950 via-indigo-900 to-slate-900 rounded-3xl text-white shadow-xl p-5 sm:p-7 relative overflow-hidden border border-indigo-800/40">
           <div className="absolute top-0 left-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
@@ -1046,7 +1083,16 @@ export default function AdminRetakes() {
                           </td>
                           <td className="p-3 text-center">
                             <div className="flex items-center justify-center gap-1">
-                              <button
+                              {it.status === 'confirmed' && (
+  <button type="button" disabled={examExporting}
+    onClick={() => handleExportRetakeExams(it)}
+    title={'\u062a\u0635\u062f\u064a\u0631 \u0627\u062e\u062a\u0628\u0627\u0631\u0627\u062a \u0627\u0644\u0637\u0627\u0644\u0628 \u0627\u0644\u0645\u0624\u0643\u062f\u0629'}
+    aria-label={'\u062a\u0635\u062f\u064a\u0631 \u0627\u062e\u062a\u0628\u0627\u0631\u0627\u062a \u0627\u0644\u0637\u0627\u0644\u0628 \u0627\u0644\u0645\u0624\u0643\u062f\u0629'}
+    className="text-emerald-700 hover:bg-emerald-50 p-1.5 rounded-lg disabled:opacity-50">
+    <FileDown className="w-4 h-4" />
+  </button>
+)}
+<button
                                 type="button"
                                 onClick={() => openEditModal(it)}
                                 title="تعديل موعد هذا الطالب"
@@ -1113,7 +1159,16 @@ export default function AdminRetakes() {
                       </div>
 
                       <div className="flex items-center gap-1 shrink-0">
-                        <button
+                        {it.status === 'confirmed' && (
+  <button type="button" disabled={examExporting}
+    onClick={() => handleExportRetakeExams(it)}
+    title={'\u062a\u0635\u062f\u064a\u0631 \u0627\u062e\u062a\u0628\u0627\u0631\u0627\u062a \u0627\u0644\u0637\u0627\u0644\u0628 \u0627\u0644\u0645\u0624\u0643\u062f\u0629'}
+    aria-label={'\u062a\u0635\u062f\u064a\u0631 \u0627\u062e\u062a\u0628\u0627\u0631\u0627\u062a \u0627\u0644\u0637\u0627\u0644\u0628 \u0627\u0644\u0645\u0624\u0643\u062f\u0629'}
+    className="text-emerald-700 hover:bg-emerald-50 p-1.5 rounded-lg disabled:opacity-50">
+    <FileDown className="w-4 h-4" />
+  </button>
+)}
+<button
                           type="button"
                           onClick={() => openEditModal(it)}
                           className="text-indigo-600 hover:bg-indigo-50 p-1.5 rounded-lg"
