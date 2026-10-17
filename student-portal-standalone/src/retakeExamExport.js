@@ -57,7 +57,7 @@ export function prepareRetakeBatches(requests, exams, students, settings = {}) {
     seen.add(duplicate);
     const key = JSON.stringify([text(exam.id), text(student.grade || request.studentGrade), scheduledDate]);
     if (!batches.has(key)) batches.set(key, {
-      name: `${exam.subject || exam.title} - ${student.grade || request.studentGrade} - ${date.toLocaleDateString('en-CA')}`,
+      name: `${exam.subject || exam.title} - ${student.grade || request.studentGrade} - ${date.toLocaleDateString('en-CA', { timeZone: 'Asia/Riyadh' })}`,
       endpoint: customConfig ? '/generate-custom-batch' : '/generate-batch',
       body: {
         subject: exam.subject || exam.title,
@@ -75,8 +75,8 @@ export function prepareRetakeBatches(requests, exams, students, settings = {}) {
       name: student.name || request.studentName,
       class_name: student.grade || request.studentGrade || '',
       subject: exam.subject || exam.title,
-      date: date.toLocaleDateString('ar-SA'),
-      day: date.toLocaleDateString('ar-SA', { weekday: 'long' }),
+      date: date.toLocaleDateString('ar-SA', { timeZone: 'Asia/Riyadh' }),
+      day: date.toLocaleDateString('ar-SA', { timeZone: 'Asia/Riyadh', weekday: 'long' }),
       seat_number: text(student.seatNumber || student.seat_number || request.seatNumber),
       committee_number: text(student.committee).replace(/[^0-9٠-٩]/g, ''),
       school_code: text(settings.moeSchoolCode),
@@ -85,13 +85,22 @@ export function prepareRetakeBatches(requests, exams, students, settings = {}) {
   return [...batches.values()];
 }
 
-export async function exportRetakeExams(batches, onProgress = () => {}) {
-  if (!batches.length) throw new Error('لا توجد طلبات مؤكدة للتصدير.');
-  const base = (import.meta.env.VITE_OMR_API_BASE || 'http://127.0.0.1:8000').replace(/\/$/, '');
-  const zip = new JSZip();
+async function generateExamFiles(batches, onProgress, acceptFile) {
+  if (!batches.length) throw new Error('لا توجد اختبارات للطباعة.');
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
     onProgress(`${i + 1} / ${batches.length}`);
+    const template = batch.body.template;
+    if (template === 'nafs' || template === 'custom' || template?.startsWith('custom:')) {
+      const [{ createBrowserOmrPdf }, assets] = await Promise.all([import('./browserOmrSheet.js'), import('./browserOmrAssets.js')]);
+      const bytes = await createBrowserOmrPdf(batch.body, {
+        ...assets,
+        onSheet: (done, total) => onProgress(`${i + 1} / ${batches.length} · ${done} / ${total}`),
+      });
+      await acceptFile(bytes, `${i + 1}-${safeName(batch.name)}.pdf`);
+      continue;
+    }
+    const base = (import.meta.env.VITE_OMR_API_BASE || 'http://127.0.0.1:8000').replace(/\/$/, '');
     let response;
     try {
       response = await fetch(`${base}${batch.endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batch.body) });
@@ -99,8 +108,24 @@ export async function exportRetakeExams(batches, onProgress = () => {}) {
       throw new Error('تعذر الاتصال بمحرك طباعة الاختبارات. شغّل خدمة OMR على جهاز الكنترول أو اضبط عنوانها في إعدادات تشغيل البوابة.');
     }
     if (!response.ok || !response.headers.get('content-type')?.includes('application/pdf')) throw new Error(`تعذر إنشاء أوراق الاختبار: ${batch.name}`);
-    zip.file(`${i + 1}-${safeName(batch.name)}.pdf`, await response.arrayBuffer());
+    await acceptFile(await response.arrayBuffer(), `${i + 1}-${safeName(batch.name)}.pdf`);
   }
+}
+
+export async function createPrintableExamPdf(batches, onProgress = () => {}) {
+  const { PDFDocument } = await import('pdf-lib');
+  const combined = await PDFDocument.create();
+  await generateExamFiles(batches, onProgress, async (bytes) => {
+    const source = await PDFDocument.load(bytes);
+    const pages = await combined.copyPages(source, source.getPageIndices());
+    pages.forEach((page) => combined.addPage(page));
+  });
+  return new Blob([await combined.save()], { type: 'application/pdf' });
+}
+
+export async function exportRetakeExams(batches, onProgress = () => {}) {
+  const zip = new JSZip();
+  await generateExamFiles(batches, onProgress, (bytes, name) => { zip.file(name, bytes); });
   const url = URL.createObjectURL(await zip.generateAsync({ type: 'blob' }));
   const link = document.createElement('a');
   link.href = url;

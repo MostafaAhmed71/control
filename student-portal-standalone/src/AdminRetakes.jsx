@@ -10,6 +10,7 @@ import {
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import schoolLogo from './assets/school_logo.jpeg';
+import DirectExamPrint from './DirectExamPrint.jsx';
 import { exportRetakeExams, prepareRetakeBatches, sameRetakeStudent } from './retakeExamExport';
 import {
   getAllRetakeRequests,
@@ -617,6 +618,7 @@ export default function AdminRetakes() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-6 space-y-6">
+        <DirectExamPrint />
         {examExportMessage && <p role="status" className="bg-white border border-indigo-200 rounded-xl p-4 text-sm font-bold text-indigo-950">{examExportMessage}</p>}
         {/* ── قسم تحديد موعد إعادة الاختبار (Schedule Management Card) ── */}
         <section className="bg-gradient-to-br from-indigo-950 via-indigo-900 to-slate-900 rounded-3xl text-white shadow-xl p-5 sm:p-7 relative overflow-hidden border border-indigo-800/40">
