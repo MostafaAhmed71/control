@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+const source = await readFile(new URL('../src/portalExamGroups.js', import.meta.url), 'utf8');
+const { getPortalExamGroup: group, getPortalGroupResults: results, getPortalExamOptions: options } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+for (const examTitle of ['لغتي', 'رياضيات', 'علوم', 'اللغة الإنجليزية', 'رياضيات - الاختبار الأول']) assert.equal(group({ examTitle }), 'period1');
+for (const examTitle of ['الاختبار الأول', 'الاختبار الثاني', 'اختبار ٣', 'معسكر القدرات - الاختبار الثالث', 'الاختبار الأوّل']) assert.equal(group({ examTitle }), 'qudrat');
+assert.equal(group({ examTitle: 'تدريب', examSubject: 'قدرات' }), 'qudrat');
+assert.equal(group({ examTitle: 'الاختبار الأول', portalExamGroup: 'period1' }), 'period1');
+const rows = [{ examTitle: 'علوم' }, { examTitle: 'لغتي' }, { examTitle: 'الاختبار الثالث' }, { examTitle: 'الاختبار الأول' }, { examTitle: 'الاختبار الثاني' }, { examTitle: 'علوم' }];
+assert.deepEqual(options(rows, 'qudrat'), ['الاختبار الأول', 'الاختبار الثاني', 'الاختبار الثالث']);
+assert.equal(options(rows, 'period1').length, 2);
+assert.equal(results(rows, '').length, 0);
+assert.equal(results(rows, 'qudrat').length, 3);
+assert.deepEqual(options([{ examTitle: 'الاختبار الأول', portalExamGroup: 'period1' }, { examTitle: 'الاختبار الأول', portalExamGroup: 'qudrat' }], 'qudrat'), ['الاختبار الأول']);
+assert.deepEqual(options([], 'qudrat'), []);
+console.log('Portal category isolation, legacy titles, deduplication and ordering passed.');

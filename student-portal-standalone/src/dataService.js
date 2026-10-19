@@ -615,12 +615,15 @@ export const getOmrExamsPortalCached = async () => {
   }
   const { data, error } = await supabase
     .from('omr_exams')
-    .select('id, archived:data->archived, title:data->title, keys:data->keys, weights:data->weights');
+    .select('id, archived:data->archived, title:data->title, subject:data->subject, portalExamGroup:data->portalExamGroup, examCategory:data->examCategory, keys:data->keys, weights:data->weights');
   if (!error && data) {
     const v = data.map((row) => ({
       id: row.id,
       archived: row.archived,
       title: row.title,
+      subject: row.subject,
+      portalExamGroup: row.portalExamGroup,
+      examCategory: row.examCategory,
       keys: row.keys,
       weights: row.weights,
     }));
@@ -919,5 +922,6 @@ export const deleteRetakeRequest = async (id) => {
   return true;
 };
 export const cancelRetakeRequest = deleteRetakeRequest;
+
 
 
