@@ -16,7 +16,6 @@ import {
   cancelRetakeRequest,
   retakeMatchesResult,
 } from './dataService';
-import { applyExamKeysToResults } from './omrGrading';
 import {
   Search, Printer, CheckCircle, AlertCircle, Download,
   GraduationCap, School, User, Award, Hash, BookOpen,
@@ -767,7 +766,6 @@ export default function StudentPortal() {
 
       const activeExams = allExams.filter((e) => !examIsArchived(e));
       const activeExamById = new Map(activeExams.map((e) => [String(e.id), e]));
-      const examsForRegrade = allExams.filter((e) => e?.keys && Object.keys(e.keys).length > 0);
       const archivedExamIds = new Set(
         allExams.filter((e) => examIsArchived(e)).map((e) => String(e.id))
       );
@@ -867,7 +865,8 @@ export default function StudentPortal() {
       });
 
       matching = dedupeStudentResults(matching);
-      matching = applyExamKeysToResults(matching, examsForRegrade.length ? examsForRegrade : allExams);
+      // The approved score stored by control is authoritative, including manual edits.
+      // Do not recalculate it from the original scan answers in this read-only portal.
 
       if (matching.length > 0) {
         setAllResults(matching);
@@ -907,7 +906,7 @@ export default function StudentPortal() {
           });
         })
           .then((withDetails) => {
-            setAllResults(applyExamKeysToResults(withDetails, examsForRegrade.length ? examsForRegrade : allExams));
+            setAllResults(withDetails);
             setSearchProgress(null);
           })
           .catch((e) => {
@@ -1247,5 +1246,6 @@ export default function StudentPortal() {
     </div>
   );
 }
+
 
 
