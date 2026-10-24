@@ -280,8 +280,6 @@ const omrRowMatchesStudentRecordLoose = (row, student) => {
   return false;
 };
 
-const PORTAL_LOOKUP_CACHE_MS = 5 * 60 * 1000;
-const _portalLookupCache = new Map();
 
 /** مسح صفحي — فقط عند غياب الفهارس/RPC (محدود + يتوقف عند أول نتائج). */
 const fetchOmrResultsClientFallback = async (identityNorms, student, onProgress) => {
@@ -343,12 +341,7 @@ export const fetchOmrResultsForPortalLookup = async (inputNorm, student, onProgr
   const norm = String(inputNorm || '').trim().replace(/,/g, '');
   if (!norm) return { rows: [], source: 'empty' };
 
-  const cacheKey = `${norm}|${student?.id || ''}`;
-  const cached = _portalLookupCache.get(cacheKey);
-  if (cached && Date.now() - cached.t < PORTAL_LOOKUP_CACHE_MS) {
-    return cached.v;
-  }
-
+  // Every explicit lookup must read the latest approved grades from control.
   const identityNorms = collectStudentIdentityNorms(student, norm);
   let merged = [];
   let source = 'empty';
@@ -364,7 +357,6 @@ export const fetchOmrResultsForPortalLookup = async (inputNorm, student, onProgr
 
   if (merged.length > 0) {
     const result = { rows: merged, source };
-    _portalLookupCache.set(cacheKey, { t: Date.now(), v: result });
     return result;
   }
 
@@ -386,7 +378,6 @@ export const fetchOmrResultsForPortalLookup = async (inputNorm, student, onProgr
 
   if (merged.length > 0) {
     const result = { rows: merged, source };
-    _portalLookupCache.set(cacheKey, { t: Date.now(), v: result });
     return result;
   }
 
@@ -400,9 +391,6 @@ export const fetchOmrResultsForPortalLookup = async (inputNorm, student, onProgr
     rows: merged,
     source: merged.length && source === 'empty' ? 'merged' : source,
   };
-  if (merged.length > 0) {
-    _portalLookupCache.set(cacheKey, { t: Date.now(), v: result });
-  }
   return result;
 };
 
@@ -615,12 +603,15 @@ export const getOmrExamsPortalCached = async () => {
   }
   const { data, error } = await supabase
     .from('omr_exams')
-    .select('id, archived:data->archived, title:data->title, keys:data->keys, weights:data->weights');
+    .select('id, archived:data->archived, title:data->title, subject:data->subject, portalExamGroup:data->portalExamGroup, examCategory:data->examCategory, keys:data->keys, weights:data->weights');
   if (!error && data) {
     const v = data.map((row) => ({
       id: row.id,
       archived: row.archived,
       title: row.title,
+      subject: row.subject,
+      portalExamGroup: row.portalExamGroup,
+      examCategory: row.examCategory,
       keys: row.keys,
       weights: row.weights,
     }));
@@ -919,5 +910,7 @@ export const deleteRetakeRequest = async (id) => {
   return true;
 };
 export const cancelRetakeRequest = deleteRetakeRequest;
+
+
 
 

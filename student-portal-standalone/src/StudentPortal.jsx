@@ -1,3 +1,4 @@
+import { PORTAL_EXAM_GROUPS, getPortalExamGroup, getPortalExamTitle, getPortalGroupResults, getPortalExamOptions } from './portalExamGroups';
 import { getRetakeRange, isRetakeDayAllowed } from './retakeSchedule';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
@@ -15,7 +16,6 @@ import {
   cancelRetakeRequest,
   retakeMatchesResult,
 } from './dataService';
-import { applyExamKeysToResults } from './omrGrading';
 import {
   Search, Printer, CheckCircle, AlertCircle, Download,
   GraduationCap, School, User, Award, Hash, BookOpen,
@@ -51,62 +51,44 @@ const toDateValue = (d) => d ? d.toISOString().slice(0, 10) : '';
 
 
 /* ── Filter Bar ── */
-const FilterBar = ({ results, filterText, setFilterText, filtered }) => {
-  /* Collect unique exam/subject titles from results */
-  const availableExamTitles = useMemo(() => {
-    const set = new Set();
-    results.forEach(r => {
-      const t = displayExamTitle(r);
-      if (t) set.add(t);
-    });
-    return [...set].sort((a, b) => a.localeCompare(b, 'ar'));
-  }, [results]);
-
+const FilterBar = ({ results, examGroup, onGroupChange, filterText, setFilterText, filtered }) => {
+  const availableExamTitles = useMemo(() => getPortalExamOptions(results, examGroup), [results, examGroup]);
+  const isCamp = examGroup === 'qudrat';
   return (
     <div className="bg-white/80 backdrop-blur-md rounded-3xl border border-white shadow-xl p-4 sm:p-6 mb-6">
-      <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center">
-        {/* Exam name filter (dropdown) */}
-        <div className="flex-1 space-y-1">
-          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1">
-            <Filter className="w-3 h-3" /> اختر المادة لعرض النتيجة
-          </label>
+      <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-4 items-end">
+        <div className="space-y-2 min-w-0">
+          <label htmlFor="portal-exam-group" className="block text-xs font-black text-slate-600">قسم الاختبارات</label>
+          <select id="portal-exam-group" value={examGroup} onChange={e => onGroupChange(e.target.value)}
+            className="w-full bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-3 font-bold text-sm text-indigo-950 outline-none focus:ring-2 focus:ring-indigo-300">
+            <option value="">— اختر قسم الاختبارات —</option>
+            {PORTAL_EXAM_GROUPS.map(group => <option key={group.value} value={group.value}>{group.label}</option>)}
+          </select>
+        </div>
+        <div className="space-y-2 min-w-0">
+          <label htmlFor="portal-exam-title" className="block text-xs font-black text-slate-600">{isCamp ? 'اختر الاختبار' : 'اختر المادة'}</label>
           <div className="flex gap-2">
-            <select
-              value={filterText}
+            <select id="portal-exam-title" value={filterText} disabled={!examGroup || !availableExamTitles.length}
               onChange={e => setFilterText(e.target.value)}
-              className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 font-bold text-sm text-slate-700 outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300 transition-all"
-            >
-              <option value="">— اختر المادة —</option>
-              {availableExamTitles.map(t => (
-                <option key={t} value={t}>{t}</option>
-              ))}
+              className="w-full min-w-0 flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-bold text-sm text-slate-700 outline-none focus:ring-2 focus:ring-indigo-200 disabled:opacity-50">
+              <option value="">{!examGroup ? '— اختر القسم أولًا —' : isCamp ? '— اختر الاختبار —' : '— اختر المادة —'}</option>
+              {availableExamTitles.map(title => <option key={title} value={title}>{title}</option>)}
             </select>
-            {filterText && (
-              <button onClick={() => setFilterText('')}
-                className="p-2.5 bg-rose-50 text-rose-500 rounded-xl hover:bg-rose-100 transition-all border border-rose-100">
-                <X className="w-4 h-4" />
-              </button>
-            )}
+            {filterText && <button type="button" onClick={() => setFilterText('')} aria-label="مسح اختيار الاختبار"
+              className="p-2.5 bg-rose-50 text-rose-500 rounded-xl border border-rose-100"><X className="w-4 h-4" /></button>}
           </div>
         </div>
-
-        {/* Counter */}
-        <div className="flex items-end pb-0.5">
-          <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-2.5 text-center min-w-[80px]">
-            <div className="text-[10px] font-black text-indigo-400 uppercase">الظاهر</div>
-            <div className="text-indigo-900 font-black text-xl">{filtered.length}</div>
-          </div>
+        <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-2 text-center">
+          <div className="text-[10px] font-black text-indigo-500">النتائج الظاهرة</div>
+          <div className="text-indigo-900 font-black text-xl" aria-live="polite">{filtered.length}</div>
         </div>
       </div>
+      {examGroup && !availableExamTitles.length && <p role="status" className="mt-4 text-sm font-bold text-slate-500">لا توجد نتائج معتمدة لك في {PORTAL_EXAM_GROUPS.find(group => group.value === examGroup)?.label} حاليًا.</p>}
     </div>
   );
 };
 
-/** عنوان الاختبار للعرض: من النتيجة أو احتياطي */
-const displayExamTitle = (result) => {
-  const t = String(result?.examTitle || '').trim();
-  return t || 'نتيجة الاختبار المعتمدة';
-};
+const displayExamTitle = getPortalExamTitle;
 
 /** توحيد أرقام الهوية (عربي/لاتيني/أصفار بادئة) للمقارنة */
 const normalizeNationalId = (value) => {
@@ -632,6 +614,11 @@ export default function StudentPortal() {
 
   /* filters */
   const [filterText, setFilterText] = useState('');
+  const [examGroup, setExamGroup] = useState('');
+  const handleGroupChange = (group) => {
+    setExamGroup(group);
+    setFilterText('');
+  };
 
   useEffect(() => { getAppSettings().then(setConfig); }, []);
 
@@ -690,7 +677,7 @@ export default function StudentPortal() {
     e.preventDefault();
     if (!studentId.trim()) return;
     setLoading(true); setError(''); setAllResults(null);
-    setFilterText(''); setSearchedStudent(null); setMyRetakes([]);
+    setFilterText(''); setExamGroup(''); setSearchedStudent(null); setMyRetakes([]);
     setSearchProgress({
       phase: 'init',
       pct: 4,
@@ -779,7 +766,6 @@ export default function StudentPortal() {
 
       const activeExams = allExams.filter((e) => !examIsArchived(e));
       const activeExamById = new Map(activeExams.map((e) => [String(e.id), e]));
-      const examsForRegrade = allExams.filter((e) => e?.keys && Object.keys(e.keys).length > 0);
       const archivedExamIds = new Set(
         allExams.filter((e) => examIsArchived(e)).map((e) => String(e.id))
       );
@@ -804,8 +790,7 @@ export default function StudentPortal() {
         const fromExam = ex?.title != null ? String(ex.title).trim() : '';
         const currentTitle = String(r.examTitle || '').trim();
         const examTitle = currentTitle || fromExam;
-        if (examTitle && examTitle !== (r.examTitle || '').trim()) return { ...r, examTitle };
-        return r;
+        return { ...r, examTitle, portalExamGroup: getPortalExamGroup({ ...ex, ...r, examTitle, examSubject: ex?.subject || r.subject }) };
       };
 
       const bySeatMap = buildSeatStudentMap(
@@ -880,7 +865,8 @@ export default function StudentPortal() {
       });
 
       matching = dedupeStudentResults(matching);
-      matching = applyExamKeysToResults(matching, examsForRegrade.length ? examsForRegrade : allExams);
+      // The approved score stored by control is authoritative, including manual edits.
+      // Do not recalculate it from the original scan answers in this read-only portal.
 
       if (matching.length > 0) {
         setAllResults(matching);
@@ -920,7 +906,7 @@ export default function StudentPortal() {
           });
         })
           .then((withDetails) => {
-            setAllResults(applyExamKeysToResults(withDetails, examsForRegrade.length ? examsForRegrade : allExams));
+            setAllResults(withDetails);
             setSearchProgress(null);
           })
           .catch((e) => {
@@ -959,11 +945,11 @@ export default function StudentPortal() {
     if (!allResults) return [];
     if (!filterText.trim()) return [];
     const target = filterText.trim();
-    return allResults.filter(r => {
+    return getPortalGroupResults(allResults, examGroup).filter(r => {
       const title = (displayExamTitle(r) || '').trim();
       return title === target;
     });
-  }, [allResults, filterText]);
+  }, [allResults, examGroup, filterText]);
 
   const schoolName = config?.schoolName || 'متوسطة وثانوية نخبة الشمال الأهلية';
 
@@ -995,7 +981,7 @@ export default function StudentPortal() {
             {/* Main Title & Semester */}
             <div className="space-y-2">
               <h1 className="text-2xl sm:text-4xl font-black text-slate-900 font-header tracking-tight leading-tight">
-                نتائج اختبارات الفترة الأولى
+                نتائج الاختبارات
               </h1>
               <div className="inline-block">
                 <span className="inline-flex items-center gap-1.5 bg-indigo-50 border border-indigo-100 text-indigo-900 text-xs sm:text-sm font-black px-4 py-1.5 rounded-2xl shadow-xs">
@@ -1085,6 +1071,8 @@ export default function StudentPortal() {
             {/* 1. Filter Bar */}
             <FilterBar
               results={allResults}
+              examGroup={examGroup}
+              onGroupChange={handleGroupChange}
               filterText={filterText}
               setFilterText={setFilterText}
               filtered={filteredResults}
@@ -1094,16 +1082,16 @@ export default function StudentPortal() {
             {!filterText.trim() ? (
               <div className="luxury-card p-16 text-center bg-slate-50/50 border-2 border-dashed border-slate-200">
                 <BookOpen className="mx-auto text-indigo-300 mb-4 w-12 h-12" />
-                <h3 className="text-xl font-black text-slate-500">يرجى اختيار المادة لعرض النتيجة</h3>
-                <p className="mt-2 text-sm font-bold text-slate-400">حدد المادة من القائمة المنسدلة بالأعلى</p>
+                <h3 className="text-xl font-black text-slate-500">{!examGroup ? 'يرجى اختيار قسم الاختبارات' : examGroup === 'qudrat' ? 'اختر الاختبار لعرض النتيجة' : 'اختر المادة لعرض النتيجة'}</h3>
+                <p className="mt-2 text-sm font-bold text-slate-400">{!examGroup ? 'اختبارات الفترة الأولى أو معسكر القدرات' : 'حدد اختيارك من القائمة المنسدلة بالأعلى'}</p>
               </div>
             ) : filteredResults.length === 0 ? (
               <div className="luxury-card p-16 text-center bg-slate-50/50 border-2 border-dashed border-slate-200">
                 <Filter className="mx-auto text-slate-200 mb-4 w-12 h-12" />
-                <h3 className="text-xl font-black text-slate-400">لا توجد نتائج لهذه المادة</h3>
+                <h3 className="text-xl font-black text-slate-400">{examGroup === 'qudrat' ? 'لا توجد نتائج لهذا الاختبار' : 'لا توجد نتائج لهذه المادة'}</h3>
                 <button onClick={() => setFilterText('')}
                   className="mt-4 px-6 py-2 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-all">
-                  اختيار مادة أخرى
+                  {examGroup === 'qudrat' ? 'اختيار اختبار آخر' : 'اختيار مادة أخرى'}
                 </button>
               </div>
             ) : (
@@ -1258,4 +1246,6 @@ export default function StudentPortal() {
     </div>
   );
 }
+
+
 
