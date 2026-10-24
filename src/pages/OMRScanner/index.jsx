@@ -4,9 +4,26 @@ import {
   Upload, FileImage, CheckCircle, AlertCircle, Loader2, ListFilter, X, BadgeCheck, Trash2, 
   ChevronDown, ChevronUp, Edit3, MessageCircle, ScanLine, Wifi, WifiOff, Printer, Eye,
   Settings, Info, AlertTriangle, CheckCircle2, Play, Download, History, Clock, Fingerprint,
-  RefreshCcw, UserCheck, ArrowRight, Image as ImageIcon
+  RefreshCcw, UserCheck, ArrowRight, Image as ImageIcon, Users, Search, Table2
 } from 'lucide-react';
-import { getOmrExams, saveOmrResult, getStudents, saveStudent, OMR_API_BASE, WHATSAPP_API_BASE } from '../../utils/dataService';
+import {
+  printAggregatedGradesSheet,
+  resultsFromScanItems,
+  resolveResultClass,
+  resolveResultSubject,
+} from '../../utils/aggregatedGradesPrint';
+import { getOmrExams, saveOmrResult, getStudents, saveStudent, OMR_API_BASE, getWhatsAppApiBase } from '../../utils/dataService';
+import {
+  normalizeStudentId,
+  findStudentByDetectedId,
+  resolveOmrStudentFields,
+  effectiveOmrScanTemplate,
+  omrScanQuestionCount,
+  isWataniaExam,
+  getStudentNationalId,
+  getStudentSeatNumber,
+} from '../../utils/studentIdentity';
+import { grade } from '../../utils/omrGrading';
 import { useToast } from '../../components/Toast';
 
 /* ── Audit Trail Timeline Component ── */
@@ -134,6 +151,7 @@ const REVIEW_REASON_AR = {
   double_pass_mismatch: 'اختلاف بين القراءة العادية والصارمة',
   sheet_quality_low: 'جودة الصورة منخفضة',
   alignment_failed: 'فشل في محاذاة الورقة (تأكد من الطباعة)',
+  grid_auto_aligned: 'تمت معايرة شبكة الدوائر تلقائياً',
   extreme_blur: 'الصورة مهتزة جداً وغير واضحة',
   low_sharpness: 'وضوح الصورة ضعيف',
   too_dark: 'الإضاءة خافتة جداً (الصورة مظلمة)',
@@ -146,45 +164,203 @@ function formatReviewReasonTags(tags) {
   return tags.map(t => REVIEW_REASON_AR[t] || t).join(' · ');
 }
 
-const normalizeStudentId = (value) => {
-  const raw = (value ?? '').toString().trim();
-  if (!raw) return '';
+const UNKNOWN_STUDENT_LABEL = 'طالب غير معرف';
 
-  const arabicIndicDigits = '٠١٢٣٤٥٦٧٨٩';
-  const easternArabicDigits = '۰۱۲۳۴۵۶۷۸۹';
-
-  const latinDigits = raw
-    .split('')
-    .map((ch) => {
-      const idxA = arabicIndicDigits.indexOf(ch);
-      if (idxA >= 0) return String(idxA);
-      const idxE = easternArabicDigits.indexOf(ch);
-      if (idxE >= 0) return String(idxE);
-      return ch;
-    })
-    .join('');
-
-  // Keep digits and letters only to reduce OCR noise.
-  const alnum = latinDigits.replace(/[^a-zA-Z0-9]/g, '');
-  return alnum.replace(/^0+/, '').trim();
+const isUnknownStudentName = (name) => {
+  const n = String(name || '').trim();
+  return !n || n === UNKNOWN_STUDENT_LABEL;
 };
 
-const findStudentByDetectedId = (studentsList, detectedId) => {
-  const normalizedDetected = normalizeStudentId(detectedId);
-  if (!normalizedDetected) return null;
+const examGradeList = (exam) => {
+  if (!exam) return [];
+  if (Array.isArray(exam.grades) && exam.grades.length) return exam.grades.filter(Boolean);
+  return exam.grade ? [exam.grade] : [];
+};
 
-  return studentsList.find((s) => {
-    const seat = normalizeStudentId(s.seatNumber || s.seat_number);
-    const natId = normalizeStudentId(s.nationalId || s.national_id);
-    const studentId = normalizeStudentId(s.studentId || s.student_id);
-    const dbId = normalizeStudentId(s.id);
-    return (
-      (seat && seat === normalizedDetected) ||
-      (natId && natId === normalizedDetected) ||
-      (studentId && studentId === normalizedDetected) ||
-      (dbId && dbId === normalizedDetected)
-    );
-  }) || null;
+const studentMatchesExam = (student, exam) => {
+  if (!student || !exam) return true;
+  const grades = examGradeList(exam);
+  const sg = String(student.grade || student.classroom || '').trim();
+  if (grades.length && sg && !grades.some((g) => g === sg || String(student.grade || '') === g)) {
+    return false;
+  }
+  const stage = String(exam.stage || '').trim();
+  if (stage && stage !== 'All' && student.stage && String(student.stage) !== stage) {
+    return false;
+  }
+  return true;
+};
+
+/* ── الوضع المجمّع: تحديد اختبار كل ورقة تلقائياً ── */
+const examTemplateTag = (exam) => {
+  if (isWataniaExam(exam)) return 'watania';
+  const t = String(exam?.template || 'default').trim();
+  return t.startsWith('custom:') ? 'custom' : (t || 'default');
+};
+
+const parseQrRaw = (raw) => {
+  const s = String(raw || '').trim();
+  if (!s.startsWith('{')) return {};
+  try { return JSON.parse(s) || {}; } catch { return {}; }
+};
+
+/**
+ * يحدد الاختبار من المسح الأولي: رقم الاختبار في QR (الأوراق الجديدة) ثم
+ * نوع النموذج وعدد الأسئلة وصف الطالب.
+ */
+const resolveExamForProbe = (probe, pool, examsById, students) => {
+  const qr = parseQrRaw(probe?.qr_payload_raw);
+  const student = findStudentByDetectedId(students, probe?.student_id);
+  if (qr.ex && examsById.has(String(qr.ex))) {
+    return { exam: examsById.get(String(qr.ex)), candidates: [], student, reason: '' };
+  }
+  const isWatania =
+    probe?.id_source === 'national_grid' ||
+    qr.tpl === 'watania' ||
+    (probe?.quality_flags || []).some((f) => String(f).startsWith('watania'));
+  let cands = pool.filter((e) => isWataniaExam(e) === isWatania);
+  if (!isWatania && qr.tpl) {
+    const byTpl = cands.filter((e) => examTemplateTag(e) === String(qr.tpl));
+    if (byTpl.length) cands = byTpl;
+  }
+  const nq = Number(probe?.detected_num_questions || qr.nq || 0);
+  if (!isWatania && nq > 0) {
+    const byNq = cands.filter((e) => omrScanQuestionCount(e, e.qCount || 30) === nq);
+    if (byNq.length) cands = byNq;
+  }
+  let reason = '';
+  const sg = String(student?.grade || student?.classroom || '').trim();
+  if (sg) {
+    const byGrade = cands.filter((e) => examGradeList(e).includes(sg));
+    if (byGrade.length) cands = byGrade;
+    else reason = `لا يوجد اختبار مطابق لصف الطالب (${sg}) ضمن الاختبارات المحددة`;
+  } else if (!student) {
+    reason = 'لم يتم التعرف على الطالب من الورقة';
+  }
+  if (cands.length === 1) return { exam: cands[0], candidates: [], student, reason: '' };
+  if (!reason) reason = cands.length > 1 ? 'أكثر من اختبار مطابق لهذه الورقة' : 'لا يوجد اختبار مطابق';
+  return { exam: null, candidates: cands.length ? cands : pool, student, reason };
+};
+
+/* ── اختيار طالب من السجل مباشرة على بطاقة التصحيح ── */
+const InlineStudentPicker = ({
+  students = [],
+  selectedId = '',
+  excludeIds,
+  onPick,
+  disabled = false,
+  placeholder = 'اختر اسم الطالب…',
+}) => {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDoc = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const selected = (students || []).find((s) => String(s.id) === String(selectedId));
+  const query = String(q || '').trim().toLowerCase();
+  const taken = excludeIds instanceof Set ? excludeIds : new Set(excludeIds || []);
+  const filtered = (students || []).filter((s) => {
+    if (query) {
+      const hay = [
+        s.name,
+        getStudentNationalId(s),
+        getStudentSeatNumber(s),
+        s.grade,
+        s.classroom,
+        s.stage,
+      ]
+        .map((v) => String(v || '').toLowerCase())
+        .join(' ');
+      if (!hay.includes(query)) return false;
+    }
+    return true;
+  });
+
+  return (
+    <div ref={rootRef} className="relative w-full max-w-md">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => !disabled && setOpen((v) => !v)}
+        className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-2xl border-2 text-right transition-all
+          ${disabled ? 'opacity-70 cursor-default' : 'hover:border-indigo-300'}
+          ${selected
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+            : 'bg-amber-50 border-amber-300 text-amber-800 ring-2 ring-amber-100'}`}
+      >
+        <Users size={16} className="shrink-0 opacity-70" />
+        <span className={`flex-1 truncate text-sm font-black ${selected ? 'text-slate-800' : ''}`}>
+          {selected?.name || placeholder}
+        </span>
+        {!disabled && <ChevronDown size={16} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />}
+      </button>
+      {open && !disabled && (
+        <div className="absolute z-50 top-full mt-1 right-0 left-0 bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden max-h-80 flex flex-col">
+          <div className="p-2 border-b border-slate-100 bg-slate-50">
+            <div className="relative">
+              <input
+                autoFocus
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="ابحث بالاسم أو الهوية أو الجلوس…"
+                className="w-full px-3 py-2 pr-9 bg-white border border-slate-200 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-200"
+              />
+              <Search size={14} className="absolute top-1/2 -translate-y-1/2 right-2.5 text-slate-400" />
+            </div>
+          </div>
+          <div className="overflow-y-auto flex-1">
+            {filtered.length === 0 ? (
+              <div className="p-6 text-center text-slate-400 text-xs font-bold">لا يوجد طالب مطابق</div>
+            ) : filtered.map((s) => {
+              const sid = String(s.id);
+              const takenByOther = taken.has(sid) && sid !== String(selectedId || '');
+              const nat = getStudentNationalId(s);
+              const seat = getStudentSeatNumber(s);
+              const isSel = sid === String(selectedId || '');
+              return (
+                <button
+                  type="button"
+                  key={sid}
+                  disabled={takenByOther}
+                  onClick={() => {
+                    if (takenByOther) return;
+                    onPick?.(s);
+                    setOpen(false);
+                    setQ('');
+                  }}
+                  className={`w-full px-3 py-2.5 flex items-center gap-2 text-right border-b border-slate-50 last:border-0
+                    ${takenByOther ? 'opacity-40 cursor-not-allowed' : 'hover:bg-indigo-50'}
+                    ${isSel ? 'bg-indigo-50' : ''}`}
+                >
+                  <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-black text-xs shrink-0">
+                    {(s.name || '?').charAt(0)}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-black text-slate-800 truncate">{s.name || '—'}</div>
+                    <div className="text-[10px] text-slate-500 font-bold flex flex-wrap gap-x-2">
+                      {s.grade ? <span>{s.grade}</span> : null}
+                      {seat ? <span className="font-mono">جلوس {seat}</span> : null}
+                      {nat ? <span className="font-mono">هوية {nat}</span> : null}
+                    </div>
+                  </div>
+                  {takenByOther && <span className="text-[9px] font-black text-slate-400 shrink-0">مُختار بورقة أخرى</span>}
+                  {isSel && <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 };
 
 const MANUAL_STUDENT_MAP_KEY = 'omr_manual_student_map';
@@ -218,7 +394,17 @@ const hashFileSha256 = async (file) => {
 };
 
 /* ── Session Analytics Dashboard ── */
-const SessionDashboard = ({ items, batchTimer, onConfirmAll, onConfirmReviewed, onPrintConfirmed, safeCount, reviewCount, confirmedCount }) => {
+const SessionDashboard = ({
+  items,
+  batchTimer,
+  onConfirmAll,
+  onConfirmReviewed,
+  onPrintConfirmed,
+  onPrintAggregated,
+  safeCount,
+  reviewCount,
+  confirmedCount,
+}) => {
   if (items.length === 0) return null;
 
   const validItems = items.filter(it => it.result && !it.error);
@@ -360,10 +546,22 @@ const SessionDashboard = ({ items, batchTimer, onConfirmAll, onConfirmReviewed, 
         <div className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Global Batch Actions</div>
         <div className="flex items-center gap-4">
             {confirmedCount > 0 && (
-              <button type="button" onClick={onPrintConfirmed}
-                className="flex items-center gap-2 px-6 py-3 bg-white border border-slate-200 hover:border-blue-300 hover:text-blue-600 text-slate-600 rounded-2xl text-xs font-bold transition-all shadow-sm active:scale-95">
-                <Printer size={16} /> طباعة كشوف المعتمدين ({confirmedCount})
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={onPrintConfirmed}
+                  className="flex items-center gap-2 px-6 py-3 bg-white border border-slate-200 hover:border-blue-300 hover:text-blue-600 text-slate-600 rounded-2xl text-xs font-bold transition-all shadow-sm active:scale-95"
+                >
+                  <Printer size={16} /> طباعة كشوف المعتمدين ({confirmedCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={onPrintAggregated}
+                  className="flex items-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-bold transition-all shadow-lg shadow-emerald-100 active:scale-95"
+                >
+                  <Table2 size={16} /> كشف درجات مجمع ({confirmedCount})
+                </button>
+              </>
             )}
             {safeCount > 0 && (
               <button type="button" onClick={onConfirmAll}
@@ -381,38 +579,6 @@ const SessionDashboard = ({ items, batchTimer, onConfirmAll, onConfirmReviewed, 
       </div>
     </div>
   );
-};
-
-/* ── Helpers ── */
-const grade = (scanned, keys, weights = {}) => {
-  let score = 0;
-  let totalPossible = 0;
-  const details = {};
-  const qs = Object.keys(keys);
-  
-  qs.forEach(q => {
-    const correct = keys[q];
-    const got = scanned[q] || '';
-    const ok = got === correct;
-    const weight = weights?.[q] ?? 1; // Default to 1 if no weight specified
-    
-    if (ok) score += weight;
-    totalPossible += weight;
-    
-    details[q] = { 
-      student_answer: got, 
-      correct_option: correct, 
-      is_correct: ok,
-      weight: weight // Add weight to details for display
-    };
-  });
-  
-  return { 
-    score: parseFloat(score.toFixed(2)), 
-    total: parseFloat(totalPossible.toFixed(2)), 
-    percentage: totalPossible > 0 ? ((score / totalPossible) * 100).toFixed(2) : '0', 
-    details 
-  };
 };
 
 /* ── Print Result Slip ── */
@@ -569,10 +735,17 @@ const dedupeConfirmedForPrint = (list) => {
   return out;
 };
 
-const scanImage = async (file, template = 'default', numQuestions = 30, scanMode = 'hybrid') => {
+const scanImage = async (file, examOrTemplate = 'default', numQuestions = 30, scanMode = 'hybrid', fromScanner = true) => {
   const fd = new FormData();
   fd.append('file', file);
-  const res = await fetch(`${OMR_API_BASE}/scan?template=${template}&num_questions=${numQuestions}&scan_mode=${scanMode}`, { method: 'POST', body: fd });
+  const exam = examOrTemplate && typeof examOrTemplate === 'object' ? examOrTemplate : null;
+  const template = exam ? (exam.template || 'default') : examOrTemplate;
+  const scanTemplate = effectiveOmrScanTemplate(template, exam);
+  const nq = exam ? omrScanQuestionCount(exam, numQuestions) : numQuestions;
+  const res = await fetch(
+    `${OMR_API_BASE}/scan?template=${scanTemplate}&num_questions=${nq}&scan_mode=${scanMode}&from_scanner=${fromScanner ? '1' : '0'}`,
+    { method: 'POST', body: fd }
+  );
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'فشل المسح');
@@ -588,7 +761,7 @@ const revokePreviewUrl = (url) => {
 };
 
 /* ── Card for a single scanned sheet ── */
-const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswerEdit, onSendWhatsapp, onPrint, onShowAudit, onPreview, onResolveUnknown, exam }) => {
+const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswerEdit, onSendWhatsapp, onPrint, onShowAudit, onPreview, onResolveUnknown, onAssignStudent, exam, studentOptions = [], excludeStudentIds }) => {
   const [expanded, setExpanded] = useState(false);
   const [editingAnswer, setEditingAnswer] = useState(null);
   const isConfirmed = item.confirmed;
@@ -597,10 +770,12 @@ const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswer
   const isRejected = decision === 'REJECTED_QUALITY';
   const mismatchWarning = item.result?.qualityFlags?.includes('num_questions_mismatch');
   const lowQualityWarning = item.result?.qualityFlags?.includes('quality_gate_reject');
-  const isUnknownStudent = item.result?.studentName === 'طالب غير معرف';
+  const wataniaSheet = isWataniaExam(exam);
+  const isUnknownStudent = !!item.result && !item.error && isUnknownStudentName(item.result.studentName);
+  const needsNamePick = wataniaSheet && !!item.result && !item.error && (isUnknownStudent || !item.result?.assignedStudentId);
 
   return (
-    <div className={`luxury-card border-none transition-all overflow-hidden bg-white group/card
+    <div className={`luxury-card border-none transition-all overflow-visible bg-white group/card
       ${isConfirmed ? 'ring-2 ring-emerald-500/20' : item.error ? 'ring-2 ring-red-500/10' : 'hover:shadow-indigo-100/50 hover:shadow-2xl'}`}>
 
       {/* Card Header */}
@@ -617,6 +792,26 @@ const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswer
 
         {/* Student Info */}
         <div className="flex-1 min-w-0">
+          {wataniaSheet && item.result && !item.error ? (
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-black text-amber-600 uppercase tracking-widest">
+                {isUnknownStudent ? 'اختر الطالب لهذه الورقة' : 'طالب الورقة'}
+              </div>
+              <InlineStudentPicker
+                students={studentOptions}
+                selectedId={item.result.assignedStudentId || ''}
+                excludeIds={excludeStudentIds}
+                disabled={isConfirmed}
+                onPick={(s) => onAssignStudent?.(item.id, s)}
+              />
+              {item.fromScanner && (
+                <span className="inline-block text-[9px] font-black px-2 py-1 bg-indigo-50 text-indigo-600 rounded-full border border-indigo-100 uppercase tracking-widest">Scanner</span>
+              )}
+              {studentOptions.length === 0 && (
+                <div className="text-[10px] font-bold text-rose-500">لا يوجد طلاب في السجل — أضفهم من قائمة الطلاب ثم اضغط تحديث الطلب</div>
+              )}
+            </div>
+          ) : (
           <div className="font-header font-black text-slate-800 truncate flex items-center gap-2 text-lg">
             {item.result?.studentName || (item.fromScanner ? `ورقة مسح ${item.page || ''}` : item.file?.name || 'ورقة')}
             {isUnknownStudent && (
@@ -633,6 +828,7 @@ const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswer
               <span className="text-[9px] font-black px-2 py-1 bg-indigo-50 text-indigo-600 rounded-full border border-indigo-100 uppercase tracking-widest">Scanner</span>
             )}
           </div>
+          )}
           {item.result && (
             <div className="text-[11px] text-slate-400 font-bold mt-1 flex items-center gap-3">
               {item.result.studentGrade && (
@@ -686,6 +882,11 @@ const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswer
               ))}
             </div>
           )}
+          {item.loading && !item.result && !item.error && (
+            <div className="text-[11px] text-indigo-500 font-bold mt-2 flex items-center gap-2">
+              <Loader2 size={12} className="animate-spin" /> جاري قراءة الورقة…
+            </div>
+          )}
           {item.error && <div className="text-xs text-rose-500 font-bold mt-2 bg-rose-50 p-2 rounded-xl border border-rose-100">{item.error}</div>}
         </div>
 
@@ -721,10 +922,14 @@ const SheetCard = React.memo(({ item, onConfirm, onUnconfirm, onRemove, onAnswer
           )}
           {item.result && !item.error && !isConfirmed && !isRejected && (
             <button type="button" onClick={() => onConfirm(item.id)}
+              disabled={needsNamePick}
+              title={needsNamePick ? 'اختر اسم الطالب أولاً' : undefined}
               className={`flex items-center gap-2 px-5 py-3 text-white rounded-2xl text-xs font-black transition-all shadow-xl active:scale-95
-                ${reviewCount > 0
-                  ? 'bg-amber-500 hover:bg-amber-600 shadow-amber-100'
-                  : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-100'}`}>
+                ${needsNamePick
+                  ? 'bg-slate-300 cursor-not-allowed shadow-none'
+                  : reviewCount > 0
+                    ? 'bg-amber-500 hover:bg-amber-600 shadow-amber-100'
+                    : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-100'}`}>
               <BadgeCheck size={18} /> اعتماد
             </button>
           )}
@@ -1090,17 +1295,123 @@ const CalibrationModal = ({ show, onClose, scannerAvailable, onRefresh, exam }) 
   );
 };
 
+/* ── نافذة استرداد بيانات الطلاب (بحث في قائمة الطلاب المسجّلين) ── */
+const StudentPickerModal = ({ show, onClose, onPick, students, detectedId }) => {
+  const [q, setQ] = useState('');
+
+  useEffect(() => {
+    if (!show) return;
+    // ابدأ البحث افتراضياً بالرقم المُكتشف من QR (إن وُجد)
+    setQ(detectedId ? String(detectedId) : '');
+  }, [show, detectedId]);
+
+  if (!show) return null;
+
+  const getNational = (s) => String(s.nationalId || s.national_id || '').trim();
+  const getSeat = (s) => String(s.seatNumber || s.seat_number || '').trim();
+
+  const norm = (v) => String(v ?? '').toLowerCase().trim();
+  const query = norm(q);
+  const filtered = (students || []).filter((s) => {
+    if (!query) return true;
+    return [s.name, getNational(s), getSeat(s), s.grade, s.classroom, s.stage, s.phone]
+      .some((f) => norm(f).includes(query));
+  }).slice(0, 200); // حدّ أعلى للأداء عند البحث الفارغ
+
+  return (
+    <div
+      className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-2xl bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[85vh]"
+      >
+        <div className="p-5 bg-indigo-600 text-white flex items-center justify-between">
+          <div>
+            <h3 className="text-base font-black">استرداد بيانات طالب</h3>
+            <p className="text-[11px] text-indigo-100 mt-1">
+              ابحث بالاسم أو رقم الهوية أو رقم الجلوس للعثور على الطالب — الرمز يعتمد رقم الهوية فقط
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="p-2 rounded-xl hover:bg-white/10">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-4 border-b border-slate-100 bg-slate-50">
+          <div className="relative">
+            <input
+              autoFocus
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="ابحث: اسم، رقم هوية، جلوس، صف…"
+              className="w-full px-4 py-3 pr-10 bg-white border border-slate-200 rounded-xl font-bold text-sm focus:ring-2 focus:ring-indigo-300 outline-none"
+            />
+            <Search size={16} className="absolute top-1/2 -translate-y-1/2 right-3 text-slate-400" />
+          </div>
+          <div className="mt-2 text-[11px] font-bold text-slate-500">
+            عدد النتائج: {filtered.length} {filtered.length === 200 ? '+' : ''} من أصل {(students || []).length} طالب
+          </div>
+        </div>
+
+        <div className="overflow-y-auto flex-1 divide-y divide-slate-100">
+          {filtered.length === 0 ? (
+            <div className="p-10 text-center text-slate-400 font-bold text-sm">
+              لا يوجد طالب مطابق لبحثك
+            </div>
+          ) : filtered.map((s) => {
+            const nat = getNational(s);
+            const seat = getSeat(s);
+            return (
+              <button
+                type="button"
+                key={s.id}
+                onClick={() => onPick(s)}
+                className="w-full px-5 py-3 flex items-center gap-3 hover:bg-indigo-50 text-right transition-colors"
+              >
+                <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-black text-sm shrink-0">
+                  {(s.name || '?').charAt(0)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-black text-slate-800 text-sm truncate">{s.name || '—'}</div>
+                  <div className="text-[11px] text-slate-500 font-bold flex flex-wrap gap-x-3 gap-y-0.5 mt-0.5">
+                    <span className="font-mono text-indigo-600">الهوية: {nat || '—'}</span>
+                    {seat ? <span className="font-mono text-slate-600">جلوس: {seat}</span> : null}
+                    {s.grade && <span>الصف: {s.grade}</span>}
+                    {s.classroom && <span>الفصل: {s.classroom}</span>}
+                    {s.stage && <span>المرحلة: {s.stage}</span>}
+                  </div>
+                </div>
+                <span className="text-[11px] font-black text-indigo-600 shrink-0">اختيار</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="p-3 bg-slate-50 border-t border-slate-100 flex items-center justify-end">
+          <button type="button" onClick={onClose} className="px-5 py-2 text-slate-500 font-bold rounded-xl hover:bg-slate-100">
+            إغلاق
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 /* ── Unknown Student Resolver Modal ── */
-const UnknownStudentModal = ({ show, onClose, onSave, initialValues }) => {
+const UnknownStudentModal = ({ show, onClose, onSave, initialValues, students = [], detectedId = '' }) => {
   const [studentName, setStudentName] = useState('');
   const [studentId, setStudentId] = useState('');
   const [studentGrade, setStudentGrade] = useState('');
+  const [showPicker, setShowPicker] = useState(false);
 
   useEffect(() => {
     if (!show) return;
     setStudentName(initialValues?.studentName || '');
     setStudentId(initialValues?.studentId || '');
     setStudentGrade(initialValues?.studentGrade || '');
+    setShowPicker(false);
   }, [show, initialValues]);
 
   if (!show) return null;
@@ -1108,12 +1419,24 @@ const UnknownStudentModal = ({ show, onClose, onSave, initialValues }) => {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!studentName.trim()) return alert('يرجى إدخال اسم الطالب');
-    if (!studentId.trim()) return alert('يرجى إدخال رقم الطالب');
+    if (!studentId.trim()) return alert('يرجى إدخال رقم الهوية');
     onSave({
       studentName: studentName.trim(),
       studentId: studentId.trim(),
       studentGrade: studentGrade.trim(),
     });
+  };
+
+  const handlePick = (s) => {
+    const nat = String(s.nationalId || s.national_id || '').trim();
+    if (!nat) {
+      window.alert('هذا الطالب بدون رقم هوية في السجل. أضف الهوية من قائمة الطلاب ثم أعد المحاولة.');
+      return;
+    }
+    setStudentName(String(s.name || '').trim());
+    setStudentId(nat);
+    setStudentGrade(String(s.grade || s.classroom || '').trim());
+    setShowPicker(false);
   };
 
   return (
@@ -1126,11 +1449,30 @@ const UnknownStudentModal = ({ show, onClose, onSave, initialValues }) => {
         <div className="p-6 bg-indigo-600 text-white flex items-center justify-between">
           <div>
             <h3 className="text-lg font-black">تعيين طالب غير معروف</h3>
-            <p className="text-[11px] text-indigo-100 mt-1">أدخل بيانات الطالب لتحديث الورقة الحالية</p>
+            <p className="text-[11px] text-indigo-100 mt-1">أدخل بيانات الطالب يدوياً أو استرد من قائمة الطلاب</p>
           </div>
           <button type="button" onClick={onClose} className="p-2 rounded-xl hover:bg-white/10">
             <X size={18} />
           </button>
+        </div>
+
+        <div className="p-5 border-b border-slate-100 bg-slate-50">
+          <button
+            type="button"
+            onClick={() => setShowPicker(true)}
+            className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white border-2 border-dashed border-indigo-200 text-indigo-700 rounded-xl font-black text-sm hover:border-indigo-400 hover:bg-indigo-50 transition-all"
+          >
+            <Download size={16} />
+            استرداد بيانات من قائمة الطلاب
+            {students.length > 0 && (
+              <span className="text-[11px] text-indigo-400 font-bold">({students.length} طالب)</span>
+            )}
+          </button>
+          {detectedId && (
+            <div className="mt-2 text-[11px] text-slate-500 font-bold text-center">
+              الرقم المكتشف من الورقة: <span className="font-mono text-slate-700">{detectedId}</span>
+            </div>
+          )}
         </div>
 
         <div className="p-6 space-y-4">
@@ -1145,7 +1487,7 @@ const UnknownStudentModal = ({ show, onClose, onSave, initialValues }) => {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-black text-slate-500 mb-1.5">رقم الطالب (ID)</label>
+              <label className="block text-xs font-black text-slate-500 mb-1.5">رقم الهوية (المعرّف في الرمز)</label>
               <input
                 value={studentId}
                 onChange={(e) => setStudentId(e.target.value)}
@@ -1174,6 +1516,14 @@ const UnknownStudentModal = ({ show, onClose, onSave, initialValues }) => {
           </button>
         </div>
       </form>
+
+      <StudentPickerModal
+        show={showPicker}
+        onClose={() => setShowPicker(false)}
+        onPick={handlePick}
+        students={students}
+        detectedId={detectedId}
+      />
     </div>
   );
 };
@@ -1199,6 +1549,10 @@ const OMRScanner = () => {
   const [showCalibrationModal, setShowCalibrationModal] = useState(false);
   const [isScannerScanning, setIsScannerScanning] = useState(false);
   const [scanMode, setScanMode] = useState('hybrid');
+  const [multiMode, setMultiMode] = useState(false);
+  const [multiExcluded, setMultiExcluded] = useState(() => new Set());
+  const [groupFilter, setGroupFilter] = useState('all');
+  const [bulkPickExamId, setBulkPickExamId] = useState('');
   const [batchTimer, setBatchTimer] = useState({
     running: false,
     startedAt: null,
@@ -1236,6 +1590,69 @@ const OMRScanner = () => {
     checkScanner();
   }, [examId]);
 
+  /* ── إعادة تطابق نتائج الجلسة الحالية بالطلاب + الخريطة اليدوية ── */
+  const rematchSessionResults = (studentsList) => {
+    const manualMap = getManualStudentMap();
+    setItems(prev => prev.map(it => {
+      if (!it?.result || it.confirmed) return it;
+      if (it.result.studentName && !isUnknownStudentName(it.result.studentName) && it.result.assignedStudentId) return it;
+      const detected = it.result.detectedStudentId || it.result.studentId || '';
+      const found = findStudentByDetectedId(studentsList, detected);
+      const idKey = normalizeStudentId(detected);
+      const manual = (idKey && manualMap[idKey]) || null;
+      if (!found && !manual) return it;
+      const identity = resolveOmrStudentFields({
+        student: found,
+        omrData: { student_id: detected },
+        manualMapEntry: manual,
+      });
+      return {
+        ...it,
+        result: {
+          ...it.result,
+          studentName: identity.studentName || UNKNOWN_STUDENT_LABEL,
+          assignedStudentId: found?.id || it.result.assignedStudentId || '',
+          studentGrade: identity.studentGrade || it.result.studentGrade,
+          phone: identity.phone || it.result.phone,
+          studentId: identity.studentId || it.result.studentId,
+          nationalId: identity.nationalId || it.result.nationalId,
+          seatNumber: identity.seatNumber || it.result.seatNumber,
+          normalizedDetectedStudentId: identity.normalizedDetectedStudentId || it.result.normalizedDetectedStudentId,
+          resolvedByManualMap: identity.resolvedByManualMap,
+        },
+      };
+    }));
+  };
+
+  /* ── تحديث قائمة الطلاب يدوياً + إعادة المطابقة ── */
+  const [isRefreshingStudents, setIsRefreshingStudents] = useState(false);
+  const refreshStudents = async () => {
+    setIsRefreshingStudents(true);
+    try {
+      const fresh = await getStudents();
+      setStudents(fresh);
+      rematchSessionResults(fresh);
+      toast.success(`تم تحديث ${fresh.length} طالب وإعادة تطابق النتائج الحالية.`, 'تم التحديث');
+    } catch (e) {
+      toast.error('تعذّر تحديث قائمة الطلاب.', 'خطأ');
+    } finally {
+      setIsRefreshingStudents(false);
+    }
+  };
+
+  /* ── تحديث تلقائي عند العودة لنافذة المتصفح ── */
+  useEffect(() => {
+    const onFocus = async () => {
+      try {
+        const fresh = await getStudents();
+        setStudents(fresh);
+        rematchSessionResults(fresh);
+      } catch { /* تجاهل */ }
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
+
   useEffect(() => {
     if (!batchTimer.running || !batchTimer.startedAt) return undefined;
     const t = setInterval(() => {
@@ -1265,12 +1682,45 @@ const OMRScanner = () => {
   };
 
   const selectedExam = exams.find(e => e.id === selectedExamId);
+  const examsById = useMemo(() => new Map(exams.map((e) => [String(e.id), e])), [exams]);
+  const itemExam = (it) =>
+    examsById.get(String(it?.result?.examId || it?.examId || '')) || (multiMode ? null : selectedExam);
+
+  const studentOptionsFor = useMemo(() => {
+    const cache = new Map();
+    const pool = Array.isArray(students) ? students : [];
+    return (exam) => {
+      const key = String(exam?.id || '__none__');
+      if (!cache.has(key)) {
+        const matched = pool.filter((s) => studentMatchesExam(s, exam));
+        const list = matched.length ? matched : pool;
+        cache.set(key, [...list].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ar')));
+      }
+      return cache.get(key);
+    };
+  }, [students]);
+  const wataniaStudentOptions = useMemo(() => studentOptionsFor(selectedExam), [studentOptionsFor, selectedExam]);
+  const assignedStudentIds = useMemo(() => {
+    const ids = new Set();
+    for (const it of items) {
+      if (it.result?.assignedStudentId) ids.add(String(it.result.assignedStudentId));
+    }
+    return ids;
+  }, [items]);
+  const sheetNeedsStudentPick = (it) => {
+    if (!isWataniaExam(itemExam(it)) || !it?.result || it.error) return false;
+    return isUnknownStudentName(it.result.studentName) || !it.result.assignedStudentId;
+  };
   const filterGrades = filterStage !== 'All' ? STAGES[filterStage] || [] : [];
   const visibleExams = useMemo(() => exams.filter(e => {
     if (filterStage !== 'All' && e.stage !== filterStage) return false;
-    if (filterGrade !== 'All' && e.grade !== filterGrade) return false;
+    if (filterGrade !== 'All' && e.grade !== filterGrade && !examGradeList(e).includes(filterGrade)) return false;
     return true;
   }), [exams, filterStage, filterGrade]);
+  const multiPool = useMemo(
+    () => visibleExams.filter((e) => !multiExcluded.has(String(e.id))),
+    [visibleExams, multiExcluded]
+  );
 
   // Auto-select first exam when filter changes and current selection is not in visible list
   useEffect(() => {
@@ -1284,58 +1734,140 @@ const OMRScanner = () => {
     }
   }, [visibleExams]);
 
+  const buildScanResultPayload = (omrData, gradePayload, manualMap, fingerprint = '', auditNote = 'initial scan', exam = selectedExam) => {
+    const student = findStudentByDetectedId(students, omrData.student_id);
+    const idKey = normalizeStudentId(omrData.student_id || '');
+    const mapped =
+      (fingerprint && manualMap[fingerprint]) ||
+      (idKey && manualMap[idKey]) ||
+      null;
+    const identity = resolveOmrStudentFields({ student, omrData, manualMapEntry: mapped });
+    const { score, total, percentage, details } = gradePayload;
+
+    return {
+      examId: exam?.id || selectedExamId,
+      examTitle: exam?.title || '',
+      studentId: identity.studentId,
+      nationalId: identity.nationalId,
+      seatNumber: identity.seatNumber,
+      detectedStudentId: identity.detectedStudentId,
+      normalizedDetectedStudentId: identity.normalizedDetectedStudentId,
+      studentName: identity.studentName || UNKNOWN_STUDENT_LABEL,
+      assignedStudentId: student?.id || mapped?.studentRecordId || '',
+      studentGrade: identity.studentGrade,
+      phone: identity.phone,
+      resolvedByManualMap: identity.resolvedByManualMap,
+      answers: omrData.answers || {},
+      score, total, percentage, details,
+      confidence: omrData.confidence || {},
+      needsReviewQuestions: omrData.needs_review_questions || [],
+      reviewReasons: omrData.review_reasons || {},
+      adaptiveThresholds: omrData.adaptive_thresholds || {},
+      decisionStatus: omrData.decision_status || 'REVIEW_REQUIRED',
+      qualityFlags: omrData.quality_flags || [],
+      detectedNumQuestions: omrData.detected_num_questions ?? null,
+      qualityScore: omrData.quality_score ?? 0,
+      unstableQuestions: omrData.unstable_questions || [],
+      averageConfidence: omrData.average_confidence || 0,
+      mismatchQuestions: omrData.double_pass_mismatch_questions || [],
+      systemViewImage: omrData.system_view_image || '',
+      reviewRois: omrData.review_rois || {},
+      audit: [{ action: 'scan', at: new Date().toISOString(), note: auditNote }],
+      timestamp: new Date().toISOString(),
+    };
+  };
+
   /* ── Process a single file through OMR engine ── */
   const processFile = async (file, itemId, extraProps = {}) => {
     setItems(prev => prev.map(it => it.id === itemId ? { ...it, loading: true, error: null } : it));
     try {
-      const omrData = await scanImage(file, selectedExam?.template || 'default', selectedExam?.qCount || 30, scanMode);
-      const { score, total, percentage, details } = grade(omrData.answers, selectedExam?.keys || {}, selectedExam?.weights || {});
-      const student = findStudentByDetectedId(students, omrData.student_id);
+      const omrData = await scanImage(file, selectedExam, selectedExam?.qCount || 30, scanMode, false);
+      const gradePayload = grade(omrData.answers, selectedExam?.keys || {}, selectedExam?.weights || {});
       const manualMap = getManualStudentMap();
-      const mapped = extraProps?.fingerprint ? manualMap[extraProps.fingerprint] : null;
-      const resolvedByManualMap = !student && !!mapped;
-      const resolvedName = student?.name || mapped?.studentName || 'طالب غير معرف';
-      const resolvedGrade = student ? (student.grade || student.classroom || '') : (mapped?.studentGrade || '');
-      const resolvedPhone = student?.phone || '';
-      const resolvedStudentId = student
-        ? (omrData.student_id || mapped?.studentId || '')
-        : (mapped?.studentId || omrData.student_id || '');
-      const result = {
-        examId: selectedExamId,
-        examTitle: selectedExam?.title || '',
-        studentId: resolvedStudentId,
-        detectedStudentId: (omrData.student_id ?? '').toString().trim(),
-        normalizedDetectedStudentId: normalizeStudentId(omrData.student_id),
-        studentName: resolvedName,
-        studentGrade: resolvedGrade,
-        phone: resolvedPhone,
-        resolvedByManualMap,
-        score, total, percentage, details,
-        confidence: omrData.confidence || {},
-        needsReviewQuestions: omrData.needs_review_questions || [],
-        reviewReasons: omrData.review_reasons || {},
-        adaptiveThresholds: omrData.adaptive_thresholds || {},
-        decisionStatus: omrData.decision_status || 'REVIEW_REQUIRED',
-        qualityFlags: omrData.quality_flags || [],
-        detectedNumQuestions: omrData.detected_num_questions ?? null,
-        qualityScore: omrData.quality_score ?? 0,
-        unstableQuestions: omrData.unstable_questions || [],
-        averageConfidence: omrData.average_confidence || 0,
-        mismatchQuestions: omrData.double_pass_mismatch_questions || [],
-        systemViewImage: omrData.system_view_image || '',
-        reviewRois: omrData.review_rois || {},
-        audit: [{ action: 'scan', at: new Date().toISOString(), note: 'initial scan' }],
-        timestamp: new Date().toISOString()
-      };
+      const result = buildScanResultPayload(
+        omrData,
+        gradePayload,
+        manualMap,
+        extraProps?.fingerprint || '',
+        'initial scan'
+      );
       setItems(prev => prev.map(it => it.id === itemId ? { ...it, loading: false, result, ...extraProps } : it));
     } catch (err) {
       setItems(prev => prev.map(it => it.id === itemId ? { ...it, loading: false, error: err.message } : it));
     }
   };
 
+  /* ── الوضع المجمّع: تصحيح ورقة على اختبار محدد ── */
+  const gradeItemWithExam = async (file, itemId, exam, extraProps = {}) => {
+    setItems(prev => prev.map(it => it.id === itemId ? { ...it, loading: true, error: null, examPick: null } : it));
+    try {
+      const omrData = await scanImage(file, exam, exam?.qCount || 30, scanMode, false);
+      const gradePayload = grade(omrData.answers || {}, exam?.keys || {}, exam?.weights || {});
+      const result = buildScanResultPayload(
+        omrData,
+        gradePayload,
+        getManualStudentMap(),
+        extraProps?.fingerprint || items.find((it) => it.id === itemId)?.fingerprint || '',
+        'bulk multi-exam scan',
+        exam
+      );
+      setItems(prev => prev.map(it => it.id === itemId
+        ? { ...it, ...extraProps, loading: false, result, examId: exam.id, examPick: null }
+        : it));
+    } catch (err) {
+      setItems(prev => prev.map(it => it.id === itemId ? { ...it, loading: false, error: err.message } : it));
+    }
+  };
+
+  /* ── الوضع المجمّع: مسح أولي سريع لتحديد الاختبار ثم التصحيح ── */
+  const processFileAuto = async (file, itemId, pool, extraProps = {}) => {
+    setItems(prev => prev.map(it => it.id === itemId ? { ...it, loading: true, error: null } : it));
+    try {
+      const probe = await scanImage(file, 'default', 30, 'fast', false);
+      const resolved = resolveExamForProbe(probe, pool, examsById, students);
+      if (resolved.exam) {
+        await gradeItemWithExam(file, itemId, resolved.exam, extraProps);
+        return;
+      }
+      setItems(prev => prev.map(it => it.id === itemId ? {
+        ...it,
+        ...extraProps,
+        loading: false,
+        result: null,
+        examPick: {
+          candidateIds: resolved.candidates.map((e) => String(e.id)),
+          reason: resolved.reason,
+          studentName: resolved.student?.name || '',
+          studentGrade: resolved.student?.grade || resolved.student?.classroom || '',
+          previewImage: probe.system_view_image || '',
+        },
+      } : it));
+    } catch (err) {
+      setItems(prev => prev.map(it => it.id === itemId ? { ...it, loading: false, error: err.message } : it));
+    }
+  };
+
+  const handlePickExam = (itemId, examIdToUse) => {
+    const item = items.find((it) => it.id === itemId);
+    const exam = examsById.get(String(examIdToUse));
+    if (!item?.file || !exam) return;
+    if (item.confirmed) return;
+    gradeItemWithExam(item.file, itemId, exam);
+  };
+
+  const handleAssignExamToPending = async () => {
+    const exam = examsById.get(String(bulkPickExamId));
+    if (!exam) return;
+    const targets = items.filter((it) => it.examPick && it.file && !it.loading);
+    if (!targets.length) return;
+    await Promise.all(targets.map((it) => gradeItemWithExam(it.file, it.id, exam)));
+  };
+
   /* ── Handle file upload (existing) ── */
   const handleFiles = async (files) => {
-    if (!selectedExamId) { alert('اختر الاختبار أولاً'); return; }
+    if (multiMode) {
+      if (!multiPool.length) { alert('حدد اختباراً واحداً على الأقل ضمن الوضع المجمّع'); return; }
+    } else if (!selectedExamId) { alert('اختر الاختبار أولاً'); return; }
     const newItems = await Promise.all(Array.from(files).map(async (file) => {
       const fileHash = await hashFileSha256(file);
       return {
@@ -1359,7 +1891,12 @@ const OMRScanner = () => {
       lastBatchCount: batchTimer.lastBatchCount,
     });
     setItems(prev => [...prev, ...newItems]);
-    await Promise.all(newItems.map(item => processFile(item.file, item.id, { fingerprint: item.fingerprint })));
+    if (multiMode) {
+      const pool = multiPool;
+      await Promise.all(newItems.map(item => processFileAuto(item.file, item.id, pool, { fingerprint: item.fingerprint })));
+    } else {
+      await Promise.all(newItems.map(item => processFile(item.file, item.id, { fingerprint: item.fingerprint })));
+    }
     const spent = Date.now() - batchStart;
     setBatchTimer({
       running: false,
@@ -1378,13 +1915,16 @@ const OMRScanner = () => {
 
   /* ── Handle hardware scanner — STREAMING (results appear one by one) ── */
   const handleHardwareScan = async (pages) => {
+    if (multiMode) { alert('الوضع المجمّع يعمل مع رفع ملفات الصور. أوقف الوضع المجمّع لاستخدام السكانر المباشر.'); return; }
     if (!selectedExamId) { alert('اختر الاختبار أولاً'); return; }
     setIsScannerScanning(true);
     let received = 0;
 
     try {
+      const scanTemplate = effectiveOmrScanTemplate(selectedExam?.template || 'default', selectedExam);
+      const nq = omrScanQuestionCount(selectedExam, selectedExam?.qCount || 30);
       const res = await fetch(
-        `${OMR_API_BASE}/scan-from-scanner-stream?template=${selectedExam?.template || 'default'}&pages=${pages}&num_questions=${selectedExam?.qCount || 30}&scan_mode=${scanMode}`,
+        `${OMR_API_BASE}/scan-from-scanner-stream?template=${scanTemplate}&pages=${pages}&num_questions=${nq}&scan_mode=${scanMode}`,
         { method: 'POST' }
       );
 
@@ -1417,40 +1957,22 @@ const OMRScanner = () => {
             if (msg.type === 'result') {
               const omrData = msg.data;
               received++;
-              const { score, total, percentage, details } = grade(omrData.answers || {}, selectedExam?.keys || {}, selectedExam?.weights || {});
-              const student = findStudentByDetectedId(students, omrData.student_id);
+              const gradePayload = grade(omrData.answers || {}, selectedExam?.keys || {}, selectedExam?.weights || {});
+              const manualMap2 = getManualStudentMap();
+              const result = buildScanResultPayload(
+                omrData,
+                gradePayload,
+                manualMap2,
+                '',
+                'scanner stream scan'
+              );
               const newItem = {
                 id: nextId.current++,
                 file: null,
                 loading: false,
                 fromScanner: true,
                 page: omrData.page || received,
-                result: {
-                  examId: selectedExamId,
-                  examTitle: selectedExam?.title || '',
-                  studentId: omrData.student_id,
-                  detectedStudentId: (omrData.student_id ?? '').toString().trim(),
-                  normalizedDetectedStudentId: normalizeStudentId(omrData.student_id),
-                  studentName: student?.name || 'طالب غير معرف',
-                  studentGrade: student ? (student.grade || student.classroom || '') : '',
-                  phone: student?.phone || '',
-                  score, total, percentage, details,
-                  confidence: omrData.confidence || {},
-                  needsReviewQuestions: omrData.needs_review_questions || [],
-                  reviewReasons: omrData.review_reasons || {},
-                  adaptiveThresholds: omrData.adaptive_thresholds || {},
-                  decisionStatus: omrData.decision_status || 'REVIEW_REQUIRED',
-                  qualityFlags: omrData.quality_flags || [],
-                  detectedNumQuestions: omrData.detected_num_questions ?? null,
-                  qualityScore: omrData.quality_score ?? 0,
-                  unstableQuestions: omrData.unstable_questions || [],
-                  averageConfidence: omrData.average_confidence || 0,
-                  mismatchQuestions: omrData.double_pass_mismatch_questions || [],
-                  systemViewImage: omrData.system_view_image || '',
-                  reviewRois: omrData.review_rois || {},
-                  audit: [{ action: 'scan', at: new Date().toISOString(), note: 'scanner stream scan' }],
-                  timestamp: new Date().toISOString()
-                },
+                result,
                 error: null,
                 confirmed: false,
               };
@@ -1488,6 +2010,10 @@ const OMRScanner = () => {
   const handleConfirm = async (itemId) => {
     const item = items.find(it => it.id === itemId);
     if (!item?.result) return;
+    if (sheetNeedsStudentPick(item)) {
+      alert('اختر اسم الطالب لهذه الورقة قبل الاعتماد.');
+      return;
+    }
     const reviewCount = item.result.needsReviewQuestions?.length || 0;
     if (item.result.decisionStatus === 'REJECTED_QUALITY') {
       alert('لا يمكن اعتماد هذه الورقة: الحالة مرفوضة جودة. أعد المسح أو راجع الصورة الأصلية.');
@@ -1512,18 +2038,55 @@ const OMRScanner = () => {
         }
       ],
     };
-    // Build a stable, deterministic id so upsert works correctly (same student+exam = same record).
-    const stableId = `omr_${approved.examId || 'noexam'}_${(approved.studentId || 'unknown').replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`;
+    const recordKey = normalizeStudentId(approved.nationalId || approved.studentId || 'unknown');
+    const stableId = `omr_${approved.examId || 'noexam'}_${recordKey || 'unknown'}`;
     const toSave = {
       ...approved,
       id: approved.id || stableId,
-      // Strip large base64 blobs to keep Supabase rows lean
-      systemViewImage: undefined,
+      // نحذف reviewRois (قطع base64 ضخمة لكل سؤال) ونُبقي systemViewImage لعرض
+      // الورقة في «كشف المعتمدين» — سيُسلَّمها slimOmrResult كما هي.
       reviewRois: undefined,
     };
-    await saveOmrResult(toSave);
+    try {
+      await saveOmrResult(toSave);
+    } catch (e) {
+      alert(`تعذّر حفظ الورقة بسبب مشكلة في الاتصال بالإنترنت. حاول الاعتماد مرة أخرى.\n${e?.message || e}`);
+      return;
+    }
     setItems(prev => prev.map(it => it.id === itemId ? { ...it, confirmed: true, result: approved } : it));
   };
+
+  /** يحفظ مجموعة أوراق واحدة تلو الأخرى؛ الفشل في ورقة لا يوقف البقية */
+  const saveApprovedBatch = async (list, note) => {
+    const savedIds = new Set();
+    const failed = [];
+    for (const it of list) {
+      const approved = {
+        ...it.result,
+        approved: true,
+        confirmed: true,
+        approvedAt: new Date().toISOString(),
+        audit: [...(it.result.audit || []), { action: 'approve', at: new Date().toISOString(), note }],
+      };
+      const recordKey = normalizeStudentId(approved.nationalId || approved.studentId || 'unknown');
+      const stableId = `omr_${approved.examId || 'noexam'}_${recordKey || 'unknown'}`;
+      try {
+        await saveOmrResult({ ...approved, id: approved.id || stableId, reviewRois: undefined });
+        savedIds.add(it.id);
+      } catch (e) {
+        failed.push({ item: it, message: e?.message || String(e) });
+      }
+    }
+    setItems(prev => prev.map(it => (savedIds.has(it.id) ? { ...it, confirmed: true } : it)));
+    return { saved: savedIds.size, failed };
+  };
+
+  const failedSummary = (failed) =>
+    failed.length
+      ? `\n\nتعذّر حفظ ${failed.length} ورقة بسبب الاتصال بالإنترنت:\n` +
+        failed.slice(0, 10).map(f => `• ${f.item.result?.studentName || f.item.file?.name || 'ورقة'}`).join('\n') +
+        `\n\nاضغط «اعتماد» مرة أخرى لإعادة المحاولة؛ الأوراق المحفوظة لن تتكرر.`
+      : '';
 
   const handleUnconfirm = (itemId) => {
     const reason = window.prompt('سبب إلغاء الاعتماد (إلزامي):');
@@ -1558,36 +2121,22 @@ const OMRScanner = () => {
       !it.error &&
       !it.confirmed &&
       (it.result.needsReviewQuestions?.length || 0) === 0 &&
-      it.result.decisionStatus !== 'REJECTED_QUALITY'
+      it.result.decisionStatus !== 'REJECTED_QUALITY' &&
+      !sheetNeedsStudentPick(it)
     );
     const skipped = items.filter(it =>
       it.result &&
       !it.error &&
       !it.confirmed &&
-      ((it.result.needsReviewQuestions?.length || 0) > 0 || it.result.decisionStatus === 'REJECTED_QUALITY')
+      ((it.result.needsReviewQuestions?.length || 0) > 0 || it.result.decisionStatus === 'REJECTED_QUALITY' || sheetNeedsStudentPick(it))
     );
-    for (const it of toConfirm) {
-      const approved = {
-        ...it.result,
-        approved: true,
-        confirmed: true,
-        approvedAt: new Date().toISOString(),
-        audit: [...(it.result.audit || []), { action: 'approve', at: new Date().toISOString(), note: 'bulk safe approve' }],
-      };
-      const stableId = `omr_${approved.examId || 'noexam'}_${(approved.studentId || 'unknown').replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`;
-      const toSave = {
-        ...approved,
-        id: approved.id || stableId,
-        systemViewImage: undefined,
-        reviewRois: undefined,
-      };
-      await saveOmrResult(toSave);
-    }
-    setItems(prev => prev.map(it => (
-      toConfirm.some(c => c.id === it.id) ? { ...it, confirmed: true } : it
-    )));
-    if (skipped.length > 0) {
-      alert(`تم اعتماد ${toConfirm.length} ورقة آمنة، وتخطي ${skipped.length} ورقة تحتاج مراجعة.`);
+    const { saved, failed } = await saveApprovedBatch(toConfirm, 'bulk safe approve');
+    if (skipped.length > 0 || failed.length > 0) {
+      alert(
+        `تم اعتماد ${saved} ورقة` +
+        (skipped.length ? `، وتخطي ${skipped.length} ورقة تحتاج مراجعة.` : '.') +
+        failedSummary(failed)
+      );
     }
   };
 
@@ -1597,28 +2146,18 @@ const OMRScanner = () => {
       !it.error &&
       !it.confirmed &&
       (it.result.needsReviewQuestions?.length || 0) > 0 &&
-      it.result.decisionStatus !== 'REJECTED_QUALITY'
+      it.result.decisionStatus !== 'REJECTED_QUALITY' &&
+      !sheetNeedsStudentPick(it)
     );
     if (toConfirmReviewed.length === 0) return;
 
     const ok = window.confirm(`سيتم اعتماد ${toConfirmReviewed.length} ورقة تحتاج مراجعة. تأكد أنك راجعتها يدويًا قبل المتابعة.`);
     if (!ok) return;
 
-    for (const it of toConfirmReviewed) {
-      const approved = {
-        ...it.result,
-        approved: true,
-        confirmed: true,
-        approvedAt: new Date().toISOString(),
-        audit: [...(it.result.audit || []), { action: 'approve', at: new Date().toISOString(), note: 'bulk reviewed approve' }],
-      };
-      const stableId = `omr_${approved.examId || 'noexam'}_${(approved.studentId || 'unknown').replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`;
-      await saveOmrResult({ ...approved, id: approved.id || stableId, systemViewImage: undefined, reviewRois: undefined });
+    const { saved, failed } = await saveApprovedBatch(toConfirmReviewed, 'bulk reviewed approve');
+    if (failed.length > 0) {
+      alert(`تم اعتماد ${saved} ورقة.` + failedSummary(failed));
     }
-
-    setItems(prev => prev.map(it => (
-      toConfirmReviewed.some(c => c.id === it.id) ? { ...it, confirmed: true } : it
-    )));
   };
 
   const handleRemove = (itemId) => setItems(prev => prev.filter(it => it.id !== itemId));
@@ -1638,7 +2177,8 @@ const OMRScanner = () => {
 
   const handleSendWhatsapp = async (item) => {
     try {
-      const res = await fetch(`${WHATSAPP_API_BASE}/send-result`, {
+      const waBase = await getWhatsAppApiBase();
+      const res = await fetch(`${waBase}/send-result`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: item.result.phone, result: item.result })
@@ -1656,7 +2196,7 @@ const OMRScanner = () => {
       if (it.id !== itemId || !it.result) return it;
       if (it.confirmed || it.result.decisionStatus === 'REJECTED_QUALITY') return it;
       const details = { ...it.result.details };
-      const correct = selectedExam?.keys?.[qNum] || '';
+      const correct = itemExam(it)?.keys?.[qNum] || '';
       const oldValue = details[qNum]?.student_answer || '-';
       details[qNum] = { student_answer: newAnswer, correct_option: correct, is_correct: newAnswer === correct };
       const qInt = parseInt(qNum, 10);
@@ -1705,17 +2245,96 @@ const OMRScanner = () => {
     setUnknownStudentModal({
       open: true,
       itemId,
+      detectedId: item.result.detectedStudentId || item.result.studentId || '',
       initialValues: {
-        studentName: item.result.studentName === 'طالب غير معرف' ? '' : (item.result.studentName || ''),
+        studentName: isUnknownStudentName(item.result.studentName) ? '' : (item.result.studentName || ''),
         studentId: item.result.detectedStudentId || item.result.studentId || '',
         studentGrade: item.result.studentGrade || '',
       },
     });
   };
 
+  const applyStudentToSheet = (itemId, student, sourceNote) => {
+    if (!student) return;
+    const nationalRaw = String(getStudentNationalId(student) || student.studentId || student.id || '').trim();
+    const seat = getStudentSeatNumber(student);
+    const name = String(student.name || '').trim();
+    if (!name) return;
+    const targetItem = items.find((it) => it.id === itemId);
+
+    setItems((prev) => prev.map((it) => {
+      if (it.id !== itemId || !it.result) return it;
+      return {
+        ...it,
+        result: {
+          ...it.result,
+          assignedStudentId: student.id,
+          studentName: name,
+          nationalId: nationalRaw,
+          studentId: nationalRaw || String(student.id || ''),
+          studentGrade: student.grade || student.classroom || it.result.studentGrade || '',
+          seatNumber: seat || it.result.seatNumber || '',
+          phone: student.phone || it.result.phone || '',
+          audit: [
+            ...(it.result.audit || []),
+            {
+              ts: new Date().toISOString(),
+              action: 'edit',
+              user: 'المصحح (اختيار طالب)',
+              details: sourceNote || `تم اختيار الطالب: ${name}`,
+            },
+          ],
+        },
+      };
+    }));
+
+    const currentMap = getManualStudentMap();
+    const mapEntry = {
+      studentName: name,
+      studentId: nationalRaw,
+      nationalId: nationalRaw,
+      studentRecordId: student.id,
+      studentGrade: student.grade || student.classroom || '',
+      seatNumber: seat || '',
+      phone: student.phone || '',
+      updatedAt: new Date().toISOString(),
+    };
+    const detectedKey = normalizeStudentId(targetItem?.result?.detectedStudentId || targetItem?.result?.studentId || '');
+    if (detectedKey) currentMap[detectedKey] = mapEntry;
+    if (targetItem?.fingerprint) currentMap[targetItem.fingerprint] = mapEntry;
+    saveManualStudentMap(currentMap);
+  };
+
+  const handleAssignStudent = (itemId, student) => {
+    applyStudentToSheet(itemId, student, `تم اختيار الطالب من القائمة: ${student?.name || ''}`);
+  };
+
   const handleSaveUnknownStudent = async ({ studentName, studentId, studentGrade }) => {
-    const normalizedInputId = normalizeStudentId(studentId);
+    const nationalRaw = String(studentId || '').trim();
+    const normalizedInputId = normalizeStudentId(nationalRaw);
     const targetItem = items.find(it => it.id === unknownStudentModal.itemId);
+    const existingStudent = findStudentByDetectedId(students, nationalRaw);
+
+    const studentToPersist = existingStudent
+      ? {
+          ...existingStudent,
+          name: studentName,
+          grade: studentGrade || existingStudent.grade || '',
+          nationalId: nationalRaw || existingStudent.nationalId || existingStudent.national_id || '',
+          national_id: nationalRaw || existingStudent.national_id || existingStudent.nationalId || '',
+        }
+      : {
+          id: `${Date.now()}${Math.floor(Math.random() * 10000)}`,
+          name: studentName,
+          nationalId: nationalRaw,
+          national_id: nationalRaw,
+          seatNumber: '',
+          seat_number: '',
+          grade: studentGrade || '',
+          class: '',
+          committee: '',
+          phone: '',
+        };
 
     setItems(prev => prev.map(it => {
       if (it.id !== unknownStudentModal.itemId || !it.result) return it;
@@ -1724,7 +2343,9 @@ const OMRScanner = () => {
         result: {
           ...it.result,
           studentName,
-          studentId,
+          assignedStudentId: studentToPersist.id,
+          nationalId: nationalRaw,
+          studentId: nationalRaw,
           studentGrade,
           normalizedDetectedStudentId: normalizedInputId || it.result.normalizedDetectedStudentId || '',
           audit: [
@@ -1733,66 +2354,18 @@ const OMRScanner = () => {
               ts: new Date().toISOString(),
               action: 'edit',
               user: 'المصحح (تعيين طالب يدوي)',
-              details: `تم تعيين الطالب يدوياً: ${studentName} (ID: ${studentId}${studentGrade ? `، الصف: ${studentGrade}` : ''})`
+              details: `تم تعيين الطالب يدوياً: ${studentName} (هوية: ${nationalRaw}${studentGrade ? `، الصف: ${studentGrade}` : ''})`
             }
           ],
         }
       };
     }));
 
-    const existingStudent = students.find((s) => {
-      const seat = normalizeStudentId(s.seatNumber || s.seat_number);
-      const natId = normalizeStudentId(s.nationalId || s.national_id);
-      const stId = normalizeStudentId(s.studentId || s.student_id);
-      const dbId = normalizeStudentId(s.id);
-      return (
-        (normalizedInputId && seat === normalizedInputId) ||
-        (normalizedInputId && natId === normalizedInputId) ||
-        (normalizedInputId && stId === normalizedInputId) ||
-        (normalizedInputId && dbId === normalizedInputId)
-      );
-    });
-
-    const studentToPersist = existingStudent
-      ? {
-          ...existingStudent,
-          name: studentName,
-          grade: studentGrade || existingStudent.grade || '',
-          seatNumber: existingStudent.seatNumber || existingStudent.seat_number || studentId,
-          seat_number: existingStudent.seat_number || existingStudent.seatNumber || studentId,
-          studentId: existingStudent.studentId || existingStudent.student_id || studentId,
-          student_id: existingStudent.student_id || existingStudent.studentId || studentId,
-        }
-      : {
-          id: studentId,
-          name: studentName,
-          seatNumber: studentId,
-          seat_number: studentId,
-          studentId: studentId,
-          student_id: studentId,
-          nationalId: '',
-          grade: studentGrade || '',
-          class: '',
-          committee: '',
-          phone: '',
-        };
-
     try {
       await saveStudent(studentToPersist);
       setStudents(prev => {
         const prevList = Array.isArray(prev) ? prev : [];
-        const idx = prevList.findIndex((s) => {
-          const seat = normalizeStudentId(s.seatNumber || s.seat_number);
-          const natId = normalizeStudentId(s.nationalId || s.national_id);
-          const stId = normalizeStudentId(s.studentId || s.student_id);
-          const dbId = normalizeStudentId(s.id);
-          return (
-            (normalizedInputId && seat === normalizedInputId) ||
-            (normalizedInputId && natId === normalizedInputId) ||
-            (normalizedInputId && stId === normalizedInputId) ||
-            (normalizedInputId && dbId === normalizedInputId)
-          );
-        });
+        const idx = prevList.findIndex((s) => s.id === studentToPersist.id);
         if (idx >= 0) {
           const updated = [...prevList];
           updated[idx] = { ...updated[idx], ...studentToPersist };
@@ -1805,16 +2378,19 @@ const OMRScanner = () => {
       alert('تم تعديل الورقة الحالية، لكن تعذر حفظ الطالب في قاعدة البيانات.');
     }
 
-    if (targetItem?.fingerprint) {
-      const currentMap = getManualStudentMap();
-      currentMap[targetItem.fingerprint] = {
-        studentName,
-        studentId,
-        studentGrade: studentGrade || '',
-        updatedAt: new Date().toISOString(),
-      };
-      saveManualStudentMap(currentMap);
-    }
+    const currentMap = getManualStudentMap();
+    const mapEntry = {
+      studentName,
+      studentId: nationalRaw,
+      nationalId: nationalRaw,
+      studentRecordId: studentToPersist.id,
+      studentGrade: studentGrade || '',
+      seatNumber: studentToPersist.seatNumber || '',
+      updatedAt: new Date().toISOString(),
+    };
+    if (normalizedInputId) currentMap[normalizedInputId] = mapEntry;
+    if (targetItem?.fingerprint) currentMap[targetItem.fingerprint] = mapEntry;
+    saveManualStudentMap(currentMap);
 
     setUnknownStudentModal({
       open: false,
@@ -1835,9 +2411,36 @@ const OMRScanner = () => {
     const s = totalSec % 60;
     return `${m}:${String(s).padStart(2, '0')}`;
   };
+  const examGroups = useMemo(() => {
+    if (!multiMode) return [];
+    const map = new Map();
+    for (const it of items) {
+      const id = String(it.result?.examId || it.examId || '');
+      if (!id) continue;
+      const g = map.get(id) || { id, title: examsById.get(id)?.title || it.result?.examTitle || id, count: 0, confirmed: 0 };
+      g.count += 1;
+      if (it.confirmed) g.confirmed += 1;
+      map.set(id, g);
+    }
+    return [...map.values()].sort((a, b) => String(a.title).localeCompare(String(b.title), 'ar'));
+  }, [items, multiMode, examsById]);
+  const examPickCount = items.filter((it) => it.examPick && !it.loading).length;
+  const groupExam = multiMode && groupFilter !== 'all' && groupFilter !== 'pick'
+    ? examsById.get(groupFilter) || null
+    : null;
+  const printExam = multiMode ? groupExam : selectedExam;
+  const itemsInGroup = (list) => {
+    if (!multiMode || groupFilter === 'all') return list;
+    if (groupFilter === 'pick') return list.filter((it) => it.examPick);
+    return list.filter((it) => String(it.result?.examId || it.examId || '') === groupFilter);
+  };
+
   const sortedItems = useMemo(() => {
     // Group "needs review" sheets together at the top for faster manual workflow.
-    return [...items].sort((a, b) => {
+    return [...itemsInGroup(items)].sort((a, b) => {
+      const aPick = a.examPick ? 1 : 0;
+      const bPick = b.examPick ? 1 : 0;
+      if (aPick !== bPick) return bPick - aPick;
       const aReview = (!a.confirmed && !a.error && (a.result?.needsReviewQuestions?.length || 0) > 0) ? 1 : 0;
       const bReview = (!b.confirmed && !b.error && (b.result?.needsReviewQuestions?.length || 0) > 0) ? 1 : 0;
       if (aReview !== bReview) return bReview - aReview;
@@ -1848,7 +2451,8 @@ const OMRScanner = () => {
 
       return (a.id || 0) - (b.id || 0);
     });
-  }, [items]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, multiMode, groupFilter]);
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 pb-24">
@@ -1891,8 +2495,18 @@ const OMRScanner = () => {
               <Trash2 size={15} /> مسح الكل
             </button>
           )}
-          <button 
-            type="button" 
+          <button
+            type="button"
+            onClick={refreshStudents}
+            disabled={isRefreshingStudents}
+            title={`قائمة الطلاب الحالية (${students.length}). اضغط لإعادة التحميل وإعادة تطابق النتائج الحالية.`}
+            className="flex items-center gap-2 px-4 py-2 text-sm text-emerald-700 hover:bg-emerald-50 rounded-xl font-bold transition-all border border-emerald-100 disabled:opacity-60"
+          >
+            {isRefreshingStudents ? <Loader2 size={15} className="animate-spin" /> : <Users size={15} />}
+            {isRefreshingStudents ? 'جاري التحديث...' : `تحديث الطلاب (${students.length})`}
+          </button>
+          <button
+            type="button"
             onClick={() => setShowCalibrationModal(true)}
             className="flex items-center gap-2 px-4 py-2 text-sm text-indigo-600 hover:bg-indigo-50 rounded-xl font-bold transition-all border border-indigo-100"
           >
@@ -1911,10 +2525,28 @@ const OMRScanner = () => {
 
       {/* ── Exam Selector ── */}
       <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-3">
-        <label className="flex items-center gap-2 text-sm font-bold text-gray-700">
-          <ListFilter size={16} className="text-indigo-500" /> تحديد الاختبار
-        </label>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <label className="flex items-center gap-2 text-sm font-bold text-gray-700">
+            <ListFilter size={16} className="text-indigo-500" /> تحديد الاختبار
+          </label>
+          <div className="flex p-1 bg-slate-100 rounded-xl text-xs font-black">
+            <button
+              type="button"
+              onClick={() => { setMultiMode(false); setGroupFilter('all'); }}
+              className={`px-3 py-1.5 rounded-lg transition ${!multiMode ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500'}`}
+            >
+              اختبار واحد
+            </button>
+            <button
+              type="button"
+              onClick={() => setMultiMode(true)}
+              className={`px-3 py-1.5 rounded-lg transition ${multiMode ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500'}`}
+            >
+              رفع مجمّع (عدة صفوف ومواد)
+            </button>
+          </div>
+        </div>
+        <div className={`grid gap-3 ${multiMode ? 'grid-cols-2' : 'grid-cols-3'}`}>
           <select value={filterStage}
             onChange={e => { setFilterStage(e.target.value); setFilterGrade('All'); }}
             className="p-3 bg-slate-50 border border-gray-200 rounded-xl font-bold text-sm focus:ring-2 focus:ring-indigo-400">
@@ -1928,6 +2560,7 @@ const OMRScanner = () => {
             <option value="All">كل الصفوف</option>
             {filterGrades.map(g => <option key={g} value={g}>{g}</option>)}
           </select>
+          {!multiMode && (
           <select value={selectedExamId} onChange={e => setSelectedExamId(e.target.value)}
             className="p-3 bg-slate-50 border border-gray-200 rounded-xl font-bold text-sm focus:ring-2 focus:ring-indigo-400">
             {visibleExams.length === 0
@@ -1935,8 +2568,44 @@ const OMRScanner = () => {
               : visibleExams.map(ex => <option key={ex.id} value={ex.id}>{ex.title || ex.subject} ({ex.qCount} س)</option>)
             }
           </select>
+          )}
         </div>
-        {selectedExam && (
+        {multiMode && (
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-bold text-slate-500">
+                ارفع كل الأوراق مرة واحدة؛ يتم تحديد اختبار كل ورقة تلقائياً من رمز QR وصف الطالب.
+                الاختبارات المشمولة: <span className="text-indigo-600">{multiPool.length}</span> من {visibleExams.length}
+              </p>
+              <div className="flex gap-2 text-[11px] font-black">
+                <button type="button" onClick={() => setMultiExcluded(new Set())} className="px-2 py-1 rounded-lg bg-indigo-50 text-indigo-600">تحديد الكل</button>
+                <button type="button" onClick={() => setMultiExcluded(new Set(visibleExams.map((e) => String(e.id))))} className="px-2 py-1 rounded-lg bg-slate-100 text-slate-500">إلغاء الكل</button>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto p-1">
+              {visibleExams.map((ex) => {
+                const id = String(ex.id);
+                const on = !multiExcluded.has(id);
+                return (
+                  <label key={id} className={`flex items-center gap-2 p-2.5 rounded-xl border cursor-pointer text-xs font-bold transition ${on ? 'border-indigo-200 bg-indigo-50/60 text-slate-800' : 'border-slate-200 bg-white text-slate-400'}`}>
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => setMultiExcluded((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(id)) next.delete(id); else next.add(id);
+                        return next;
+                      })}
+                    />
+                    <span className="flex-1 truncate">{ex.title || ex.subject}</span>
+                    <span className="text-[10px] text-slate-400 shrink-0">{examGradeList(ex).join('، ') || ex.stage || ''} · {omrScanQuestionCount(ex, ex.qCount || 30)} س</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {!multiMode && selectedExam && (
           <div className="flex gap-2 flex-wrap">
             {selectedExam.stage && <span className="px-2 py-0.5 bg-violet-50 text-violet-600 text-xs font-bold rounded-lg">{selectedExam.stage}</span>}
             {selectedExam.grade && <span className="px-2 py-0.5 bg-blue-50  text-blue-600  text-xs font-bold rounded-lg">{selectedExam.grade}</span>}
@@ -1962,10 +2631,10 @@ const OMRScanner = () => {
             <Upload size={36} />
           </div>
           <div className="text-center relative z-10">
-            <h3 className="text-xl font-black text-slate-800 mb-2">مركز رفع الصور الرقمي</h3>
+            <h3 className="text-xl font-black text-slate-800 mb-2">{multiMode ? 'رفع جميع الأوراق (مجمّع)' : 'رفع صور الماسح'}</h3>
             <p className="text-[11px] font-bold text-slate-400 uppercase tracking-widest leading-relaxed">
-              اسحب الملفات هنا أو اضغط للاختيار<br />
-              <span className="text-indigo-500">دعم كامل لـ PNG · JPG · معالجة دفعات متعددة</span>
+              امسح الأوراق بالسكانر ثم ارفع الملفات هنا<br />
+              <span className="text-indigo-500">PNG · JPG · BMP — محاذاة تلقائية كالمسح المباشر</span>
             </p>
           </div>
         </div>
@@ -2045,30 +2714,163 @@ const OMRScanner = () => {
         batchTimer={batchTimer}
         onConfirmAll={handleConfirmAll}
         onConfirmReviewed={handleConfirmReviewed}
-        onPrintConfirmed={() => printResultSlip(dedupeConfirmedForPrint(items.filter(it => it.confirmed && it.result)), selectedExam)}
+        onPrintConfirmed={() => {
+          if (multiMode && !printExam) { alert('اختر اختباراً من شريط المجموعات أسفل الصفحة لطباعة نتائجه.'); return; }
+          printResultSlip(
+            dedupeConfirmedForPrint(itemsInGroup(items).filter((it) => it.confirmed && it.result)),
+            printExam
+          );
+        }}
+        onPrintAggregated={() => {
+          if (multiMode && !printExam) { alert('اختر اختباراً من شريط المجموعات أسفل الصفحة لطباعة كشفه المجمّع.'); return; }
+          const deduped = dedupeConfirmedForPrint(itemsInGroup(items).filter((it) => it.confirmed && it.result));
+          const rows = resultsFromScanItems(deduped);
+          const first = rows[0];
+          printAggregatedGradesSheet(rows, {
+            classGrade: resolveResultClass(first, printExam),
+            subject: resolveResultSubject(first, printExam),
+            examTitle: printExam?.title || '',
+            examStage: printExam?.stage || '',
+            sheetTitle: 'كشف درجات مجمع',
+          });
+        }}
         safeCount={safePendingCount}
         reviewCount={reviewPendingCount}
         confirmedCount={confirmedCount}
       />
 
+      {/* ── Multi-exam groups ── */}
+      {multiMode && items.length > 0 && (
+        <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm space-y-3">
+          <div className="flex flex-wrap gap-2">
+            {[
+              { id: 'all', title: 'كل الأوراق', count: items.length },
+              ...(examPickCount ? [{ id: 'pick', title: 'بانتظار تحديد الاختبار', count: examPickCount, warn: true }] : []),
+              ...examGroups,
+            ].map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => setGroupFilter(g.id)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-black border transition ${
+                  groupFilter === g.id
+                    ? (g.warn ? 'bg-amber-500 text-white border-amber-500' : 'bg-indigo-600 text-white border-indigo-600')
+                    : (g.warn ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100')
+                }`}
+              >
+                {g.title} ({g.count}{g.confirmed != null ? ` · معتمد ${g.confirmed}` : ''})
+              </button>
+            ))}
+          </div>
+          {examPickCount > 0 && (
+            <div className="flex flex-wrap items-center gap-2 p-3 rounded-xl bg-amber-50 border border-amber-100">
+              <AlertTriangle size={16} className="text-amber-600" />
+              <span className="text-xs font-bold text-amber-800">
+                {examPickCount} ورقة لم يُحدَّد اختبارها تلقائياً. اختر الاختبار لكل ورقة، أو طبّق اختباراً واحداً عليها جميعاً:
+              </span>
+              <select
+                value={bulkPickExamId}
+                onChange={(e) => setBulkPickExamId(e.target.value)}
+                className="p-2 bg-white border border-amber-200 rounded-lg text-xs font-bold"
+              >
+                <option value="">— اختر الاختبار —</option>
+                {multiPool.map((ex) => <option key={ex.id} value={ex.id}>{ex.title || ex.subject}</option>)}
+              </select>
+              <button
+                type="button"
+                disabled={!bulkPickExamId}
+                onClick={handleAssignExamToPending}
+                className="px-3 py-2 rounded-lg bg-amber-500 text-white text-xs font-black disabled:opacity-40"
+              >
+                تطبيق على الأوراق المعلّقة
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Sheet Cards ── */}
       <div className="space-y-3">
-        {sortedItems.map(item => (
-          <SheetCard
-            key={item.id}
-            item={item}
-            exam={selectedExam}
-            onConfirm={handleConfirm}
-            onUnconfirm={handleUnconfirm}
-            onRemove={handleRemoveWithCleanup}
-            onAnswerEdit={handleAnswerEdit}
-            onSendWhatsapp={handleSendWhatsapp}
-            onPrint={(it) => printResultSlip([it], selectedExam)}
-            onShowAudit={handleShowAudit}
-            onPreview={(it) => setPreviewItem(it)}
-            onResolveUnknown={handleResolveUnknown}
-          />
-        ))}
+        {sortedItems.map(item => {
+          if (multiMode && item.examPick && !item.loading) {
+            const cands = item.examPick.candidateIds.map((id) => examsById.get(id)).filter(Boolean);
+            return (
+              <div key={item.id} className="p-4 rounded-2xl border-2 border-amber-200 bg-amber-50/40 flex flex-col sm:flex-row gap-4">
+                {(item.examPick.previewImage || item.previewUrl) && (
+                  <img
+                    src={item.examPick.previewImage || item.previewUrl}
+                    alt=""
+                    className="w-full sm:w-40 h-40 object-contain rounded-xl bg-white border border-amber-100 cursor-pointer"
+                    onClick={() => setPreviewItem(item)}
+                  />
+                )}
+                <div className="flex-1 space-y-2">
+                  <div className="text-sm font-black text-slate-800">
+                    {item.examPick.studentName || item.file?.name || 'ورقة'}
+                    {item.examPick.studentGrade && <span className="mr-2 text-xs text-slate-500">({item.examPick.studentGrade})</span>}
+                  </div>
+                  <div className="text-xs font-bold text-amber-700">{item.examPick.reason}</div>
+                  <div className="flex flex-wrap gap-2">
+                    {cands.map((ex) => (
+                      <button
+                        key={ex.id}
+                        type="button"
+                        onClick={() => handlePickExam(item.id, ex.id)}
+                        className="px-3 py-1.5 rounded-lg bg-white border border-indigo-200 text-indigo-700 text-xs font-black hover:bg-indigo-600 hover:text-white transition"
+                      >
+                        {ex.title || ex.subject}
+                      </button>
+                    ))}
+                  </div>
+                  <button type="button" onClick={() => handleRemoveWithCleanup(item.id)} className="text-[11px] font-bold text-rose-500 hover:underline">
+                    حذف الورقة
+                  </button>
+                </div>
+              </div>
+            );
+          }
+          const ex = itemExam(item);
+          const card = (
+            <SheetCard
+              key={item.id}
+              item={item}
+              exam={ex}
+              onConfirm={handleConfirm}
+              onUnconfirm={handleUnconfirm}
+              onRemove={handleRemoveWithCleanup}
+              onAnswerEdit={handleAnswerEdit}
+              onSendWhatsapp={handleSendWhatsapp}
+              onPrint={(it) => printResultSlip([it], itemExam(it))}
+              onShowAudit={handleShowAudit}
+              onPreview={(it) => setPreviewItem(it)}
+              onResolveUnknown={handleResolveUnknown}
+              onAssignStudent={handleAssignStudent}
+              studentOptions={multiMode ? studentOptionsFor(ex) : wataniaStudentOptions}
+              excludeStudentIds={assignedStudentIds}
+            />
+          );
+          if (!multiMode || !item.result) return card;
+          return (
+            <div key={item.id} className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2 px-2 text-xs font-bold text-slate-500">
+                <span className="px-2 py-0.5 rounded-lg bg-indigo-50 text-indigo-700">{ex?.title || item.result.examTitle || 'اختبار غير معروف'}</span>
+                {!item.confirmed && item.file && (
+                  <select
+                    value=""
+                    onChange={(e) => e.target.value && handlePickExam(item.id, e.target.value)}
+                    className="p-1 bg-white border border-slate-200 rounded-lg text-[11px] font-bold"
+                  >
+                    <option value="">تغيير الاختبار…</option>
+                    {multiPool.filter((x) => String(x.id) !== String(ex?.id)).map((x) => (
+                      <option key={x.id} value={x.id}>{x.title || x.subject}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+              {card}
+            </div>
+          );
+        })}
       </div>
 
       {/* ── Audit Trail Modal ── */}
@@ -2094,6 +2896,8 @@ const OMRScanner = () => {
         onClose={() => setUnknownStudentModal(prev => ({ ...prev, open: false }))}
         onSave={handleSaveUnknownStudent}
         initialValues={unknownStudentModal.initialValues}
+        students={students}
+        detectedId={unknownStudentModal.detectedId || ''}
       />
 
       {previewItem && (

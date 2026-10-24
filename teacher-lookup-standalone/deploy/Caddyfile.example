@@ -1,0 +1,10 @@
+# Caddy — دومين مستقل لاستعلام المعلمين (بدون كلمة مرور)
+# مثال: teacher.northelite0.com
+
+teacher.northelite0.com {
+	root * /opt/teacher-lookup/dist
+	encode gzip zstd
+
+	try_files {path} /index.html
+	file_server
+}

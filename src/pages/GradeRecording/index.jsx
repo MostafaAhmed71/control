@@ -1,6 +1,15 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Search, Trophy, User, Users as UsersIcon, CheckCircle2, Filter, FileText, Download, TrendingUp, BookOpen, BarChart2, X, Calendar, Clock, Loader2, Trash2, AlertTriangle, Eraser, PieChart } from 'lucide-react';
-import { getStudents, getOmrResults, getOmrExams, saveOmrResult, deleteOmrResult, getAppSettings } from '../../utils/dataService';
+import {
+  getStudents,
+  getOmrResultsForGrading,
+  getOmrExams,
+  saveOmrResult,
+  deleteOmrResult,
+  getAppSettings,
+  isSupabaseQuotaError,
+} from '../../utils/dataService';
+import { findStudentByDetectedId } from '../../utils/studentIdentity';
 import { useToast } from '../../components/Toast';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -64,6 +73,17 @@ const gradeMatches = (studentGrade, filterGrade) => {
   return normalizeGrade(studentGrade) === normalizeGrade(filterGrade);
 };
 
+/** تسمية المادة الموحّدة (عنوان الاختبار أو حقل subject) */
+const examSubjectLabel = (examOrResult) => {
+  if (!examOrResult) return '';
+  return (
+    examOrResult.title ||
+    examOrResult.subject ||
+    examOrResult.examTitle ||
+    ''
+  ).toString().trim();
+};
+
 const getSchoolNameByStage = (stage = '') => {
   const s = String(stage || '').trim();
   if (s === 'ابتدائي' || s === 'الابتدائي') return 'مدارس نخبة الشمال الأهلية والعالمية';
@@ -71,8 +91,116 @@ const getSchoolNameByStage = (stage = '') => {
   return 'مدارس نخبة الشمال الأهلية والعالمية';
 };
 
-const EXPORT_SCALE = Math.min(window.devicePixelRatio || 1, 1.5);
-const yieldToUI = () => new Promise((resolve) => setTimeout(resolve, 0));
+const slugifyFilename = (text = '') =>
+  String(text)
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/[\\/:*?"<>|]/g, '')
+    .slice(0, 80) || 'عام';
+
+/** دقة منخفضة = تصدير أسرع وأقل تجميداً للمتصفح */
+const PDF_CAPTURE_SCALE = 1;
+const PDF_ITEMS_PER_PAGE = 18;
+
+const waitForPaint = (ms = 80) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const waitFrames = async (frames = 2) => {
+  for (let i = 0; i < frames; i++) {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  }
+  await waitForPaint(60);
+};
+
+/** صفحة طباعة واحدة — تُعرض فقط أثناء التصدير لتجنّب آلاف العقد في DOM */
+const PrintableGradePage = ({
+  schoolName,
+  examTitle,
+  sheetTitle,
+  subjectLabel,
+  gradeLabel,
+  academicYear,
+  pageStudents,
+  pageIndex,
+  totalPages,
+  resultIndex,
+}) => (
+  <div
+    id="grade-recording-print-page"
+    className="printable-page bg-white p-12 text-black relative"
+    style={{
+      width: '210mm',
+      height: '297mm',
+      fontFamily: 'Tahoma, Arial, sans-serif',
+      direction: 'rtl',
+      backgroundColor: '#ffffff',
+      color: '#000000',
+    }}
+  >
+    <div className="text-center mb-8 space-y-3">
+      <h1 style={{ fontSize: '22px', fontWeight: 700 }}>{schoolName}</h1>
+      <h2 style={{ fontSize: '18px', fontWeight: 700, borderBottom: '2px solid black', display: 'inline-block', paddingBottom: 8 }}>
+        {examTitle ||
+          (subjectLabel === 'اختبار مجمع'
+            ? 'اختبار محاكي اختبار نافس (اختبار مجمع)'
+            : `اختبار نهاية الدور الأول - الفصل الدراسي الثاني العام الدراسي ${academicYear}`)}
+      </h2>
+      <div style={{ marginTop: 12 }}>
+        <h3 style={{ fontSize: '16px', fontWeight: 700, padding: '10px 24px', border: '2px solid black', display: 'inline-block' }}>
+          {sheetTitle || 'كشف رصد الدرجات'}
+        </h3>
+        {subjectLabel && (
+          <p style={{ fontSize: '15px', fontWeight: 700, marginTop: 8 }}>
+            المادة: {subjectLabel}
+            {gradeLabel && gradeLabel !== 'All' ? ` | الصف: ${gradeLabel}` : ''}
+          </p>
+        )}
+      </div>
+    </div>
+
+    <table style={{ width: '100%', borderCollapse: 'collapse', border: '2px solid black', marginTop: 16 }}>
+      <thead>
+        <tr style={{ backgroundColor: '#f3f4f6' }}>
+          <th style={{ border: '1px solid black', padding: 8, width: 40 }}>م</th>
+          <th style={{ border: '1px solid black', padding: 8 }}>اسم الطالب</th>
+          <th style={{ border: '1px solid black', padding: 8, width: 90 }}>
+            {subjectLabel === 'اختبار مجمع' ? 'الدرجة' : subjectLabel || 'الدرجة'}
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {pageStudents.map((s, idx) => {
+          const sResults = resultIndex[s.id] || {};
+          const res = subjectLabel ? sResults[subjectLabel] : null;
+          const globalIdx = pageIndex * PDF_ITEMS_PER_PAGE + idx + 1;
+          return (
+            <tr key={s.id}>
+              <td style={{ border: '1px solid black', padding: 8, textAlign: 'center' }}>{globalIdx}</td>
+              <td style={{ border: '1px solid black', padding: 8, textAlign: 'center', fontWeight: 700 }}>
+                {s.name || '—'}
+              </td>
+              <td style={{ border: '1px solid black', padding: 8, textAlign: 'center', fontWeight: 700 }}>
+                {res ? `${res.score} / ${res.total}` : '-'}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+
+    <div style={{ position: 'absolute', bottom: 32, left: '50%', transform: 'translateX(-50%)', fontSize: 11, fontWeight: 700, color: '#6b7280' }}>
+      صفحة {pageIndex + 1} من {totalPages}
+    </div>
+
+    {pageIndex === totalPages - 1 && (
+      <div style={{ marginTop: 40, textAlign: 'left', paddingLeft: 48, fontSize: 13, fontWeight: 700 }}>
+        <div style={{ textAlign: 'center', display: 'inline-block' }}>
+          <div style={{ marginBottom: 8 }}>يعتمد مدير المدرسة</div>
+          <div>......................................</div>
+        </div>
+      </div>
+    )}
+  </div>
+);
 
 const GradeRecording = () => {
   const toast = useToast();
@@ -103,6 +231,16 @@ const GradeRecording = () => {
   const [isExporting,       setIsExporting]       = useState(false);
   const [isExportingStats,  setIsExportingStats]  = useState(false);
   const [isZeroing,         setIsZeroing]         = useState(false);
+  /** صفحة واحدة للتصدير: { subjectLabel, pageIndex, totalPages } */
+  const [exportPageRender, setExportPageRender] = useState(null);
+  const [exportStatsRender, setExportStatsRender] = useState(false);
+  const [exportProgress, setExportProgress] = useState({
+    subjectIdx: 0,
+    subjectTotal: 0,
+    label: '',
+    page: 0,
+    pageTotal: 0,
+  });
 
   useEffect(() => { loadData(); }, []);
 
@@ -115,17 +253,43 @@ const GradeRecording = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [sd, rd, ed, cfg] = await Promise.all([getStudents(), getOmrResults(), getOmrExams(), getAppSettings()]);
+      // الطلاب أولاً — لا نربط ظهور القائمة بنجاح جلب نتائج OMR (قد تفشل أو تتأخر)
+      const sd = await getStudents();
       setStudents(sd);
-      setResults(rd);
+
+      const [ed, cfg] = await Promise.all([getOmrExams(), getAppSettings()]);
       setExams(ed);
-      // Extract Hijri year from academicWeight (e.g., '2025/2026' → use as-is, or '1447' directly)
       if (cfg?.academicWeight) {
         const yr = String(cfg.academicWeight).match(/(\d{4})/);
         setAcademicYear(yr ? yr[1] : cfg.academicWeight);
       }
+
+      try {
+        const rd = await getOmrResultsForGrading();
+        setResults(rd);
+        if (rd._partialFetch) {
+          toast.error(
+            `تم تحميل ${rd.length} نتيجة فقط ثم انقطع الاتصال. أعد تحميل الصفحة أو تحقق من الشبكة لعرض الباقي.`,
+            'تحميل جزئي للنتائج'
+          );
+        }
+      } catch (resultsErr) {
+        console.error('GradeRecording OMR results load error:', resultsErr);
+        setResults([]);
+        if (isSupabaseQuotaError(resultsErr)) {
+          toast.error(
+            'تجاوزت مشروع Supabase حد نقل البيانات (Egress). نفّذ migration الجلب الخفيف في SQL Editor، أو رقِّ الخطة، أو انتظر بعد 17 يونيو 2026.',
+            'حصة Supabase'
+          );
+        } else {
+          toast.error(
+            'تم تحميل الطلاب لكن تعذّر جلب نتائج الاختبارات. تحقق من الاتصال أو حجم البيانات.',
+            'تحذير — نتائج OMR'
+          );
+        }
+      }
     } catch (err) {
-      toast.error('فشل تحميل بيانات الدرجات من قاعدة البيانات.', 'خطأ في التحميل');
+      toast.error('فشل تحميل بيانات الطلاب من قاعدة البيانات.', 'خطأ في التحميل');
       console.error('GradeRecording load error:', err);
     } finally {
       setLoading(false);
@@ -133,9 +297,22 @@ const GradeRecording = () => {
   };
 
   /* All unique labels (title || subject) that appear in exams */
+  const resolveExamForResult = (r) => (r?.examId ? exams.find((e) => e.id === r.examId) : null);
+
   const allSubjects = useMemo(() => {
-    return [...new Set(exams.map(e => e.title || e.subject).filter(Boolean))].sort();
-  }, [exams]);
+    const subs = new Set();
+    exams.forEach((e) => {
+      const label = examSubjectLabel(e);
+      if (label) subs.add(label);
+    });
+    results.forEach((r) => {
+      if (r.examId && !resolveExamForResult(r)) return;
+      const exam = resolveExamForResult(r);
+      const label = examSubjectLabel(exam) || examSubjectLabel(r);
+      if (label) subs.add(label);
+    });
+    return [...subs].sort((a, b) => a.localeCompare(b, 'ar'));
+  }, [exams, results]);
   /* Grades for filter */
   const filterGrades = filterStage !== 'All' ? STAGES[filterStage] || [] : [];
   const printSchoolName = getSchoolNameByStage(filterStage);
@@ -143,8 +320,8 @@ const GradeRecording = () => {
   /* Available Dates (from results) */
   const availableDates = useMemo(() => {
     const dateMap = {}; // 'ar-EG string' -> timestamp
-    results.forEach(r => {
-      const exam = exams.find(e => e.id === r.examId);
+    results.forEach((r) => {
+      const exam = resolveExamForResult(r);
       if (!exam) return;
       const ts = r.timestamp || r.scannedAt;
       if (!ts) return;
@@ -163,68 +340,81 @@ const GradeRecording = () => {
     return exams.filter(e => {
       if (filterStage !== 'All' && e.stage !== filterStage) return false;
       if (filterGrade !== 'All' && e.grade !== filterGrade) return false;
-      if (filterSubject !== 'All' && e.subject !== filterSubject) return false;
+      if (filterSubject !== 'All' && examSubjectLabel(e) !== filterSubject) return false;
       return true;
     });
   }, [exams, filterStage, filterGrade, filterSubject]);
 
-  /* Results indexed by a canonical key → subject → best result.
-   * The key is built from the result's studentId which may be a seatNumber.
-   * We index by ALL three possible student identifiers so lookup always works. */
+  /* فهرس النتائج: مفتاح = students.id ← مادة ← أفضل نتيجة */
   const resultIndex = useMemo(() => {
-    // 1. Build a map: every known identifier → student object
-    const studentByAnyId = {};
-    students.forEach(s => {
-      const ids = [
-        (s.id          || '').toString().trim(),
-        (s.seatNumber  || s.seat_number  || '').toString().trim(),
-        (s.nationalId  || s.national_id  || '').toString().trim(),
-      ].filter(Boolean);
-      ids.forEach(id => { studentByAnyId[id] = s; });
-    });
+    const idx = {};
 
-    // 2. Build the main index keyed by student DB-id
-    const idx = {}; // { studentDbId: { subject: result } }
-    results.forEach(r => {
-      const exam = exams.find(e => e.id === r.examId);
-      if (!exam) return;
+    const resultTimestamp = (r) => {
+      const t = r.timestamp || r.scannedAt || r.approvedAt || r.createdAt;
+      const d = t ? new Date(t) : null;
+      return d && !Number.isNaN(d.getTime()) ? d.getTime() : 0;
+    };
 
+    const resolveStudentForResult = (r) => {
+      const candidates = [
+        r.studentId,
+        r.detectedStudentId,
+        r.normalizedDetectedStudentId,
+        r.nationalId,
+        r.national_id,
+      ];
+      for (const c of candidates) {
+        const hit = findStudentByDetectedId(students, c);
+        if (hit) return hit;
+      }
+      return null;
+    };
+
+    results.forEach((r) => {
       if (filterDate !== 'All') {
         const rDate = new Date(r.timestamp || r.scannedAt).toLocaleDateString('ar-EG');
         if (rDate !== filterDate) return;
       }
       if (filterExamId !== 'All' && r.examId !== filterExamId) return;
 
-      // Resolve which student this result belongs to
-      const rStudentIdStr = (r.studentId || '').toString().trim();
-      const matchedStudent = studentByAnyId[rStudentIdStr];
-      const canonicalKey = matchedStudent ? matchedStudent.id : rStudentIdStr;
+      const exam = resolveExamForResult(r);
+      if (r.examId && !exam) return;
 
-      const subject = exam.title || exam.subject || r.examTitle || '؟';
+      const matchedStudent = resolveStudentForResult(r);
+      if (!matchedStudent?.id) return;
+
+      const canonicalKey = matchedStudent.id;
+      const subject = examSubjectLabel(exam) || examSubjectLabel(r) || '؟';
+      if (!subject || subject === '؟') return;
 
       if (!idx[canonicalKey]) idx[canonicalKey] = {};
 
-      if (filterExamId !== 'All') {
-        idx[canonicalKey][subject] = r;
-      } else if (!idx[canonicalKey][subject] || new Date(r.timestamp) > new Date(idx[canonicalKey][subject].timestamp)) {
+      const prev = idx[canonicalKey][subject];
+      if (!prev || filterExamId !== 'All' || resultTimestamp(r) >= resultTimestamp(prev)) {
         idx[canonicalKey][subject] = r;
       }
     });
+
     return idx;
   }, [students, results, exams, filterDate, filterExamId]);
 
+  const studentGradeLabel = (s) =>
+    (s.grade || s.classroom || s.class || '').trim();
+
   /* Filtered students */
   const filteredStudents = useMemo(() => students.filter(s => {
-    const sGrade = (s.grade || s.classroom || '').trim();
+    const sGrade = studentGradeLabel(s);
     const sStage = (s.stage || '').trim();
 
     // ── Stage filter ──
     if (filterStage !== 'All') {
       const stageGrades = STAGES[filterStage] || [];
-      const stageFieldMatch = sStage.replace(/^ال/, '') === filterStage
+      const normStage = sStage.replace(/^ال/, '').trim();
+      const stageFieldMatch =
+        normStage === filterStage
         || sStage === filterStage
         || sStage === `ال${filterStage}`;
-      const gradeInStage = stageGrades.some(sg => gradeMatches(sGrade, sg));
+      const gradeInStage = stageGrades.some((sg) => gradeMatches(sGrade, sg));
       if (!stageFieldMatch && !gradeInStage) return false;
     }
 
@@ -240,11 +430,18 @@ const GradeRecording = () => {
     }
 
     // ── Search filter ──
-    const matchSearch = !searchTerm
-      || s.name.toLowerCase().includes(searchTerm.toLowerCase())
-      || (s.id || '').includes(searchTerm);
+    const name = (s.name || '').toString();
+    const seat = (s.seatNumber || s.seat_number || '').toString();
+    const nat = (s.nationalId || s.national_id || '').toString();
+    const q = searchTerm.toLowerCase();
+    const matchSearch =
+      !searchTerm
+      || name.toLowerCase().includes(q)
+      || (s.id || '').includes(searchTerm)
+      || seat.includes(searchTerm)
+      || nat.includes(searchTerm);
     return matchSearch;
-  }).sort((a, b) => a.name.localeCompare(b.name, 'ar')), [students, filterStage, filterGrade, searchTerm, showOnlyTested, resultIndex]);
+  }).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')), [students, filterStage, filterGrade, searchTerm, showOnlyTested, resultIndex]);
 
   const testedCount = useMemo(() => {
     return filteredStudents.filter(s => resultIndex[s.id] && Object.keys(resultIndex[s.id]).length > 0).length;
@@ -254,6 +451,45 @@ const GradeRecording = () => {
 
   /* Subjects to display in columns */
   const displaySubjects = filterSubject === 'All' ? allSubjects : [filterSubject];
+
+  /** مواد الصف الحالي للتصدير المتعدد (ملف PDF لكل مادة) */
+  const subjectsForBatchExport = useMemo(() => {
+    if (filterSubject !== 'All') return [filterSubject];
+
+    const subs = new Set();
+    exams.forEach((e) => {
+      if (filterStage !== 'All' && e.stage !== filterStage) return;
+      if (filterGrade !== 'All' && e.grade !== filterGrade) return;
+      if (filterSubject !== 'All') {
+        const label = e.title || e.subject;
+        if (label && label === filterSubject) subs.add(label);
+        return;
+      }
+      const label = e.title || e.subject;
+      if (label) subs.add(label);
+    });
+
+    filteredStudents.forEach((s) => {
+      const sr = resultIndex[s.id] || {};
+      Object.keys(sr).forEach((k) => subs.add(k));
+    });
+
+    return [...subs].sort((a, b) => a.localeCompare(b, 'ar'));
+  }, [exams, filterStage, filterGrade, filterSubject, filteredStudents, resultIndex]);
+
+  const isMultiSubjectExport = filterSubject === 'All' && subjectsForBatchExport.length > 1;
+
+  const exportPageSlice = useMemo(() => {
+    if (!exportPageRender) return null;
+    const { subjectLabel, pageIndex, totalPages } = exportPageRender;
+    const start = pageIndex * PDF_ITEMS_PER_PAGE;
+    return {
+      subjectLabel,
+      pageIndex,
+      totalPages,
+      students: filteredStudents.slice(start, start + PDF_ITEMS_PER_PAGE),
+    };
+  }, [exportPageRender, filteredStudents]);
 
   /* ── Performance Statistics ── */
   const performanceStats = useMemo(() => {
@@ -275,118 +511,137 @@ const GradeRecording = () => {
     return stats;
   }, [filteredStudents, resultIndex, displaySubjects]);
 
+  const captureElementToCanvas = async (element) => {
+    if (!element) throw new Error('عنصر التصدير غير موجود');
+    return html2canvas(element, {
+      scale: PDF_CAPTURE_SCALE,
+      useCORS: true,
+      backgroundColor: '#ffffff',
+      logging: false,
+      foreignObjectRendering: false,
+      width: element.offsetWidth,
+      height: element.offsetHeight,
+      onclone: (_doc, node) => {
+        if (node) {
+          node.setAttribute('dir', 'rtl');
+          node.style.direction = 'rtl';
+          node.style.fontFamily = 'Tahoma, Arial, sans-serif';
+        }
+      },
+    });
+  };
+
+  const buildSubjectGradePdf = async (subjectLabel, onProgress) => {
+    const totalPages = Math.max(1, Math.ceil(filteredStudents.length / PDF_ITEMS_PER_PAGE));
+    const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
+
+    for (let pageIdx = 0; pageIdx < totalPages; pageIdx++) {
+      onProgress?.(pageIdx + 1, totalPages);
+      setExportPageRender({ subjectLabel, pageIndex: pageIdx, totalPages });
+      await waitFrames(3);
+
+      const el = document.getElementById('grade-recording-print-page');
+      const canvas = await captureElementToCanvas(el);
+      const imgData = canvas.toDataURL('image/jpeg', 0.82);
+      if (pageIdx > 0) pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, 0, 210, 297);
+      await waitForPaint(30);
+    }
+
+    setExportPageRender(null);
+    return pdf;
+  };
+
   const handleExportStatisticsPDF = async () => {
     if (performanceStats.total === 0) {
-      alert("لا توجد إحصائيات لتصديرها.");
+      alert('لا توجد إحصائيات لتصديرها.');
       return;
     }
     setIsExportingStats(true);
-    
-    // Wait for DOM layout
-    await new Promise(r => setTimeout(r, 600));
-
-    const element = document.querySelector('.printable-statistics-page');
-    if (!element) {
-      alert('خطأ في الوصول إلى التقرير.');
-      setIsExportingStats(false);
-      return;
-    }
+    setExportStatsRender(true);
 
     try {
-      const canvas = await html2canvas(element, {
-        scale: EXPORT_SCALE,
-        useCORS: true,
-        backgroundColor: '#ffffff',
-        foreignObjectRendering: false,
-        onclone: (doc) => {
-          const root = doc.querySelector('.printable-statistics-page');
-          if (root) {
-            root.setAttribute('dir', 'rtl');
-            root.style.direction = 'rtl';
-            root.style.unicodeBidi = 'plaintext';
-            root.style.fontFamily = 'Tahoma, Arial, sans-serif';
-          }
-        }
-      });
-      
-      const imgData = canvas.toDataURL('image/jpeg', 0.95);
+      await waitFrames(3);
+      const element = document.querySelector('.printable-statistics-page');
+      if (!element) {
+        alert('خطأ في الوصول إلى التقرير.');
+        return;
+      }
+
+      const canvas = await captureElementToCanvas(element);
+      const imgData = canvas.toDataURL('image/jpeg', 0.82);
       const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
-      
       const imgProps = pdf.getImageProperties(imgData);
       const pdfWidth = pdf.internal.pageSize.getWidth();
       const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
-      
       pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
       pdf.save(`إحصائيات_النتائج_${filterSubject === 'All' ? 'عام' : filterSubject}.pdf`);
     } catch (error) {
       console.error('Stats PDF Generation Error:', error);
       alert('حدث خطأ أثناء تصدير الإحصائيات');
     } finally {
+      setExportStatsRender(false);
       setIsExportingStats(false);
     }
   };
 
   const handleExportPDF = async () => {
-    if (filteredStudents.length === 0) return;
-    setIsExporting(true);
-    
-    // Wait for DOM to render all pages
-    await new Promise(r => setTimeout(r, 800));
-
-    const pageElements = document.querySelectorAll('.printable-page');
-    if (pageElements.length === 0) {
-      alert('خطأ في الوصول إلى عناصر التقرير.');
-      setIsExporting(false);
+    if (filteredStudents.length === 0) {
+      toast.error('لا يوجد طلاب في التصفية الحالية للتصدير.', 'تصدير PDF');
       return;
     }
 
-    try {
-      const pdf = new jsPDF({
-        orientation: 'p',
-        unit: 'mm',
-        format: 'a4'
-      });
+    const subjectsToExport =
+      filterSubject === 'All' ? subjectsForBatchExport : [filterSubject];
 
-      for (let i = 0; i < pageElements.length; i++) {
-        // Let the browser breathe between pages to avoid UI lockups.
-        await yieldToUI();
-        const canvas = await html2canvas(pageElements[i], {
-          scale: EXPORT_SCALE,
-          useCORS: true,
-          backgroundColor: '#ffffff',
-          foreignObjectRendering: false,
-          onclone: (doc) => {
-            const root = doc.querySelector('.printable-page');
-            if (root) {
-              root.setAttribute('dir', 'rtl');
-              root.style.direction = 'rtl';
-              root.style.unicodeBidi = 'plaintext';
-              root.style.fontFamily = 'Tahoma, Arial, sans-serif';
-            }
-            doc.querySelectorAll('.printable-page *').forEach((el) => {
-              el.setAttribute('dir', 'rtl');
-              el.style.direction = 'rtl';
-              el.style.unicodeBidi = 'plaintext';
-              el.style.letterSpacing = 'normal';
-              el.style.fontFamily = 'Tahoma, Arial, sans-serif';
-            });
-          }
+    if (subjectsToExport.length === 0) {
+      toast.error('لا توجد مواد متاحة للتصدير ضمن الصف والفلاتر المحددة.', 'تصدير PDF');
+      return;
+    }
+
+    if (isMultiSubjectExport && filterGrade === 'All') {
+      toast.error('اختر صفاً محدداً أولاً لتصدير كشوف الرصد لكل المواد دفعة واحدة.', 'تصدير PDF');
+      return;
+    }
+
+    setIsExporting(true);
+    setShowExportModal(false);
+
+    const gradeLabel = filterGrade === 'All' ? 'عام' : filterGrade;
+
+    try {
+      for (let sIdx = 0; sIdx < subjectsToExport.length; sIdx++) {
+        const subject = subjectsToExport[sIdx];
+        const pdf = await buildSubjectGradePdf(subject, (page, pageTotal) => {
+          setExportProgress({
+            subjectIdx: sIdx + 1,
+            subjectTotal: subjectsToExport.length,
+            label: subject,
+            page,
+            pageTotal,
+          });
         });
-        
-        const imgData = canvas.toDataURL('image/jpeg', 0.95);
-        if (i > 0) pdf.addPage();
-        
-        const imgWidth = 210;
-        const imgHeight = 297; // Explicitly A4 height
-        pdf.addImage(imgData, 'JPEG', 0, 0, imgWidth, imgHeight);
+
+        const fileSubject = slugifyFilename(subject);
+        const fileGrade = slugifyFilename(gradeLabel);
+        pdf.save(`كشف_رصد_${fileGrade}_${fileSubject}.pdf`);
+        await waitForPaint(120);
       }
 
-      pdf.save(`كشف_درجات_${filterSubject === 'All' ? 'عام' : filterSubject}.pdf`);
-      setShowExportModal(false);
+      if (subjectsToExport.length > 1) {
+        toast.success(
+          `تم تنزيل ${subjectsToExport.length} ملفات PDF (ملف لكل مادة) للصف: ${gradeLabel}`,
+          'تصدير كشوف الرصد'
+        );
+      } else {
+        toast.success('تم تصدير كشف الرصد بنجاح', 'تصدير PDF');
+      }
     } catch (error) {
       console.error('PDF Generation Error:', error);
-      alert('حدث خطأ أثناء توليد ملف الـ PDF');
+      toast.error('حدث خطأ أثناء توليد ملفات PDF', 'تصدير PDF');
     } finally {
+      setExportPageRender(null);
+      setExportProgress({ subjectIdx: 0, subjectTotal: 0, label: '', page: 0, pageTotal: 0 });
       setIsExporting(false);
     }
   };
@@ -548,7 +803,10 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
             <div className="lg:col-span-4 flex items-center gap-4 pt-6 lg:pt-0">
                <button onClick={() => setShowExportModal(true)}
                 className="flex-1 flex items-center justify-center gap-3 px-8 py-5 bg-slate-900 text-white rounded-2.5xl font-black hover:bg-slate-800 transition-all shadow-2xl shadow-slate-200 active:scale-95">
-                <Download size={20} /> تصدير الكشوف PDF
+                <Download size={20} />
+                {filterSubject === 'All' && filterGrade !== 'All'
+                  ? 'تصدير كشوف PDF (ملف لكل مادة)'
+                  : 'تصدير الكشوف PDF'}
               </button>
               <button onClick={handleExportCSV} title="تصدير Excel/CSV"
                 className="p-5 bg-white text-slate-600 border border-slate-100 rounded-2.5xl hover:bg-slate-50 transition-all shadow-sm active:scale-95">
@@ -636,7 +894,13 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
 
       {/* ── Main Results Table ── */}
       <div className="luxury-card border-none bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 delay-500 duration-1000">
-        <div className="overflow-x-auto custom-scrollbar">
+        {loading && (
+          <div className="py-24 flex flex-col items-center justify-center gap-4 text-slate-500">
+            <Loader2 size={40} className="animate-spin text-indigo-500" />
+            <p className="font-black text-sm">جاري تحميل الطلاب والنتائج...</p>
+          </div>
+        )}
+        <div className={`overflow-x-auto custom-scrollbar ${loading ? 'hidden' : ''}`}>
           <table className="w-full text-right border-collapse" dir="rtl">
             <thead>
               <tr className="bg-slate-50/50 border-b border-slate-100">
@@ -661,10 +925,14 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
             <tbody className="divide-y divide-slate-50">
               {filteredStudents.map((s, idx) => {
                 const sResults = resultIndex[s.id] || {};
-                const subjectScores = displaySubjects.map(sub => sResults[sub] || null);
-                const hasAnyResult = subjectScores.some(Boolean);
+                const subjectScores = displaySubjects.map((sub) => sResults[sub] || null);
+                const allScored = Object.values(sResults).filter(Boolean);
+                const hasAnyResult = allScored.length > 0;
                 const avgPct = hasAnyResult
-                  ? (subjectScores.filter(Boolean).reduce((sum, r) => sum + parseFloat(r.percentage), 0) / subjectScores.filter(Boolean).length).toFixed(1)
+                  ? (
+                      allScored.reduce((sum, r) => sum + parseFloat(r.percentage || 0), 0) /
+                      allScored.length
+                    ).toFixed(1)
                   : null;
 
                 return (
@@ -682,7 +950,7 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
                           <div className="flex items-center gap-2 mt-2">
                              <span className="text-[10px] bg-slate-100 text-slate-500 px-3 py-1 rounded-lg font-black tracking-widest uppercase">{s.id}</span>
                              <span className="w-1.5 h-1.5 rounded-full bg-slate-200"></span>
-                             <span className="text-[11px] text-slate-400 font-bold">{s.grade || s.classroom || ''}</span>
+                             <span className="text-[11px] text-slate-400 font-bold">{studentGradeLabel(s)}</span>
                           </div>
                         </div>
                       </div>
@@ -743,9 +1011,21 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
               <div className="w-32 h-32 bg-slate-50/50 rounded-[3rem] flex items-center justify-center text-slate-100 mb-8 shadow-inner ring-1 ring-slate-100">
                 <Search size={64} className="animate-pulse opacity-50"/>
               </div>
-              <h3 className="text-2xl font-black text-slate-400">لم نعثر على أي نتائج</h3>
-              <p className="text-slate-400 text-sm mt-3 max-w-sm font-medium leading-relaxed">
-                لا توجد بيانات مطابقة لمعايير البحث الحالية. جرب تغيير الفلاتر أو إيقاف وضع "المختبرين فقط".
+              <h3 className="text-2xl font-black text-slate-400">
+                {students.length === 0 ? 'لا يوجد طلاب مسجلون' : 'لم نعثر على طلاب مطابقين'}
+              </h3>
+              <p className="text-slate-400 text-sm mt-3 max-w-md font-medium leading-relaxed">
+                {students.length === 0 ? (
+                  <>
+                    قاعدة البيانات لا تحتوي طلاباً بعد. انتقل إلى{' '}
+                    <strong className="text-indigo-600">قائمة الطلاب</strong> لاستيراد أو إضافة الطلاب، ثم ارجع هنا.
+                  </>
+                ) : (
+                  <>
+                    يوجد <strong>{students.length}</strong> طالب في النظام، لكن الفلاتر الحالية لا تعرض أحداً.
+                    جرّب «كل المراحل» و«كل الصفوف»، أو أوقف «المختبرين فقط».
+                  </>
+                )}
               </p>
             </div>
           )}
@@ -815,19 +1095,62 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
 
               <div className="bg-amber-50 p-3 rounded-xl border border-amber-100">
                 <p className="text-[10px] text-amber-700 font-bold leading-relaxed">
-                  * سيتم توليد التقرير بناءً على التصفية الحالية: 
-                  <br/>
-                  المادة: <span className="text-black">{filterSubject === 'All' ? 'جميع المواد' : filterSubject}</span> | 
-                  الصف: <span className="text-black">{filterGrade === 'All' ? 'جميع الصفوف' : filterGrade}</span>
+                  * سيتم توليد التقرير بناءً على التصفية الحالية:
+                  <br />
+                  المادة:{' '}
+                  <span className="text-black">
+                    {filterSubject === 'All' ? 'جميع المواد' : filterSubject}
+                  </span>{' '}
+                  | الصف:{' '}
+                  <span className="text-black">
+                    {filterGrade === 'All' ? 'جميع الصفوف' : filterGrade}
+                  </span>
+                  {isMultiSubjectExport && (
+                    <>
+                      <br />
+                      <span className="text-indigo-800">
+                        سيتم تنزيل {subjectsForBatchExport.length} ملف PDF — ملف مستقل لكل مادة (
+                        {subjectsForBatchExport.join('، ')})
+                      </span>
+                    </>
+                  )}
+                  {filterSubject === 'All' && filterGrade === 'All' && (
+                    <>
+                      <br />
+                      <span className="text-rose-700">
+                        يجب اختيار صف محدد لتصدير كشوف متعددة المواد دفعة واحدة.
+                      </span>
+                    </>
+                  )}
                 </p>
               </div>
             </div>
 
             <div className="p-6 border-t bg-slate-50 flex flex-col gap-3">
-              <button onClick={handleExportPDF} disabled={isExporting || isExportingStats}
+              <button
+                onClick={handleExportPDF}
+                disabled={
+                  isExporting ||
+                  isExportingStats ||
+                  (isMultiSubjectExport && filterGrade === 'All') ||
+                  subjectsForBatchExport.length === 0
+                }
                 className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-3 transition-all shadow-lg
-                  ${(isExporting || isExportingStats) ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200'}`}>
-                {isExporting ? <><Loader2 size={18} className="animate-spin"/> جاري التحميل...</> : <><FileText size={18}/> تصدير كشف الدرجات للطلاب</>}
+                  ${(isExporting || isExportingStats) ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200'}`}
+              >
+                {isExporting ? (
+                  <>
+                    <Loader2 size={18} className="animate-spin" />
+                    جاري التصدير...
+                  </>
+                ) : (
+                  <>
+                    <FileText size={18} />
+                    {isMultiSubjectExport
+                      ? `تصدير ${subjectsForBatchExport.length} كشوف (ملف لكل مادة)`
+                      : 'تصدير كشف الدرجات للطلاب'}
+                  </>
+                )}
               </button>
               
               <button onClick={handleExportStatisticsPDF} disabled={isExporting || isExportingStats || performanceStats.total === 0}
@@ -842,10 +1165,47 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
         </div>
       )}
 
-      {/* ── Hidden Printable Report (Used by html2canvas) ── */}
-      <div className="fixed left-[-9999px] top-0" style={{ zIndex: -100 }}>
-        {/* Printable Statistics PDF Template */}
-        {performanceStats.total > 0 && (
+      {/* شاشة تقدم التصدير — تمنع التفاعل وتشرح سبب البطء */}
+      {(isExporting || isExportingStats) && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/75 backdrop-blur-sm p-6">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8 text-center space-y-4">
+            <Loader2 size={48} className="animate-spin text-indigo-600 mx-auto" />
+            <h3 className="text-xl font-black text-slate-900">
+              {isExportingStats ? 'جاري تصدير الإحصائيات...' : 'جاري تصدير كشوف الرصد'}
+            </h3>
+            {isExporting && exportProgress.pageTotal > 0 && (
+              <p className="text-sm font-bold text-slate-600 leading-relaxed">
+                {exportProgress.subjectTotal > 1 && (
+                  <>مادة {exportProgress.subjectIdx} من {exportProgress.subjectTotal}: {exportProgress.label}<br /></>
+                )}
+                صفحة {exportProgress.page} من {exportProgress.pageTotal}
+              </p>
+            )}
+            <p className="text-xs text-slate-400 font-medium">
+              لا تغلق النافذة — يتم إنشاء الملف صفحة بصفحة لتجنّب تجميد النظام
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* قالب طباعة واحد فقط أثناء التصدير */}
+      <div className="fixed left-[-9999px] top-0 pointer-events-none" style={{ zIndex: -100 }} aria-hidden>
+        {exportPageSlice && (
+          <PrintableGradePage
+            schoolName={printSchoolName}
+            examTitle={exportExamTitle}
+            sheetTitle={exportSheetTitle}
+            subjectLabel={exportPageSlice.subjectLabel}
+            gradeLabel={filterGrade}
+            academicYear={academicYear}
+            pageStudents={exportPageSlice.students}
+            pageIndex={exportPageSlice.pageIndex}
+            totalPages={exportPageSlice.totalPages}
+            resultIndex={resultIndex}
+          />
+        )}
+
+        {exportStatsRender && performanceStats.total > 0 && (
           <div className="printable-statistics-page bg-white p-12 text-black" style={{ width: '210mm', minHeight: '297mm', fontFamily: 'Arial, sans-serif', direction: 'rtl', backgroundColor: '#ffffff', color: '#000000' }}>
             <style dangerouslySetInnerHTML={{__html: `
               .printable-statistics-page { background-color: white !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
@@ -906,129 +1266,6 @@ const headers = ['رقم الطالب','اسم الطالب','الصف', ...subj
             </div>
           </div>
         )}
-
-        {(() => {
-          const itemsPerPage = filterSubject === 'All' ? 12 : 18;
-          const totalPages = Math.ceil(filteredStudents.length / itemsPerPage) || 1;
-          
-          return Array.from({ length: totalPages }).map((_, pageIdx) => {
-            const pageStudents = filteredStudents.slice(pageIdx * itemsPerPage, (pageIdx + 1) * itemsPerPage);
-            const totalCorrected = filteredStudents.filter(s => {
-              const sResults = resultIndex[s.id] || {};
-              return filterSubject === 'All' ? Object.keys(sResults).length > 0 : !!sResults[filterSubject];
-            }).length;
-
-            return (
-              <div key={pageIdx} className="printable-page bg-white p-12 text-black" 
-                   style={{ 
-                     width: '210mm', 
-                     height: '297mm',
-                     fontFamily: 'Arial, sans-serif', 
-                     direction: 'rtl',
-                     backgroundColor: '#ffffff',
-                     color: '#000000',
-                     marginBottom: '20px'
-                   }}>
-                
-                <style dangerouslySetInnerHTML={{__html: `
-                  .printable-page * {
-                    background-color: transparent !important;
-                    color: black !important;
-                    border-color: black !important;
-                    box-shadow: none !important;
-                  }
-                  .printable-page {
-                    background-color: white !important;
-                  }
-                  .printable-page table {
-                    border-collapse: collapse !important;
-                    width: 100% !important;
-                  }
-                  .printable-page th, .printable-page td {
-                    border: 1px solid black !important;
-                    padding: 8px !important;
-                  }
-                  .printable-page .bg-gray-100 {
-                    background-color: #f3f4f6 !important;
-                  }
-                `}} />
-
-                {/* Header Section */}
-                <div className="text-center mb-8 space-y-3">
-                  <h1 className="text-3xl font-bold">{printSchoolName}</h1>
-                  <h2 className="text-2xl font-bold border-b-2 border-black pb-2 inline-block">
-                    {exportExamTitle ||
-                      (filterSubject === 'اختبار مجمع'
-                        ? 'اختبار محاكي اختبار نافس (اختبار مجمع)'
-                        : `اختبار نهاية الدور الأول - الفصل الدراسي الثاني العام الدراسي ${academicYear}`)}
-                  </h2>
-                  <div className="mt-4">
-                    <h3 className="text-xl font-bold bg-gray-100 px-8 py-3 rounded-xl inline-block border-2 border-black">
-                      {exportSheetTitle || 'كشف رصد الدرجات'}
-                    </h3>
-                  </div>
-                </div>
-
-                {/* Table */}
-                <table className="w-full border-collapse border-2 border-black mt-6">
-                  <thead>
-                    <tr className="bg-gray-50">
-                      <th className="border-2 border-black p-2 text-sm w-12">م</th>
-                      <th className="border-2 border-black p-2 text-sm text-center">اسم الطالب</th>
-                      {filterSubject === 'All' ? (
-                        allSubjects.map(sub => (
-                          <th key={sub} className="border-2 border-black p-2 text-xs">{sub === 'اختبار مجمع' ? 'الدرجة' : sub}</th>
-                        ))
-                      ) : (
-                        <th className="border-2 border-black p-2 text-sm w-24">الدرجة</th>
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pageStudents.map((s, idx) => {
-                      const sResults = resultIndex[s.id] || {};
-                      const globalIdx = (pageIdx * itemsPerPage) + idx + 1;
-                      return (
-                        <tr key={s.id}>
-                          <td className="border-2 border-black p-2 text-center text-sm">{globalIdx}</td>
-                          <td className="border-2 border-black p-2 text-base font-bold text-center">{s.name}</td>
-                          {filterSubject === 'All' ? (
-                            allSubjects.map(sub => (
-                              <td key={sub} className="border-2 border-black p-2 text-center text-xs">
-                                {sResults[sub] ? `${sResults[sub].score}/${sResults[sub].total}` : '-'}
-                              </td>
-                            ))
-                          ) : (
-                            <td className="border-2 border-black p-2 text-center text-sm font-bold">
-                              {sResults[filterSubject] ? `${sResults[filterSubject].score} / ${sResults[filterSubject].total}` : '-'}
-                            </td>
-                          )}
-                        </tr>
-                      );
-                    })}
-                    {/* Fill empty rows to maintain page layout if needed, but not required for simple reports */}
-                  </tbody>
-                </table>
-
-                {/* Page Numbering */}
-                <div className="absolute bottom-10 left-1/2 -translate-x-1/2 text-xs font-bold text-gray-400">
-                  صفحة {pageIdx + 1} من {totalPages}
-                </div>
-
-                {/* Footer Signature Area (Only on the last page) */}
-                {pageIdx === totalPages - 1 && (
-                  <div className="mt-12 flex justify-end px-20 text-sm font-bold">
-                    <div className="text-center">
-                      <div className="mb-2">يعتمد مدير المدرسة</div>
-                      <div>......................................</div>
-                    </div>
-                  </div>
-                )}
-
-              </div>
-            );
-          });
-        })()}
       </div>
     </>
   );

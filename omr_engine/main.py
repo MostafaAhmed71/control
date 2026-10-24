@@ -7,6 +7,7 @@ import generator
 import generator_elite
 import generator_nafs
 import generator_custom
+import generator_watania
 import os
 import json
 import subprocess
@@ -25,6 +26,24 @@ def _merged_student_subject(student_subject: Optional[str], batch_subject: str) 
 # Shared thread pool for CPU-bound OMR processing
 _omr_executor = ThreadPoolExecutor(max_workers=4)
 DEBUG_SCANS_DIR = os.getenv("OMR_DEBUG_DIR", os.path.join(tempfile.gettempdir(), "omr_debug_scans"))
+
+_PS_UTF8_PREFIX = (
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+    "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+)
+
+
+def _run_powershell(command: str, timeout: int = 60):
+    """Run PowerShell with UTF-8 stdout so Arabic messages stay readable."""
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_UTF8_PREFIX + command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
 
 app = FastAPI(title="Smart OMR Engine")
 
@@ -45,31 +64,99 @@ class Student(BaseModel):
     day: str = ""
     seat_number: str = ""
     committee_number: str = ""
+    national_id: Optional[str] = None
+    school_code: Optional[str] = None
+
+
+def _student_sheet_dict(s: Student, batch_subject: str, num_questions: int, school_code: str = "", exam_id: str = "") -> Dict[str, Any]:
+    return {
+        "exam_id": (exam_id or "").strip(),
+        "id": s.id,
+        "name": s.name,
+        "class": s.class_name,
+        "subject": _merged_student_subject(s.subject, batch_subject),
+        "date": s.date,
+        "day": s.day,
+        "seat_number": s.seat_number,
+        "committee_number": s.committee_number,
+        "num_questions": num_questions,
+        "national_id": (s.national_id or s.id or "").strip(),
+        "school_code": (s.school_code or school_code or "").strip(),
+    }
+
 
 class BatchRequest(BaseModel):
     subject: str 
     students: List[Student]
     template: Optional[str] = "default"
     num_questions: int = 30
+    school_code: Optional[str] = ""
+    exam_id: Optional[str] = ""
+
 
 class CustomBatchRequest(BaseModel):
     subject: str
     students: List[Student]
     template_config: Optional[Dict[str, Any]] = None
     num_questions: int = 30
+    exam_id: Optional[str] = ""
 
 @app.get("/")
 def read_root():
     return {"status": "OMR Engine is running (Professional Header mode)."}
 
+
+@app.get("/engine-info")
+def engine_info():
+    """للتحقق من نشر scanner.py على السيرفر (بعد الرفع أعد تشغيل uvicorn)."""
+    scanner_path = os.path.join(os.path.dirname(__file__), "scanner.py")
+    try:
+        with open(scanner_path, encoding="utf-8") as f:
+            text = f.read()
+        st = os.stat(scanner_path)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {
+        "scanner_size": st.st_size,
+        "scanner_mtime_iso": __import__("datetime").datetime.fromtimestamp(st.st_mtime).isoformat(),
+        "preview_align_fix": "rebuild_system_view_for_answers" in text,
+        "watania_grid_recover": "recover_watania_answer_grid" in text and "watania_autodetect" in text,
+        "merge_pick_fix": "pick = a1 if c1 >= c2 else a2" in text,
+        "hint": "بعد scp لـ scanner.py نفّذ: pm2 restart omr أو pkill uvicorn ثم شغّل من جديد",
+    }
+
+
 @app.post("/scan")
-async def scan_document(file: UploadFile = File(...), template: str = "default", num_questions: int = 30, scan_mode: str = "hybrid"):
-    if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-        raise HTTPException(status_code=400, detail="Invalid image format (PNG/JPG only).")
+async def scan_document(
+    file: UploadFile = File(...),
+    template: str = "default",
+    num_questions: int = 30,
+    scan_mode: str = "hybrid",
+    from_scanner: bool = False,
+):
+    if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')):
+        raise HTTPException(status_code=400, detail="صيغة غير مدعومة — استخدم PNG أو JPG أو BMP.")
     try:
         content = await file.read()
-        result = scanner.scan_omr_with_mode(content, is_bytes=True, style=template, num_questions=num_questions, scan_mode=scan_mode)
-        return dict(result)
+        use_scanner_path = from_scanner
+        if not use_scanner_path:
+            import numpy as np
+            import cv2
+            nparr = np.frombuffer(content, np.uint8)
+            probe = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if probe is not None and scanner.infer_flatbed_scan_image(probe):
+                use_scanner_path = True
+        result = scanner.scan_omr_with_mode(
+            content,
+            is_bytes=True,
+            style=template,
+            num_questions=num_questions,
+            scan_mode=scan_mode,
+            from_scanner=use_scanner_path,
+        )
+        out = dict(result)
+        out["alignment_mode"] = "scanner" if use_scanner_path else "upload"
+        return out
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
@@ -100,18 +187,17 @@ async def calibrate_printer(file: UploadFile = File(...)):
 async def generate_batch(request: BatchRequest):
     try:
         output_filename = f"batch_{request.subject}.pdf"
-        student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
-                          "subject": _merged_student_subject(s.subject, request.subject),
-                          "date": s.date, "day": s.day,
-                          "seat_number": s.seat_number,
-                          "committee_number": s.committee_number,
-                          "num_questions": request.num_questions}
-                         for s in request.students]
+        student_dicts = [
+            _student_sheet_dict(s, request.subject, request.num_questions, request.school_code or "", request.exam_id or "")
+            for s in request.students
+        ]
         loop = asyncio.get_event_loop()
         if request.template == "elite":
             await loop.run_in_executor(_omr_executor, lambda: generator_elite.create_bulk_pdf(student_dicts, output_pdf=output_filename))
         elif request.template == "nafs":
             await loop.run_in_executor(_omr_executor, lambda: generator_nafs.create_bulk_pdf(student_dicts, output_pdf=output_filename))
+        elif request.template == "watania":
+            await loop.run_in_executor(_omr_executor, lambda: generator_watania.create_bulk_pdf(student_dicts, output_pdf=output_filename))
         else:
             await loop.run_in_executor(_omr_executor, lambda: generator.create_bulk_pdf(student_dicts, output_pdf=output_filename))
         return FileResponse(path=output_filename, filename=output_filename, media_type='application/pdf')
@@ -129,16 +215,15 @@ async def generate_batch_stream(request: BatchRequest):
     import threading as _threading
 
     output_filename = f"batch_{request.subject}.pdf"
-    student_dicts = [{"id": s.id, "name": s.name, "class": s.class_name,
-                      "subject": _merged_student_subject(s.subject, request.subject),
-                      "date": s.date, "day": s.day,
-                      "seat_number": s.seat_number,
-                      "committee_number": s.committee_number,
-                      "num_questions": request.num_questions}
-                     for s in request.students]
+    student_dicts = [
+        _student_sheet_dict(s, request.subject, request.num_questions, request.school_code or "", request.exam_id or "")
+        for s in request.students
+    ]
 
     if request.template == "nafs":
         gen_fn = generator_nafs.create_bulk_pdf_stream
+    elif request.template == "watania":
+        gen_fn = generator_watania.create_bulk_pdf_stream
     elif request.template == "elite":
         gen_fn = getattr(generator_elite, "create_bulk_pdf_stream", generator_elite.create_bulk_pdf)
     else:
@@ -203,7 +288,8 @@ async def generate_custom_batch(request: CustomBatchRequest):
                           "date": s.date, "day": s.day,
                           "seat_number": s.seat_number,
                           "committee_number": s.committee_number,
-                          "num_questions": request.num_questions}
+                          "num_questions": request.num_questions,
+                          "exam_id": request.exam_id or ""}
                          for s in request.students]
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(_omr_executor, lambda: generator_custom.create_bulk_pdf(
@@ -238,7 +324,8 @@ async def generate_custom_batch_stream(request: CustomBatchRequest):
                       "date": s.date, "day": s.day,
                       "seat_number": s.seat_number,
                       "committee_number": s.committee_number,
-                      "num_questions": request.num_questions}
+                      "num_questions": request.num_questions,
+                      "exam_id": request.exam_id or ""}
                      for s in request.students]
 
     q = _queue.Queue()
@@ -284,12 +371,14 @@ async def generate_custom_batch_stream(request: CustomBatchRequest):
 async def generate_individual(student_id: str, student_name: str, class_name: str = "N/A", subject: str = "N/A", date: str = "2024", day: str = "", seat_number: str = "", committee_number: str = "", template: str = "default", num_questions: int = 30):
     try:
         filename = f"sheet_{student_id}.png"
-        info = {"id": student_id, "name": student_name, "class": class_name, "subject": subject, "date": date, "day": day, "seat_number": seat_number, "committee_number": committee_number, "num_questions": num_questions}
+        info = {"id": student_id, "name": student_name, "class": class_name, "subject": subject, "date": date, "day": day, "seat_number": seat_number, "committee_number": committee_number, "num_questions": num_questions, "national_id": student_id}
         
         if template == "elite":
             generator_elite.generate_personalized_sheet(info, filename=filename)
         elif template == "nafs":
             generator_nafs.generate_personalized_sheet(info, filename=filename)
+        elif template == "watania":
+            generator_watania.generate_personalized_sheet(info, filename=filename)
         else:
             generator.generate_personalized_sheet(info, filename=filename)
             
@@ -441,10 +530,7 @@ async def scan_from_scanner(template: str = "default", pages: int = 1, num_quest
     try:
         proc = await loop.run_in_executor(
             None,
-            lambda: subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
-                capture_output=True, text=True, timeout=pages * 60
-            )
+            lambda: _run_powershell(ps_script, timeout=pages * 60),
         )
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="انتهت مهلة المسح — تأكد من وجود الأوراق في السكانر")
@@ -506,10 +592,7 @@ async def scan_from_scanner_stream(template: str = "default", pages: int = 1, nu
         try:
             proc = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(
-                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
-                    capture_output=True, text=True, timeout=pages * 60
-                )
+                lambda: _run_powershell(ps_script, timeout=pages * 60),
             )
         except subprocess.TimeoutExpired:
             yield json.dumps({"type": "error", "msg": "انتهت مهلة المسح"}) + "\n"
@@ -562,12 +645,9 @@ async def calibrate_from_scanner():
     try:
         proc = await loop.run_in_executor(
             None,
-            lambda: subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
-                capture_output=True, text=True, timeout=60
-            )
+            lambda: _run_powershell(ps_script, timeout=60),
         )
-        if "NO_SCANNER" in proc.stderr:
+        if "NO_SCANNER" in (proc.stderr or ""):
             return JSONResponse(status_code=503, content={"detail": "لا يوجد سكانر متصل"})
             
         # Parse path
@@ -616,10 +696,7 @@ for ($i=1; $i -le $count; $i++) {
 Write-Output ($count.ToString() + "|" + ($names -join ","))
 """
     try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_check],
-            capture_output=True, text=True, timeout=10
-        )
+        result = _run_powershell(ps_check, timeout=10)
         output = result.stdout.strip()
         if "|" in output:
             count_str, names_str = output.split("|", 1)

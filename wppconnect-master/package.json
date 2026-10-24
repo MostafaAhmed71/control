@@ -5,7 +5,8 @@
   "description": "WhatsApp server to send OMR results to parents",
   "main": "whatsapp-server.js",
   "scripts": {
-    "start": "node whatsapp-server.js"
+    "start": "node whatsapp-server.js",
+    "install-browser": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.97",

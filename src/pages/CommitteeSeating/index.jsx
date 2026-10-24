@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Printer, Settings, Download, FileText, FileDown, Layout, UserCircle2, CheckCircle2, SlidersHorizontal, ChevronRight, X, RotateCcw, AlertCircle, Eye, Maximize2 } from 'lucide-react';
 import { getStudents } from '../../utils/dataService';
-import html2canvas from 'html2canvas';
-import jsPDF from 'jspdf';
+import { formatCommitteeDisplay } from '../../utils/attendanceLayout';
+import { exportFullPagesToPdf, preloadImages, waitForDomPaint } from '../../utils/pdfExport';
 
 const CommitteeSeating = () => {
     const [students, setStudents] = useState([]);
@@ -185,26 +185,17 @@ const CommitteeSeating = () => {
 
     const handleExportCardsPDF = async () => {
         const pages = document.querySelectorAll('.page-to-print');
-        if (pages.length === 0) return;
-        
+        if (pages.length === 0) {
+            alert('لا توجد صفحات للتصدير. اختر لجنة أو تأكد من وجود طلاب.');
+            return;
+        }
+
         setIsExporting(true);
         try {
-            const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-            const pdfWidth = 210;
-            const pdfHeight = 297;
-
-            for (let i = 0; i < pages.length; i++) {
-                const canvas = await html2canvas(pages[i], { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
-                const imgData = canvas.toDataURL('image/jpeg', 0.95);
-
-                if (i > 0) {
-                    doc.addPage();
-                }
-
-                doc.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
-            }
-            doc.save('كشوف_اللجان.pdf');
-        } catch(error) {
+            await preloadImages(['/form_template.jpg']);
+            await waitForDomPaint(500);
+            await exportFullPagesToPdf(pages, 'كشوف_اللجان.pdf');
+        } catch (error) {
             console.error('Error generating PDF:', error);
             alert('حدث خطأ أثناء توليد ملف الـ PDF');
         } finally {
@@ -513,16 +504,19 @@ const CommitteeSeating = () => {
                             key={page.id}
                             className="page-to-print relative bg-white shadow-[0_30px_90px_rgba(0,0,0,0.15)] mx-auto border border-white group/page transition-all duration-700 print:shadow-none print:border-none print:m-0"
                             style={{
-                                width: '210mm',         // A4 width
-                                height: '297mm',        // A4 height
-                                backgroundImage: "url('/form_template.jpg')",
-                                backgroundSize: '100% 100%',
-                                backgroundPosition: 'center',
-                                backgroundRepeat: 'no-repeat',
+                                width: '210mm',
+                                height: '297mm',
                                 pageBreakAfter: 'always',
                                 overflow: 'hidden'
                             }}
                         >
+                            <img
+                                src="/form_template.jpg"
+                                alt=""
+                                crossOrigin="anonymous"
+                                className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
+                                draggable={false}
+                            />
                             {/* Overlay spotlight on hover */}
                             <div className="absolute inset-0 bg-transparent group-hover/page:bg-indigo-600/5 transition-colors pointer-events-none z-0"></div>
 
@@ -532,7 +526,7 @@ const CommitteeSeating = () => {
                                     className="absolute font-black text-slate-900 w-auto text-right font-header z-10"
                                     style={{ top: `${config.headerCommittee.top}%`, right: `${config.headerCommittee.right}%`, fontSize: `${config.headerCommittee.fontSize}rem`, transform: 'translateY(-50%)' }}
                                 >
-                                    {page.committee}
+                                    {formatCommitteeDisplay(page.committee)}
                                 </div>
                             )}
                             {config.headerGrade.show && (

@@ -48,6 +48,24 @@ def order_points(pts):
     return rect
 
 
+def infer_flatbed_scan_image(img_bgr):
+    """
+    Heuristic: images from a document scanner (flatbed/ADF) are usually
+    high-resolution portrait pages with A4-like aspect ratio.
+    Uploaded scanner files should use the same alignment path as live scans.
+    """
+    if img_bgr is None or img_bgr.size == 0:
+        return False
+    h, w = img_bgr.shape[:2]
+    if w > h:
+        w, h = h, w
+    if h < 1400 or w < 1000:
+        return False
+    aspect = w / float(h)
+    target = WIDTH / float(HEIGHT)
+    return abs(aspect - target) <= 0.14
+
+
 def calibrate_printer_geometry(gray_img):
     """
     Analyze a scanned printed sheet to verify its physical dimensions.
@@ -102,8 +120,8 @@ def calibrate_printer_geometry(gray_img):
     }
 
 
-def get_paper_contour(img_gray):
-    """Locate the A4 paper boundary (must cover >50% of image area)."""
+def get_paper_contour(img_gray, min_area_frac=0.50):
+    """Locate the A4 paper boundary (must cover min_area_frac of image area)."""
     blurred = cv2.GaussianBlur(img_gray, (7, 7), 0)
     edged   = cv2.Canny(blurred, 30, 120)
     cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -114,7 +132,7 @@ def get_paper_contour(img_gray):
     cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
     for c in cnts:
         area = cv2.contourArea(c)
-        if area < 0.50 * img_area:
+        if area < min_area_frac * img_area:
             break
         peri   = cv2.arcLength(c, True)
         approx = cv2.approxPolyDP(c, 0.02 * peri, True)
@@ -209,10 +227,172 @@ def refine_warp_with_markers(warped, warped_gray):
         [off, HEIGHT - off],
     ], dtype="float32")
 
+    # Skip micro-corrections — small marker-detection noise causes visible
+    # bubble-grid drift in the review overlay without improving reads.
+    max_err = max(float(np.linalg.norm(src_pts[i] - dst_pts[i])) for i in range(4))
+    if max_err < 8.0:
+        return warped, warped_gray
+
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
     refined = cv2.warpPerspective(warped, M, (WIDTH, HEIGHT))
     refined_gray = cv2.cvtColor(refined, cv2.COLOR_BGR2GRAY)
     return refined, refined_gray
+
+
+def _ring_strength(gray, cx, cy, radius):
+    """Score alignment of a printed bubble ring at (cx, cy)."""
+    r = int(radius)
+    pad = 6
+    x1, y1 = int(cx) - r - pad, int(cy) - r - pad
+    x2, y2 = int(cx) + r + pad, int(cy) + r + pad
+    h, w = gray.shape
+    if x1 < 0 or y1 < 0 or x2 >= w or y2 >= h:
+        return -1.0
+    roi = gray[y1:y2, x1:x2]
+    if roi.size == 0:
+        return -1.0
+    _, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    roi_h, roi_w = roi.shape
+    cx_r, cy_r = roi_w // 2, roi_h // 2
+    Y, X = np.ogrid[:roi_h, :roi_w]
+    dist = np.sqrt((X - cx_r) ** 2 + (Y - cy_r) ** 2)
+    ring_mask = (dist >= r * 0.72) & (dist <= r * 1.12)
+    if not ring_mask.any():
+        return -1.0
+    return float(np.mean(binary[ring_mask])) / 255.0
+
+
+def locate_bubble_center(gray, cx, cy, radius, search=50, step=2):
+    """Find the printed bubble centre near the template coordinate."""
+    best = (int(cx), int(cy))
+    best_s = -1.0
+    for dy in range(-search, search + 1, step):
+        for dx in range(-search, search + 1, step):
+            x, y = int(cx) + dx, int(cy) + dy
+            s = _ring_strength(gray, x, y, radius)
+            if s > best_s:
+                best_s = s
+                best = (x, y)
+    if best_s < 0.035:
+        return None
+    return best
+
+
+def _collect_ring_alignment_offsets(warped_gray, R_XS, L_XS, y_start, row_sp, bub_r, per_col):
+    """Ring-based offset samples; skips heavily filled bubbles."""
+    sample_rows = sorted({
+        0,
+        max(0, per_col // 4),
+        max(0, per_col // 2),
+        max(0, (3 * per_col) // 4),
+        per_col - 1,
+    })
+    offsets_x, offsets_y = [], []
+    for xs in (R_XS, L_XS):
+        for row_idx in sample_rows:
+            if row_idx >= per_col:
+                continue
+            y = int(y_start + row_idx * row_sp)
+            for expected_x in xs:
+                expected_x = int(expected_x)
+                if bubble_ink_ratio(warped_gray, expected_x, y, bub_r) > 0.22:
+                    continue
+                found = locate_bubble_center(warped_gray, expected_x, y, bub_r)
+                if found:
+                    offsets_x.append(found[0] - expected_x)
+                    offsets_y.append(found[1] - y)
+    return offsets_x, offsets_y
+
+
+def calibrate_grid_offset_hough(warped_gray, R_XS, L_XS, y_start, row_sp, bub_r, num_questions):
+    """
+    Detect printed bubble circles in the question block and estimate (dx, dy)
+    vs the template grid. Works even when many bubbles are pencil-filled.
+    """
+    per_col = (num_questions + 1) // 2
+    if per_col < 1:
+        return 0, 0, 0
+
+    y_lo = max(0, int(y_start - 90))
+    y_hi = min(HEIGHT, int(y_start + per_col * row_sp + 120))
+    roi = warped_gray[y_lo:y_hi, :]
+    if roi.size == 0:
+        return 0, 0, 0
+
+    blurred = cv2.GaussianBlur(roi, (5, 5), 1.2)
+    min_r = max(16, int(bub_r * 0.5))
+    max_r = int(bub_r * 1.45)
+    circles = cv2.HoughCircles(
+        blurred,
+        cv2.HOUGH_GRADIENT,
+        dp=1.15,
+        minDist=max(55, int(row_sp * 0.5)),
+        param1=70,
+        param2=20,
+        minRadius=min_r,
+        maxRadius=max_r,
+    )
+    if circles is None:
+        return 0, 0, 0
+
+    pts = [(int(c[0]), int(c[1]) + y_lo) for c in np.round(circles[0]).astype(int)]
+    match_radius = max(70, int(bub_r * 1.8))
+
+    offsets = []
+    for row in range(per_col):
+        y_exp = int(y_start + row * row_sp)
+        for x_exp in list(R_XS) + list(L_XS):
+            x_exp = int(x_exp)
+            best = None
+            best_d2 = match_radius * match_radius
+            for cx, cy in pts:
+                d2 = (cx - x_exp) ** 2 + (cy - y_exp) ** 2
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best = (cx, cy)
+            if best:
+                offsets.append((best[0] - x_exp, best[1] - y_exp))
+
+    if len(offsets) < 6:
+        return 0, 0, 0
+
+    dx = int(round(float(np.median([o[0] for o in offsets]))))
+    dy = int(round(float(np.median([o[1] for o in offsets]))))
+    return dx, dy, len(offsets)
+
+
+def auto_align_bubble_grid(warped_gray, R_XS, L_XS, y_start, row_sp, bub_r, num_questions):
+    """
+    Measure uniform (dx, dy) shift between template grid and printed bubbles.
+    Prefers Hough circle matching; ring search is fallback only for large drift.
+    """
+    per_col = (num_questions + 1) // 2
+    if per_col < 1:
+        return list(R_XS), list(L_XS), y_start, 0, 0
+
+    dx_h, dy_h, n_hough = calibrate_grid_offset_hough(
+        warped_gray, R_XS, L_XS, y_start, row_sp, bub_r, num_questions
+    )
+
+    dx, dy = 0, 0
+    if n_hough >= 12:
+        dx, dy = dx_h, dy_h
+    else:
+        ox, oy = _collect_ring_alignment_offsets(
+            warped_gray, R_XS, L_XS, y_start, row_sp, bub_r, per_col
+        )
+        if len(oy) >= 5:
+            dx = int(round(float(np.median(ox))))
+            dy = int(round(float(np.median(oy))))
+
+    if abs(dx) < 4 and abs(dy) < 4:
+        return list(R_XS), list(L_XS), y_start, 0, 0
+    if abs(dx) > 90 or abs(dy) > 90:
+        return list(R_XS), list(L_XS), y_start, 0, 0
+
+    R_adj = [x + dx for x in R_XS]
+    L_adj = [x + dx for x in L_XS]
+    return R_adj, L_adj, y_start + dy, dx, dy
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -503,6 +683,54 @@ def evaluate_row(densities, darknesses, thresholds):
     return RTL_MAP[bi], confidence, False, []
 
 
+def watania_dark_model(row_data):
+    """
+    Ministry bubbles have a printed letter inside, so ink-ratio barely separates
+    an empty bubble from a light pencil mark. Raw darkness does, once the
+    per-option baseline (the printed glyph) is removed.
+    Returns (baseline per option index, mark threshold on contrast).
+    """
+    n = max((len(r.get("darks") or []) for r in row_data), default=0)
+    base = []
+    for j in range(n):
+        vals = sorted(r["darks"][j] for r in row_data if r.get("darks") and len(r["darks"]) > j and r["darks"][j] >= 0)
+        # Lower half ≈ empty bubbles even if this option is the popular answer.
+        base.append(float(np.median(vals[: max(1, len(vals) // 2)])) if vals else 0.0)
+    tops = []
+    for r in row_data:
+        ds = r.get("darks") or []
+        if ds:
+            tops.append(max(d - base[j] for j, d in enumerate(ds)))
+    marked = sorted(t for t in tops if t >= 0.12)
+    if marked:
+        typical = float(np.median(marked[len(marked) // 2:]))
+        thr = max(0.10, min(0.30, 0.42 * typical))
+    else:
+        thr = 0.14
+    return base, thr
+
+
+def evaluate_row_watania(darks, base, thr):
+    if not darks or all(d < 0 for d in darks):
+        return "", 0.0, True, ["no_bubble_signal"]
+    contrast = [d - base[j] if j < len(base) else d for j, d in enumerate(darks)]
+    order = sorted(range(len(contrast)), key=lambda j: contrast[j], reverse=True)
+    bi = order[0]
+    top = contrast[bi]
+    second = contrast[order[1]] if len(order) > 1 else 0.0
+    if top < thr:
+        if top >= 0.6 * thr:
+            return "", 0.5, True, ["faint_mark"]
+        return "", float(min(0.95, 0.6 + (thr - top))), False, []
+    if second >= thr and second >= 0.7 * top:
+        return "", 0.4, True, ["ambiguous_mark"]
+    sep = (top - max(second, 0.0)) / max(top, 1e-6)
+    confidence = float(max(0.3, min(0.99, 0.5 * min(1.0, top / (2.0 * thr)) + 0.5 * sep)))
+    if second >= thr:
+        return RTL_MAP[bi], min(confidence, 0.7), True, ["second_mark"]
+    return RTL_MAP[bi], confidence, False, []
+
+
 def merge_double_pass(primary, secondary):
     """
     Merge two OMR passes. Any disagreement is pushed to review.
@@ -542,8 +770,10 @@ def merge_double_pass(primary, secondary):
                 confidence[q] = round(c2, 3)
                 needs_review.discard(int(q))
             else:
-                answers[q] = ""
-                confidence[q] = round(min(c1, c2), 3)
+                # Both marked different options — keep the more confident pass, flag review.
+                pick = a1 if c1 >= c2 else a2
+                answers[q] = pick
+                confidence[q] = round(max(c1, c2), 3)
                 needs_review.add(int(q))
                 mismatch.append(int(q))
 
@@ -560,7 +790,10 @@ def merge_double_pass(primary, secondary):
     if mismatch:
         quality_flags.append("double_pass_mismatch")
     if not primary.get("student_id"):
-        quality_flags.append("missing_qr")
+        if (primary.get("id_source") == "national_grid") or (primary.get("qr_meta") or {}).get("template") == "watania":
+            quality_flags.append("missing_national_id")
+        else:
+            quality_flags.append("missing_qr")
 
     if quality_flags and "missing_qr" in quality_flags and avg_conf < 0.55:
         decision = "REJECTED_QUALITY"
@@ -634,6 +867,161 @@ def _append_audit_log(entry):
         pass
 
 
+def _qr_variants(img):
+    if img is None or img.size == 0:
+        return
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    yield gray
+    h, w = gray.shape[:2]
+    if max(h, w) < 2600:
+        yield cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    yield cv2.threshold(cv2.GaussianBlur(gray, (3, 3), 0), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    yield cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
+    sharp = cv2.addWeighted(gray, 1.8, cv2.GaussianBlur(gray, (0, 0), 3), -0.8, 0)
+    yield sharp
+
+
+def _qr_decoders():
+    if decode_qr:
+        def _zbar(g):
+            res = decode_qr(g)
+            return res[0].data.decode("utf-8") if res else ""
+        yield _zbar
+    std = cv2.QRCodeDetector()
+    yield lambda g: std.detectAndDecode(g)[0] or ""
+    if hasattr(cv2, "QRCodeDetectorAruco"):
+        aru = cv2.QRCodeDetectorAruco()
+        yield lambda g: aru.detectAndDecode(g)[0] or ""
+
+
+def _find_qr_finders(gray):
+    """Locate the three finder squares (square-in-square-in-square contours) → (tl, tr, bl) boxes."""
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    contours, hier = cv2.findContours(bw, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if hier is None:
+        return None
+    hier = hier[0]
+    boxes = []
+    for i, cnt in enumerate(contours):
+        depth, j = 0, hier[i][2]
+        while j != -1 and depth < 3:
+            depth += 1
+            j = hier[j][2]
+        if depth < 2:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w < 15 or h < 15 or not (0.6 < w / h < 1.6):
+            continue
+        boxes.append((x, y, w, h))
+    if len(boxes) < 3:
+        return None
+    boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)[:6]
+    tl = min(boxes, key=lambda b: b[0] + b[1])
+    tr = max(boxes, key=lambda b: b[0] - b[1])
+    bl = max(boxes, key=lambda b: b[1] - b[0])
+    if len({tl, tr, bl}) < 3:
+        return None
+    return tl, tr, bl
+
+
+def _hermite(t0, p0, m0, t1, p1, m1):
+    def f(t):
+        u = (t - t0) / (t1 - t0)
+        return ((2 * u**3 - 3 * u**2 + 1) * p0 + (u**3 - 2 * u**2 + u) * (t1 - t0) * m0
+                + (-2 * u**3 + 3 * u**2) * p1 + (u**3 - u**2) * (t1 - t0) * m1)
+    return f
+
+
+def _decode_qr_by_finders(gray, sizes=(21, 25, 29, 33, 37, 41)):
+    """
+    Fallback for printed QRs with ink bleed or uneven scanner stretch, which defeat the stock decoders.
+    Maps module rows/columns with a spline anchored on the finder centres and their local module size,
+    samples each module centre, then decodes a clean re-rendered QR.
+    """
+    found = _find_qr_finders(gray)
+    if not found:
+        return ""
+    tl, tr, bl = found
+    cx = lambda b: b[0] + b[2] / 2.0
+    cy = lambda b: b[1] + b[3] / 2.0
+    radius = max(1, int(min(tl[2], tl[3]) / 7.0 * 0.2))
+    decoders = [cv2.QRCodeDetector()]
+    if hasattr(cv2, "QRCodeDetectorAruco"):
+        decoders.append(cv2.QRCodeDetectorAruco())
+    quiet, cell = 4, 10
+    for n in sizes:
+        xs = _hermite(3.5, cx(tl), tl[2] / 7.0, n - 3.5, cx(tr), tr[2] / 7.0)
+        ys = _hermite(3.5, cy(tl), tl[3] / 7.0, n - 3.5, cy(bl), bl[3] / 7.0)
+        vals = np.empty((n, n), np.float32)
+        for i in range(n):
+            yi = int(round(ys(i + 0.5)))
+            for j in range(n):
+                xi = int(round(xs(j + 0.5)))
+                patch = gray[max(0, yi - radius):yi + radius + 1, max(0, xi - radius):xi + radius + 1]
+                vals[i, j] = patch.mean() if patch.size else 255.0
+        thr, _ = cv2.threshold(vals.astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        dark = vals < thr
+        clean = np.full(((n + 2 * quiet) * cell, (n + 2 * quiet) * cell), 255, np.uint8)
+        for i, j in zip(*np.nonzero(dark)):
+            clean[(i + quiet) * cell:(i + quiet + 1) * cell, (j + quiet) * cell:(j + quiet + 1) * cell] = 0
+        for dec in decoders:
+            try:
+                txt = dec.detectAndDecode(clean)[0]
+            except Exception:
+                txt = ""
+            if txt:
+                return txt
+    return ""
+
+
+def decode_qr_by_location(images):
+    """Locate the QR with OpenCV's detector (works even when decoding fails), crop it, then resample."""
+    detectors = [cv2.QRCodeDetector()]
+    if hasattr(cv2, "QRCodeDetectorAruco"):
+        detectors.append(cv2.QRCodeDetectorAruco())
+    for im in images:
+        if im is None or im.size == 0:
+            continue
+        gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY) if len(im.shape) == 3 else im
+        H, W = gray.shape[:2]
+        for det in detectors:
+            try:
+                ok, pts = det.detect(gray)
+            except Exception:
+                ok, pts = False, None
+            if not ok or pts is None:
+                continue
+            pts = pts.reshape(-1, 2)
+            x0, y0 = pts.min(axis=0)
+            x1, y1 = pts.max(axis=0)
+            pad = 0.15 * max(x1 - x0, y1 - y0)
+            crop = gray[max(0, int(y0 - pad)):min(H, int(y1 + pad)), max(0, int(x0 - pad)):min(W, int(x1 + pad))]
+            if crop.size == 0:
+                continue
+            payload = _decode_qr_by_finders(crop)
+            if payload:
+                return payload
+    return ""
+
+
+def decode_qr_robust(images):
+    """Try every image × preprocessing variant × decoder until a QR payload is found."""
+    payload = decode_qr_by_location(images)
+    if payload:
+        return payload
+    decoders = list(_qr_decoders())
+    for im in images:
+        for variant in _qr_variants(im):
+            for dec in decoders:
+                try:
+                    payload = dec(variant)
+                except Exception:
+                    payload = ""
+                if payload:
+                    return payload
+    return ""
+
+
 def parse_qr_payload(qr_text):
     """
     Backward compatible QR parser.
@@ -642,7 +1030,7 @@ def parse_qr_payload(qr_text):
       - JSON payload: {"id":"...","nq":20,"tpl":"default"}
     """
     if not qr_text:
-        return {"student_id": "", "num_questions": None, "template": None, "raw": ""}
+        return {"student_id": "", "num_questions": None, "template": None, "raw": "", "id_source": ""}
     raw = str(qr_text).strip()
     student_id = raw
     num_questions = None
@@ -666,6 +1054,7 @@ def parse_qr_payload(qr_text):
         "num_questions": num_questions,
         "template": template,
         "raw": raw,
+        "id_source": "qr" if student_id else "",
     }
 
 
@@ -745,7 +1134,7 @@ def build_system_view_image(warped_gray, annotated_proc_bgr):
         return ""
 
 
-def build_annotated_proc_view(proc_gray, row_data, answers, needs_review_questions, y_start, row_sp, per_col, L_XS, R_XS):
+def build_annotated_proc_view(proc_gray, row_data, answers, needs_review_questions, y_start, row_sp, per_col, L_XS, R_XS, bub_r=QS_BUBBLE_R):
     """
     Draw OMR detection marks on top of the preprocessed image:
     - all bubble centers in light cyan
@@ -760,33 +1149,78 @@ def build_annotated_proc_view(proc_gray, row_data, answers, needs_review_questio
 
     letter_to_idx = {"A": 0, "B": 1, "C": 2, "D": 3}
     review_set = set(needs_review_questions or [])
+    col_xs_list = None
+    if row_data and row_data[0].get("xs"):
+        col_xs_list = True
 
     for row in row_data:
         q = int(row.get("q", 0))
         if q <= 0:
             continue
-        is_left = (q - 1) >= per_col
-        row_idx = (q - 1) % per_col
-        y_center = int(y_start + row_idx * row_sp)
-        xs = L_XS if is_left else R_XS
+        if col_xs_list and row.get("xs"):
+            xs = row["xs"]
+            y_center = int(row.get("y", y_start))
+        else:
+            is_left = (q - 1) >= per_col
+            row_idx = (q - 1) % per_col
+            y_center = int(y_start + row_idx * row_sp)
+            xs = L_XS if is_left else R_XS
 
-        # Base markers for all candidate bubbles.
+        ring_r = max(14, int(bub_r * 0.92))
+        dot_r = max(6, int(bub_r * 0.22))
+
+        # Base markers for all candidate bubbles (ring matches printed circle size).
         for x in xs:
-            cv2.circle(vis, (int(x), y_center), 10, (230, 220, 120), 2)
+            cv2.circle(vis, (int(x), y_center), ring_r, (230, 220, 120), 2)
 
         # Highlight detected answer.
         ans = str((answers or {}).get(str(q), "")).upper()
         if ans in letter_to_idx and letter_to_idx[ans] < len(xs):
             pick_x = int(xs[letter_to_idx[ans]])
             color = (0, 190, 255) if q in review_set else (0, 200, 0)
-            cv2.circle(vis, (pick_x, y_center), 18, color, 3)
-            cv2.circle(vis, (pick_x, y_center), 5, color, -1)
+            cv2.circle(vis, (pick_x, y_center), ring_r, color, 3)
+            cv2.circle(vis, (pick_x, y_center), dot_r, color, -1)
+        elif q in review_set and row.get("darks"):
+            darks = row["darks"]
+            k = int(np.argmax(darks))
+            if k < len(xs):
+                cv2.circle(vis, (int(xs[k]), y_center), ring_r, (0, 190, 255), 3)
 
         # Question id for quick tracking.
-        cv2.putText(vis, f"Q{q}", (int(max(xs) + 16), y_center + 6),
+        label_x = int(min(xs) - 48)
+        if label_x < 8:
+            label_x = int(max(xs) + 16)
+        cv2.putText(vis, f"Q{q}", (label_x, y_center + 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, (50, 80, 240), 1, cv2.LINE_AA)
 
     return vis
+
+
+def rebuild_system_view_for_answers(pass_scan, answers, needs_review_questions):
+    """
+    Re-draw the system preview from the same geometry as a scan pass, but using
+    the final answer map (e.g. after double-pass merge). Keeps preview aligned
+    with scored results.
+    """
+    ctx = (pass_scan or {}).get("_annotation_ctx")
+    if not ctx:
+        return (pass_scan or {}).get("system_view_image", "")
+    try:
+        annotated = build_annotated_proc_view(
+            proc_gray=ctx["warped_gray"],
+            row_data=ctx["row_data"],
+            answers=answers or {},
+            needs_review_questions=needs_review_questions or [],
+            y_start=ctx["y_start"],
+            row_sp=ctx["row_sp"],
+            per_col=ctx["per_col"],
+            L_XS=ctx["L_XS"],
+            R_XS=ctx["R_XS"],
+            bub_r=ctx.get("bub_r", QS_BUBBLE_R),
+        )
+        return build_system_view_image(ctx["warped_gray"], annotated)
+    except Exception:
+        return (pass_scan or {}).get("system_view_image", "")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -841,8 +1275,9 @@ def get_bubble_grid_elite():
     Mirrors generator_elite.py layout.
     Q1-15 → RIGHT column  |  Q16-30 → LEFT column
     """
+    from omr_constants import QS_START_Y
     row_spacing = 120
-    y0          = MARGIN + 850   # first bubble Y = 1000
+    y0          = QS_START_Y
     col_w       = (WIDTH - 2 * MARGIN) // 2   # 1090
 
     r_col_x = MARGIN + col_w + 40   # 1280
@@ -851,7 +1286,341 @@ def get_bubble_grid_elite():
     R_XS = [r_col_x + col_w - 120 - j * 120 for j in range(4)]
     L_XS = [l_col_x + col_w - 120 - j * 120 for j in range(4)]
 
-    return R_XS, L_XS, y0, row_spacing, 35, 28
+    return R_XS, L_XS, y0, row_spacing, 30, 28
+
+
+def get_watania_answer_layout():
+    from omr_watania import answer_columns, ANS_BUBBLE_R, ANS_PER_COL
+    cols, y0, row_sp = answer_columns()
+    return cols, y0, row_sp, ANS_BUBBLE_R, ANS_PER_COL
+
+
+def _cluster_1d(vals, min_sep):
+    if vals is None or len(vals) == 0:
+        return []
+    arr = np.sort(np.asarray(vals, dtype=float))
+    clusters = []
+    cur = [arr[0]]
+    for v in arr[1:]:
+        if v - cur[-1] < min_sep:
+            cur.append(v)
+        else:
+            clusters.append(float(np.median(cur)))
+            cur = [v]
+    clusters.append(float(np.median(cur)))
+    return clusters
+
+
+def _hough_circles_in_band(gray, y_lo, y_hi, min_r=11, max_r=30, min_dist=26, param2=16):
+    h, w = gray.shape[:2]
+    y_lo = max(0, int(y_lo))
+    y_hi = min(h, int(y_hi))
+    if y_hi - y_lo < 80:
+        return []
+    roi = gray[y_lo:y_hi, :]
+    blurred = cv2.GaussianBlur(roi, (5, 5), 1.1)
+    circles = cv2.HoughCircles(
+        blurred,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=min_dist,
+        param1=70,
+        param2=param2,
+        minRadius=min_r,
+        maxRadius=max_r,
+    )
+    if circles is None:
+        return []
+    pts = []
+    for c in np.round(circles[0]).astype(int):
+        pts.append((int(c[0]), int(c[1]) + y_lo, int(c[2])))
+    return pts
+
+
+def _best_uniform_run(vals, n, expected_gap=None):
+    vals = sorted(float(v) for v in vals)
+    if len(vals) < max(2, n - 2):
+        return vals
+    take = min(n, len(vals))
+    best = None
+    for i in range(len(vals) - take + 1):
+        chunk = vals[i:i + take]
+        diffs = np.diff(chunk)
+        if diffs.size == 0:
+            continue
+        if expected_gap:
+            score = float(np.mean(np.abs(diffs - expected_gap)))
+        else:
+            score = float(np.std(diffs))
+        if best is None or score < best[0]:
+            best = (score, list(chunk))
+    chunk = best[1] if best else vals[:take]
+    if len(chunk) < n and len(chunk) >= 2:
+        sp = float(np.median(np.diff(chunk)))
+        while len(chunk) < n:
+            chunk.append(chunk[-1] + sp)
+    return chunk[:n]
+
+
+def _runs_by_gap(xs, gap_lo, gap_hi):
+    xs = sorted(float(v) for v in xs)
+    if not xs:
+        return []
+    runs = [[xs[0]]]
+    for prev, cur in zip(xs, xs[1:]):
+        if gap_lo <= (cur - prev) <= gap_hi:
+            runs[-1].append(cur)
+        else:
+            runs.append([cur])
+    return runs
+
+
+def _four_from_run(run, expected_gap=78):
+    run = sorted(float(v) for v in run)
+    if len(run) < 4:
+        return None
+    best = None
+    for k in range(len(run) - 3):
+        ch = run[k:k + 4]
+        score = float(np.mean(np.abs(np.diff(ch) - expected_gap)))
+        score += 0.02 * k  # question numbers sit to the right of أ
+        if best is None or score < best[0]:
+            best = (score, ch)
+    return best[1]
+
+
+def recover_watania_answer_grid(warped_gray):
+    """
+    Rebuild the 3×10×4 answer grid from printed circles on a ministry sheet.
+    Returns (cols, y0, row_sp, bub_r) or None.
+    """
+    # 0.50H sits below the أ/ب/ج/د header and below the ID grids.
+    y_lo = HEIGHT * 0.50
+    y_hi = HEIGHT - 40
+    pts = []
+    for p2, md in ((14, 24), (12, 22), (11, 20)):
+        pts = _hough_circles_in_band(
+            warped_gray, y_lo, y_hi, min_r=14, max_r=26, min_dist=md, param2=p2
+        )
+        if len(pts) >= 48:
+            break
+    if len(pts) < 36:
+        return None
+    r_med = float(np.median([p[2] for p in pts]))
+    pts = [p for p in pts if abs(p[2] - r_med) <= 6]
+    y_rows = _best_uniform_run(
+        _cluster_1d([p[1] for p in pts], min_sep=55),
+        10,
+        expected_gap=HEIGHT * 0.047,
+    )
+    if len(y_rows) < 8:
+        return None
+    pts = [p for p in pts if min(abs(p[1] - y) for y in y_rows) <= 36]
+    x_cols = sorted(_cluster_1d([p[0] for p in pts], min_sep=32))
+    runs = _runs_by_gap(x_cols, gap_lo=52, gap_hi=108)
+    groups = []
+    for run in runs:
+        four = _four_from_run(run, expected_gap=78)
+        if four is not None:
+            groups.append(four)
+    if len(groups) < 3:
+        return None
+    if len(groups) > 3:
+        groups = sorted(groups, key=lambda g: float(np.mean(g)))
+        # drop edge artifacts; keep the 3 groups nearest page center
+        groups = groups[1:4] if len(groups) >= 4 and groups[0][0] < 220 else groups[-3:]
+    groups = sorted(groups, key=lambda g: float(np.mean(g)))[:3]
+    if len(groups) < 3:
+        return None
+
+    def pack(four):
+        return [int(round(v)) for v in sorted(four, reverse=True)]
+
+    cols = [
+        {"xs": pack(groups[2])},
+        {"xs": pack(groups[1])},
+        {"xs": pack(groups[0])},
+    ]
+    y_rows = [int(round(v)) for v in y_rows[:10]]
+    y0 = y_rows[0]
+    row_sp = (y_rows[-1] - y_rows[0]) / float(max(1, len(y_rows) - 1))
+    bub_r = int(round(r_med)) if r_med else 20
+    bub_r = max(14, min(28, bub_r))
+    return cols, y0, row_sp, bub_r
+
+
+def recover_watania_id_grids(warped_gray):
+    """
+    Rebuild national-ID (10×10) and school-code (6×10) grids from printed dots.
+    Returns (nid_xs, nid_ys, code_xs, code_ys, radius) or None.
+    """
+    pts = []
+    for p2, md in ((13, 20), (16, 24)):
+        pts = _hough_circles_in_band(
+            warped_gray, HEIGHT * 0.185, HEIGHT * 0.455, min_r=14, max_r=28, min_dist=md, param2=p2
+        )
+        if len(pts) >= 120:
+            break
+    if len(pts) < 60:
+        return None
+    r_med = float(np.median([p[2] for p in pts]))
+    pts = [p for p in pts if abs(p[2] - r_med) <= 6]
+    y_rows = _best_uniform_run(
+        _cluster_1d([p[1] for p in pts], min_sep=42),
+        10,
+        expected_gap=HEIGHT * 0.027,
+    )
+    if len(y_rows) < 8:
+        return None
+    pts = [p for p in pts if min(abs(p[1] - y) for y in y_rows) <= 28]
+    x_cols = [x for x in sorted(_cluster_1d([p[0] for p in pts], min_sep=26)) if 200 < x < 1800]
+    runs = _runs_by_gap(x_cols, gap_lo=55, gap_hi=110)
+    nid_xs, code_xs = [], []
+    for run in runs:
+        if len(run) >= 10 and not nid_xs:
+            nid_xs = [int(round(v)) for v in run[:10]]
+        elif len(run) >= 6 and nid_xs and not code_xs:
+            # school-code is immediately to the right of the national-ID grid
+            code_xs = [int(round(v)) for v in run[:6]]
+    if len(nid_xs) < 10 and len(x_cols) >= 10:
+        nid_xs = [int(round(v)) for v in x_cols[:10]]
+        if len(x_cols) >= 16:
+            code_xs = [int(round(v)) for v in x_cols[10:16]]
+    if len(nid_xs) < 10:
+        return None
+    ys = [int(round(v)) for v in y_rows[:10]]
+    bub_r = max(14, min(26, int(round(r_med))))
+    return nid_xs, ys, code_xs, ys, bub_r
+
+
+def detect_watania_sheet(warped_gray):
+    """Ministry national form: 3 answer columns of 4 bubbles, no corner markers."""
+    from watania_grid import recover_answer_lattice
+    if recover_answer_lattice(warped_gray) is not None:
+        return True
+    corners = find_corner_markers(warped_gray)
+    if corners is not None:
+        return False
+    pts = _hough_circles_in_band(warped_gray, HEIGHT * 0.48, HEIGHT - 40, min_r=11, max_r=30)
+    x_cols = _cluster_1d([p[0] for p in pts], min_sep=32)
+    y_rows = _cluster_1d([p[1] for p in pts], min_sep=55)
+    # NAFS is 2×4 = 8 x-clusters; watania is 3×4 = 12.
+    return len(x_cols) >= 10 and len(y_rows) >= 8
+
+
+def auto_align_watania_grid(warped_gray, cols, y_start, row_sp, bub_r):
+    recovered = recover_watania_answer_grid(warped_gray)
+    if recovered is not None:
+        r_cols, r_y0, r_sp, r_bub = recovered
+        return r_cols, r_y0, r_sp, r_bub, True
+    cols = [{"xs": [int(x) for x in c["xs"]]} for c in cols]
+    dx, dy, n = calibrate_grid_offset_hough(
+        warped_gray, cols[0]["xs"], cols[-1]["xs"], y_start, row_sp, bub_r, 20
+    )
+    if n >= 10 and abs(dx) <= 120 and abs(dy) <= 140:
+        for c in cols:
+            c["xs"] = [int(x + dx) for x in c["xs"]]
+        return cols, y_start + dy, row_sp, bub_r, True
+    return cols, y_start, row_sp, bub_r, False
+
+
+def read_digit_grid(proc_gray, warped_gray, xs, ys, radius, min_fill=0.18, min_dark=0.40):
+    """
+    Read one digit per column (0-9 rows). Leftmost xs[0] = first digit.
+    Solid-black printed marks can make adaptive fill=0; darkness is the
+    reliable signal on official ID grids.
+    """
+    digits = []
+    confs = []
+    for cx in xs:
+        dens = []
+        darks = []
+        for cy in ys:
+            dens.append(bubble_ink_ratio(proc_gray, cx, cy, radius))
+            darks.append(bubble_darkness(warped_gray, cx, cy, radius))
+        valid = [(i, d, k) for i, (d, k) in enumerate(zip(dens, darks)) if k >= 0]
+        if not valid:
+            digits.append("")
+            confs.append(0.0)
+            continue
+        ranked = sorted(valid, key=lambda t: t[2], reverse=True)
+        best_i, best_d, best_k = ranked[0]
+        second_k = ranked[1][2] if len(ranked) > 1 else 0.0
+        filled = best_k >= min_dark or (best_d >= min_fill and best_k >= 0.22)
+        if not filled:
+            digits.append("")
+            confs.append(0.0)
+            continue
+        if second_k > 0.35 and (best_k - second_k) < 0.12:
+            digits.append("")
+            confs.append(0.0)
+            continue
+        dominance = best_k / max(0.08, second_k)
+        digits.append(str(best_i))
+        confs.append(min(1.0, 0.50 + 0.25 * min(3.0, dominance) + 0.2 * best_k))
+    return "".join(digits), confs
+
+
+def read_digit_lattice(proc_gray, warped_gray, lattice, radius, min_fill=0.18, min_dark=0.40):
+    """lattice[row=digit][col] = (x, y). Column 0 = first (leftmost) digit."""
+    if not lattice:
+        return "", []
+    n_cols = len(lattice[0])
+    digits, confs = [], []
+    for c in range(n_cols):
+        dens, darks = [], []
+        for r in range(len(lattice)):
+            x, y = lattice[r][c]
+            dens.append(bubble_ink_ratio(proc_gray, x, y, radius))
+            darks.append(bubble_darkness(warped_gray, x, y, radius))
+        valid = [(i, d, k) for i, (d, k) in enumerate(zip(dens, darks)) if k >= 0]
+        if not valid:
+            digits.append("")
+            confs.append(0.0)
+            continue
+        ranked = sorted(valid, key=lambda t: t[2], reverse=True)
+        best_i, best_d, best_k = ranked[0]
+        second_k = ranked[1][2] if len(ranked) > 1 else 0.0
+        filled = best_k >= min_dark or (best_d >= min_fill and best_k >= 0.22)
+        if not filled or (second_k > 0.35 and (best_k - second_k) < 0.12):
+            digits.append("")
+            confs.append(0.0)
+            continue
+        dominance = best_k / max(0.08, second_k)
+        digits.append(str(best_i))
+        confs.append(min(1.0, 0.50 + 0.25 * min(3.0, dominance) + 0.2 * best_k))
+    return "".join(digits), confs
+
+
+def read_watania_identity(proc_gray, warped_gray, recovered=None, lattices=None):
+    from omr_watania import national_id_grid, school_code_grid, ID_BUBBLE_R
+    if lattices and lattices.get("nid"):
+        radius = max(10, int(lattices.get("bub_r", ID_BUBBLE_R)))
+        national_id, nid_conf = read_digit_lattice(proc_gray, warped_gray, lattices["nid"], radius)
+        school_code, code_conf = read_digit_lattice(proc_gray, warped_gray, lattices.get("code"), radius)
+        return {
+            "national_id": national_id,
+            "school_code": school_code,
+            "national_id_confidence": round(float(np.mean(nid_conf)) if nid_conf else 0.0, 3),
+            "school_code_confidence": round(float(np.mean(code_conf)) if code_conf else 0.0, 3),
+        }
+    if recovered:
+        nid_xs, nid_ys, code_xs, code_ys, radius = recovered
+    else:
+        nid_xs, nid_ys, _, _ = national_id_grid()
+        code_xs, code_ys, _, _ = school_code_grid()
+        radius = ID_BUBBLE_R
+    national_id, nid_conf = read_digit_grid(proc_gray, warped_gray, nid_xs, nid_ys, radius)
+    if code_xs:
+        school_code, code_conf = read_digit_grid(proc_gray, warped_gray, code_xs, code_ys, radius)
+    else:
+        school_code, code_conf = "", []
+    return {
+        "national_id": national_id,
+        "school_code": school_code,
+        "national_id_confidence": round(float(np.mean(nid_conf)) if nid_conf else 0.0, 3),
+        "school_code_confidence": round(float(np.mean(code_conf)) if code_conf else 0.0, 3),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -935,69 +1704,67 @@ def _scan_omr_single(
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     # ── 1. Alignment strategy ────────────────────────────────────────────────
-    #   • from_scanner=True  → image already fills the frame; contour detection
-    #     would return None or fail. Go straight to resize + corner markers.
-    #   • from_scanner=False → uploaded photo/image; use paper-contour warp.
-    if from_scanner:
-        # Scanner images already fill the frame — just resize to canonical size
+    # Always try a paper contour first (ministry forms have no corner markers).
+    # Scanner full-bleed pages often fail contour; then we resize and recover
+    # the bubble grid from Hough circles.
+    paper_cnt = get_paper_contour(gray)
+    if paper_cnt is None:
+        paper_cnt = get_paper_contour(gray, min_area_frac=0.35)
+    if paper_cnt is not None:
+        pts  = paper_cnt.reshape(4, 2)
+        rect = order_points(pts)
+        M    = cv2.getPerspectiveTransform(
+            rect,
+            np.array([[0, 0], [WIDTH, 0], [WIDTH, HEIGHT], [0, HEIGHT]],
+                     dtype="float32"))
+        warped = cv2.warpPerspective(img, M, (WIDTH, HEIGHT))
+        warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+    elif from_scanner:
         warped      = cv2.resize(img,  (WIDTH, HEIGHT))
         warped_gray = cv2.resize(gray, (WIDTH, HEIGHT))
     else:
-        paper_cnt = get_paper_contour(gray)
-        if paper_cnt is not None:
-            pts  = paper_cnt.reshape(4, 2)
-            rect = order_points(pts)
-            M    = cv2.getPerspectiveTransform(
-                rect,
-                np.array([[0, 0], [WIDTH, 0], [WIDTH, HEIGHT], [0, HEIGHT]],
-                         dtype="float32"))
-            warped = cv2.warpPerspective(img, M, (WIDTH, HEIGHT))
-        else:
-            # No paper contour — resize first then try corner-marker warp
-            # as a direct perspective source (avoids scale distortion).
-            warped = cv2.resize(img, (WIDTH, HEIGHT))
-            warped_gray_tmp = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-            corners_direct = find_corner_markers(warped_gray_tmp)
-            if corners_direct is not None:
-                # Use corner markers as the source for a full perspective warp
-                tl, tr, bl, br = corners_direct
-                src_pts = np.array([tl, tr, br, bl], dtype="float32")
-                ms_h  = CORNER_MARKER_SIZE
-                off_h = MARGIN + ms_h // 2
-                dst_pts = np.array([
-                    [off_h, off_h],
-                    [WIDTH - off_h, off_h],
-                    [WIDTH - off_h, HEIGHT - off_h],
-                    [off_h, HEIGHT - off_h],
-                ], dtype="float32")
-                M2 = cv2.getPerspectiveTransform(src_pts, dst_pts)
-                warped = cv2.warpPerspective(warped, M2, (WIDTH, HEIGHT))
+        warped = cv2.resize(img, (WIDTH, HEIGHT))
+        warped_gray_tmp = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        corners_direct = find_corner_markers(warped_gray_tmp)
+        if corners_direct is not None:
+            tl, tr, bl, br = corners_direct
+            src_pts = np.array([tl, tr, br, bl], dtype="float32")
+            ms_h  = CORNER_MARKER_SIZE
+            off_h = MARGIN + ms_h // 2
+            dst_pts = np.array([
+                [off_h, off_h],
+                [WIDTH - off_h, off_h],
+                [WIDTH - off_h, HEIGHT - off_h],
+                [off_h, HEIGHT - off_h],
+            ], dtype="float32")
+            M2 = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            warped = cv2.warpPerspective(warped, M2, (WIDTH, HEIGHT))
         warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
 
     # ── 2. Fine alignment: corner-marker refinement ──────────────────────────
-    #   This is especially critical for scanner images where the paper never
-    #   has a visible border, so the only reliable anchors are the printed
-    #   corner squares.
-    warped, warped_gray = refine_warp_with_markers(warped, warped_gray)
-    # then attempt refinement once more
+    style_l = str(style or "").lower()
+    is_watania = style_l in ("watania", "national", "watania_official")
+    if not is_watania and detect_watania_sheet(warped_gray):
+        is_watania = True
+    align_gray = warped_gray
     if from_scanner:
-        corners_found = find_corner_markers(warped_gray)
-        if corners_found is None:
-            enhanced = cv2.bilateralFilter(warped_gray, 9, 75, 75)
-            # Use enhanced gray for corner detection
-            warped_gray_enh = enhanced
-            warped, warped_gray = refine_warp_with_markers(warped, warped_gray_enh)
-            
-            # Re-check if refinement still fails
-            if find_corner_markers(warped_gray) is None:
-                alignment_failed = True
-            else:
-                alignment_failed = False
+        align_gray = cv2.bilateralFilter(warped_gray, 9, 75, 75)
+    if is_watania:
+        # Official ministry form has no corner markers / QR.
+        alignment_failed = False
+    else:
+        warped, warped_gray = refine_warp_with_markers(warped, align_gray)
+        if from_scanner:
+            corners_found = find_corner_markers(warped_gray)
+            if corners_found is None:
+                warped, warped_gray = refine_warp_with_markers(warped, align_gray)
+                corners_found = find_corner_markers(warped_gray)
+            alignment_failed = corners_found is None
         else:
             alignment_failed = False
-    else:
-        # For non-scanner images, alignment depends on paper contour
-        alignment_failed = False
+        if alignment_failed and detect_watania_sheet(warped_gray):
+            is_watania = True
+            alignment_failed = False
 
     cv2.imwrite(os.path.join(DEBUG_DIR, "last_warped.png"), warped)
 
@@ -1018,30 +1785,92 @@ def _scan_omr_single(
     # ── 4. QR / student-ID detection ─────────────────────────────────────────
     student_id = ""
     qr_payload = ""
-    if decode_qr:
-        # Try full image first, then top half
-        for roi_img in [warped, warped[0:1400, :]]:
-            results = decode_qr(roi_img)
-            if results:
-                qr_payload = results[0].data.decode("utf-8")
-                break
-    if not qr_payload:
-        qrd = cv2.QRCodeDetector()
-        for roi_img in [warped, warped[0:1400, :]]:
-            sid, _, _ = qrd.detectAndDecode(roi_img)
-            if sid:
-                qr_payload = sid
-                break
+    watania_identity = {}
+    if not is_watania:
+        if decode_qr:
+            for roi_img in [warped, warped[0:1400, :]]:
+                results = decode_qr(roi_img)
+                if results:
+                    qr_payload = results[0].data.decode("utf-8")
+                    break
+        if not qr_payload:
+            qrd = cv2.QRCodeDetector()
+            for roi_img in [warped, warped[0:1400, :]]:
+                sid, _, _ = qrd.detectAndDecode(roi_img)
+                if sid:
+                    qr_payload = sid
+                    break
+        if not qr_payload:
+            oh = img.shape[0]
+            qr_payload = decode_qr_robust([
+                warped[0:1400, :],
+                img[0:int(oh * 0.45), :],
+                img,
+                warped,
+            ])
     qr_meta = parse_qr_payload(qr_payload)
     student_id = qr_meta["student_id"]
 
     # ── 5. Select geometry based on template style ───────────────────────────
-    if style == "elite":
+    watania_cols = None
+    watania_centres = None
+    per_col_fixed = 10
+    if is_watania:
+        from watania_grid import recover_answer_lattice, recover_id_lattices
+        num_questions = 30
+        answer_lat = recover_answer_lattice(warped_gray)
+        id_lat = None
+        if answer_lat is not None:
+            watania_centres = answer_lat["centres"]
+            bub_r = max(12, int(answer_lat["bub_r"]))
+            row_sp = float(answer_lat["spacing"])
+            y_start = int(answer_lat["row_ys"][0])
+            watania_cols = [
+                {"xs": [x for x, _ in watania_centres[1 + 10 * g]]} for g in range(3)
+            ]
+            y_tol = 8
+            grid_dx, grid_dy = 1, 1
+            quality_flags.append("watania_grid_recovered")
+            id_lat = recover_id_lattices(warped_gray, answer_top=min(answer_lat["row_ys"]))
+        else:
+            watania_cols, y_start, row_sp, bub_r, per_col_fixed = get_watania_answer_layout()
+            watania_cols, y_start, row_sp, bub_r, watania_aligned = auto_align_watania_grid(
+                warped_gray, watania_cols, y_start, row_sp, bub_r
+            )
+            y_tol = 22
+            grid_dx, grid_dy = (1, 1) if watania_aligned else (0, 0)
+            quality_flags.append("watania_grid_template_fallback")
+        R_XS = watania_cols[0]["xs"]
+        L_XS = watania_cols[-1]["xs"]
+        if style_l not in ("watania", "national", "watania_official"):
+            quality_flags.append("watania_autodetect")
+        if id_lat is not None:
+            watania_identity = read_watania_identity(proc_gray, warped_gray, lattices=id_lat)
+        else:
+            id_recovered = recover_watania_id_grids(warped_gray)
+            watania_identity = read_watania_identity(proc_gray, warped_gray, recovered=id_recovered)
+        nid = (watania_identity.get("national_id") or "").strip()
+        student_id = nid or student_id
+        qr_meta = {
+            "student_id": student_id,
+            "num_questions": 30,
+            "template": "watania",
+            "raw": nid or qr_payload or "",
+            "id_source": "national_grid",
+        }
+    elif style == "elite":
         R_XS, L_XS, y_start, row_sp, bub_r, y_tol = get_bubble_grid_elite()
     elif style == "nafs":
         R_XS, L_XS, y_start, row_sp, bub_r, y_tol = get_bubble_grid_nafs()
     else:
         R_XS, L_XS, y_start, row_sp, bub_r, y_tol = get_bubble_grid_default()
+
+    if not is_watania:
+        R_XS, L_XS, y_start, grid_dx, grid_dy = auto_align_bubble_grid(
+            warped_gray, R_XS, L_XS, y_start, row_sp, bub_r, num_questions
+        )
+        if grid_dx or grid_dy:
+            quality_flags.append("grid_auto_aligned")
 
     quality_gate_min = 0.35 if sensitivity != "sensitive" else 0.30
     if quality_score < quality_gate_min:
@@ -1073,13 +1902,22 @@ def _scan_omr_single(
     # This allows 20-question exams to only read 20 bubbles on a 30-bubble sheet.
     # First pass: gather per-row metrics so we can adapt thresholds per sheet.
     row_data = []
-    per_col = (num_questions + 1) // 2   # questions per column (ceiling)
+    per_col = per_col_fixed if is_watania else (num_questions + 1) // 2
     for q in range(num_questions):
-        is_left  = q >= per_col
-        row_idx  = q % per_col
-        y_center = y_start + row_idx * row_sp
-
-        xs = L_XS if is_left else R_XS
+        if is_watania and watania_centres:
+            pts_q = watania_centres[q + 1]
+            xs = [x for x, _ in pts_q]
+            y_center = int(round(float(np.mean([y for _, y in pts_q]))))
+        elif is_watania:
+            col_i = min(q // per_col, len(watania_cols) - 1)
+            row_idx = q % per_col
+            xs = watania_cols[col_i]["xs"]
+            y_center = int(y_start + row_idx * row_sp)
+        else:
+            is_left  = q >= per_col
+            row_idx  = q % per_col
+            y_center = y_start + row_idx * row_sp
+            xs = L_XS if is_left else R_XS
         dens = row_densities(proc_gray, xs, y_center, bub_r, y_tol)
         darks = row_darknesses(warped_gray, xs, y_center, bub_r, y_tol)
         if dens:
@@ -1095,6 +1933,8 @@ def _scan_omr_single(
             "darks": darks,
             "max_d": max_d,
             "max_dark": max_dark,
+            "xs": xs,
+            "y": y_center,
         })
 
     thresholds = derive_sheet_thresholds(row_data)
@@ -1114,22 +1954,33 @@ def _scan_omr_single(
     unstable_questions = []
     review_reasons = {}
     review_rois = {}
+    watania_model = watania_dark_model(row_data) if is_watania else None
+
+    def decide(dens, darks):
+        if watania_model is not None:
+            return evaluate_row_watania(darks, *watania_model)
+        return evaluate_row(dens, darks, thresholds)
+
     for row in row_data:
         q = row["q"]
-        ans, conf, needs_review, tags = evaluate_row(row["dens"], row["darks"], thresholds)
+        ans, conf, needs_review, tags = decide(row["dens"], row["darks"])
         reason_tags = list(tags)
 
         # Stability check: re-evaluate around nearby row centers.
         if enable_stability and row["dens"]:
-            row_idx = (q - 1) % per_col
-            y_center = y_start + row_idx * row_sp
-            is_left = (q - 1) >= per_col
-            xs = L_XS if is_left else R_XS
+            if is_watania:
+                xs = row.get("xs") or xs
+                y_center = int(row.get("y", y_start))
+            else:
+                row_idx = (q - 1) % per_col
+                y_center = y_start + row_idx * row_sp
+                is_left = (q - 1) >= per_col
+                xs = L_XS if is_left else R_XS
             jitter_answers = []
             for y_shift in (-6, 0, 6):
                 d2 = row_densities(proc_gray, xs, y_center + y_shift, bub_r, max(12, y_tol // 2))
                 k2 = row_darknesses(warped_gray, xs, y_center + y_shift, bub_r, max(12, y_tol // 2))
-                a2, _, _, _ = evaluate_row(d2, k2, thresholds)
+                a2, _, _, _ = decide(d2, k2)
                 jitter_answers.append(a2)
             # Only treat as unstable when two different non-blank answers appear.
             # Mixing "" with a letter is normal for a single mark near row edge — not ambiguity.
@@ -1154,8 +2005,9 @@ def _scan_omr_single(
             if roi_b64:
                 review_rois[str(q)] = roi_b64
 
+    # Draw overlays on the aligned scan (not CLAHE) so review view matches the left panel.
     annotated_proc = build_annotated_proc_view(
-        proc_gray=proc_gray,
+        proc_gray=warped_gray,
         row_data=row_data,
         answers=answers,
         needs_review_questions=needs_review_questions,
@@ -1164,16 +2016,20 @@ def _scan_omr_single(
         per_col=per_col,
         L_XS=L_XS,
         R_XS=R_XS,
+        bub_r=bub_r,
     )
     system_view_image = build_system_view_image(warped_gray, annotated_proc)
 
     return {
         "student_id": student_id,
         "qr_meta": qr_meta,
+        "id_source": "national_grid" if is_watania else (qr_meta.get("id_source") or ("qr" if student_id else "")),
+        "school_code": watania_identity.get("school_code", ""),
         "answers":    answers,
         "confidence": confidence_by_question,
         "needs_review_questions": needs_review_questions,
         "review_rois": review_rois,
+        "grid_offset": {"dx": grid_dx, "dy": grid_dy},
         "quality_score": round(quality_score, 3),
         "quality_flags": quality_flags,
         "unstable_questions": unstable_questions,
@@ -1187,6 +2043,17 @@ def _scan_omr_single(
         "system_view_image": system_view_image,
         "review_reasons": review_reasons,
         "status":     "success",
+        # Internal only — used to rebuild preview after double-pass merge (not sent to client).
+        "_annotation_ctx": {
+            "warped_gray": warped_gray,
+            "row_data": row_data,
+            "y_start": y_start,
+            "row_sp": row_sp,
+            "per_col": per_col,
+            "L_XS": L_XS,
+            "R_XS": R_XS,
+            "bub_r": bub_r,
+        },
     }
 
 
@@ -1233,7 +2100,7 @@ def compute_reliability_score(result):
         
     # 5. Flags
     flags = result.get("quality_flags", [])
-    if "alignment_failure" in flags: score -= 30.0
+    if "alignment_failed" in flags or "alignment_failure" in flags: score -= 30.0
     if "num_questions_mismatch" in flags: score -= 50.0
     
     return max(0.0, min(100.0, round(score, 1)))
@@ -1276,6 +2143,8 @@ def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", fro
 
         result = {
             "student_id": fast_pass.get("student_id", ""),
+            "school_code": fast_pass.get("school_code", ""),
+            "id_source": fast_pass.get("id_source", ""),
             "qr_payload_raw": (fast_pass.get("qr_meta", {}) or {}).get("raw", ""),
             "detected_num_questions": detected_nq,
             "answers": fast_pass.get("answers", {}),
@@ -1349,6 +2218,8 @@ def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", fro
 
             result = {
                 "student_id": pass_primary.get("student_id", ""),
+                "school_code": pass_primary.get("school_code", ""),
+                "id_source": pass_primary.get("id_source", ""),
                 "qr_payload_raw": (pass_primary.get("qr_meta", {}) or {}).get("raw", ""),
                 "detected_num_questions": detected_nq,
                 "answers": pass_primary.get("answers", {}),
@@ -1417,6 +2288,8 @@ def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", fro
         quality_flags.append("quality_gate_reject")
     result = {
         "student_id": pass_primary.get("student_id", ""),
+        "school_code": pass_primary.get("school_code", ""),
+        "id_source": pass_primary.get("id_source", ""),
         "qr_payload_raw": qr_meta.get("raw", ""),
         "detected_num_questions": detected_nq,
         "answers": merged["answers"],
@@ -1430,7 +2303,11 @@ def scan_omr_with_mode(image_path_or_bytes, is_bytes=False, style="default", fro
         "unstable_questions": pass_primary.get("unstable_questions", []),
         "double_pass_mismatch_questions": merged["double_pass_mismatch_questions"],
         "review_rois": pass_primary.get("review_rois", {}),
-        "system_view_image": pass_primary.get("system_view_image", ""),
+        "system_view_image": rebuild_system_view_for_answers(
+            pass_primary,
+            merged["answers"],
+            merged["needs_review_questions"],
+        ),
         "average_confidence": merged["average_confidence"],
         "processing_mode": "strict" if mode == "strict" else "hybrid-strict-fallback",
         "final_verified": True,

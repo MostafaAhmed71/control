@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from PIL import Image, ImageDraw, ImageFont
 import qrcode
 import os
@@ -7,6 +7,12 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 from omr_constants import *
 from font_utils import truetype, has_raqm
+from sheet_helpers import (
+    option_labels_for_subject,
+    draw_footer_with_manual_name,
+    draw_student_info_rows,
+    fit_question_row_spacing,
+)
 
 def ar(text):
     if not text: return ""
@@ -103,59 +109,27 @@ def draw_elite_header(img, draw, student_info):
         img.paste(llogo, (lx, ly), llogo)
     except: pass
 
-    # Student Data Rows (Boxes)
-    info_y = HDR_BOT + 40
-    row_h  = 90
-    box_w  = WIDTH - 2 * MARGIN
-    draw.rectangle([MARGIN, info_y, MARGIN + box_w, info_y + 2 * row_h], outline=BLACK, width=3)
-    draw.line([MARGIN, info_y + row_h, MARGIN + box_w, info_y + row_h], fill=BLACK, width=3)
-    draw.line([WIDTH // 2, info_y, WIDTH // 2, info_y + 2 * row_h], fill=BLACK, width=3)
+    draw_student_info_rows(
+        draw, student_info, fmt_date_parts, ar, _tl, _dt, FONT_MD, FONT_SM
+    )
 
-    def draw_field(x_start, x_end, y, label, val):
-        lbl_text = ar(label)
-        val_text = ar(val)
-        lw = _tl(draw, lbl_text, font=FONT_SM)
-        _dt(draw, (x_end - lw - 20, y + (row_h - 45) // 2), lbl_text, fill=BLACK, font=FONT_SM)
-        _dt(draw, (x_start + 20, y + (row_h - 45) // 2), val_text, fill=BLACK, font=FONT_SM)
-
-    mid = WIDTH // 2
-    draw_field(mid, MARGIN + box_w, info_y, u"\u0627\u0633\u0645 \u0627\u0644\u0637\u0627\u0644\u0628:", student_info.get("name",""))
-    draw_field(MARGIN, mid, info_y, u"\u0627\u0644\u0635\u0641:", student_info.get("class",""))
-    draw_field(mid, MARGIN + box_w, info_y + row_h, u"\u0627\u0644\u0645\u0627\u062f\u0629:", student_info.get("subject",""))
-    
-    # Draw date directly with fmt_date, without using draw_field which does ar()
-    # draw_field does: val = ar(val_text)
-    # We will replicate draw_field manually for date so we don't ar() the date!
-    x_start = MARGIN
-    x_end = mid
-    y = info_y + row_h
-    draw.rectangle([x_start, y, x_end, y + 60], outline=BLACK, width=3)
-    draw.rectangle([x_end - 150, y, x_end, y + 60], outline=BLACK, width=3, fill=BLACK)
-    _dt(draw, (x_end - 130, y + 5), ar(u"\u0627\u0644\u062a\u0627\u0631\u064a\u062e:"), fill=WHITE, font=FONT_SM)
-    
-    day, month, year = fmt_date_parts(student_info.get("date",""))
-    if year:
-        dv = ar(f"{day} - {month} - {year}")
-    else:
-        dv = ar(day)
-    _dt(draw, (x_start + 20, y + 5), dv, fill=BLACK, font=FONT_SM)
-
-def draw_questions_elite(draw, start_y, num_questions=30):
+def draw_questions_elite(draw, start_y, num_questions=30, subject=""):
     col_w = (WIDTH - 2 * MARGIN) // 2
     GAP   = 80
     r_col_x = MARGIN + col_w + GAP // 2
     l_col_x = MARGIN
     
-    options = [u'\u0623', u'\u0628', u'\u062c', u'\u062f']
-    row_spacing = 120
+    options = option_labels_for_subject(subject)
+    bubble_r = 30
 
     for col_x in [r_col_x, l_col_x]:
         for oi, t in enumerate(options):
             ox = col_x + (col_w - 120) - oi * 120
-            at = ar(t)
+            at = t if t in "ABCD" else ar(t)
             tw = _tl(draw, at, font=FONT_SM)
             _dt(draw, (int(ox - tw // 2), start_y - 110), at, fill=BLACK, font=FONT_SM)
 
+    row_spacing = fit_question_row_spacing(num_questions, start_y, 120, min_spacing=80, header_offset=120)
     per_col = (num_questions + 1) // 2
     for q in range(num_questions):
         if q < per_col:
@@ -171,8 +145,11 @@ def draw_questions_elite(draw, start_y, num_questions=30):
         bubble_start_x = col_x + col_w - 120
         for oi in range(4):
             ox = bubble_start_x - oi * 120
-            rad = 35
-            draw.ellipse([ox-rad, y-rad, ox+rad, y+rad], outline=BLACK, width=5)
+            draw.ellipse(
+                [ox - bubble_r, y - bubble_r, ox + bubble_r, y + bubble_r],
+                outline=BLACK,
+                width=4,
+            )
 
 def generate_personalized_sheet(student_info, filename=None):
     img = Image.new("RGB", (WIDTH, HEIGHT), WHITE)
@@ -183,28 +160,23 @@ def generate_personalized_sheet(student_info, filename=None):
     # QR Code
     num_q = student_info.get("num_questions", 30)
     import json
-    qr_payload = json.dumps(
-        {"id": str(student_info.get("id", "0")), "nq": int(num_q), "tpl": "elite"},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+    qr_obj = {"id": str(student_info.get("id", "0")), "nq": int(num_q), "tpl": "elite"}
+    exam_id = str(student_info.get("exam_id") or "").strip()
+    if exam_id:
+        qr_obj["ex"] = exam_id
+    qr_payload = json.dumps(qr_obj, ensure_ascii=False, separators=(",", ":"))
     qr = qrcode.QRCode(box_size=12, border=1)
     qr.add_data(qr_payload)
-    qr_img = qr.make_image().convert("RGB").resize((300, 300))
-    img.paste(qr_img, (WIDTH - MARGIN - 320, MARGIN + 400))
+    qr_img = qr.make_image().convert("RGB").resize((300, 300), Image.NEAREST)
+    img.paste(qr_img, (WIDTH - MARGIN - 320, HDR_TOP + 12))
 
-    draw_questions_elite(draw, MARGIN + 850, num_questions=num_q)
-    
-    # Footer
-    fy_top = HEIGHT - MARGIN - 160
-    fy_bot = HEIGHT - MARGIN - 40
+    draw_questions_elite(
+        draw, QS_START_Y, num_questions=num_q, subject=student_info.get("subject", "")
+    )
 
-    pr = ar(S_PRINCIPAL)
-    _dt(draw, (MARGIN + 100, fy_top), pr, fill=BLACK, font=FONT_MD)
-
-    st  = ar(S_FOOTER)
-    stw = _tl(draw, st, font=FONT_MD)
-    _dt(draw, ((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
+    draw_footer_with_manual_name(
+        draw, S_PRINCIPAL, S_FOOTER, ar, _tl, _dt, FONT_MD
+    )
     
     if filename:
         img.save(filename)

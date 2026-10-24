@@ -1,31 +1,55 @@
-import React from 'react';
-import { HashRouter as Router, Routes, Route } from 'react-router-dom';
+import React, { lazy, Suspense } from 'react';
+import { BrowserRouter, HashRouter, Routes, Route, Link } from 'react-router-dom';
+import { isPathBasedRouting } from './utils/publicRoutes';
+
+function AppRouter({ children }) {
+  const Router = isPathBasedRouting() ? BrowserRouter : HashRouter;
+  return <Router>{children}</Router>;
+}
 import Sidebar from './components/Sidebar';
-import StudentList from './pages/StudentList';
-import Committees from './pages/Committees';
-import SeatingCards from './pages/SeatingCards';
-import PrintSheets from './pages/PrintSheets';
-import Attendance from './pages/Attendance';
-import Observers from './pages/Observers';
-import CommitteeObservers from './pages/CommitteeObservers';
-import CommitteeSeating from './pages/CommitteeSeating';
-import CommitteeLocations from './pages/CommitteeLocations';
-import PhotoRenamer from './pages/PhotoRenamer';
-import OMRScanner from './pages/OMRScanner';
-import OMRExams from './pages/OMRExams';
-import OMRResults from './pages/OMRResults';
-import ApprovedResults from './pages/ApprovedResults';
-import GradeRecording from './pages/GradeRecording';
-import OMRDesigner from './pages/OMRDesigner';
-import StudentNotifier from './pages/StudentNotifier';
-import Settings from './pages/Settings';
 import SystemSelector from './components/SystemSelector';
-import StudentPortal from './pages/StudentPortal';
-import MockExams from './pages/MockExams';
 import { ToastProvider, useToast } from './components/Toast';
+import { useIsLgUp } from './hooks/useMediaQuery';
 
 import { getStudents, getCommittees, getObservers, clearAllData, getAppSettings, subscribeToConnection } from './utils/dataService';
-import { Trash2, AlertTriangle, Users, UsersRound, UserCheck, ScanLine, Send, WifiOff, Wifi } from 'lucide-react';
+import { Trash2, AlertTriangle, Users, UsersRound, UserCheck, ScanLine, Send, WifiOff, Wifi, Menu, PanelRightClose } from 'lucide-react';
+
+const StudentList = lazy(() => import('./pages/StudentList'));
+const Committees = lazy(() => import('./pages/Committees'));
+const SeatingCards = lazy(() => import('./pages/SeatingCards'));
+const PrintSheets = lazy(() => import('./pages/PrintSheets'));
+const PrintSheetsPreviewStudio = lazy(() => import('./pages/PrintSheets/PreviewStudio'));
+const ExamPeriods = lazy(() => import('./pages/ExamPeriods'));
+const Covers = lazy(() => import('./pages/Covers'));
+const ObserverSheets = lazy(() => import('./pages/ObserverSheets'));
+const Observers = lazy(() => import('./pages/Observers'));
+const CommitteeObservers = lazy(() => import('./pages/CommitteeObservers'));
+const CommitteeSeating = lazy(() => import('./pages/CommitteeSeating'));
+const CommitteeRosterStudio = lazy(() => import('./pages/CommitteeRosterStudio'));
+const PhotoRenamer = lazy(() => import('./pages/PhotoRenamer'));
+const OMRScanner = lazy(() => import('./pages/OMRScanner'));
+const OMRExams = lazy(() => import('./pages/OMRExams'));
+const OMRResults = lazy(() => import('./pages/OMRResults'));
+const ApprovedResults = lazy(() => import('./pages/ApprovedResults'));
+const AggregatedGrades = lazy(() => import('./pages/AggregatedGrades'));
+const NationalExamStats = lazy(() => import('./pages/NationalExamStats'));
+const GradeRecording = lazy(() => import('./pages/GradeRecording'));
+const OMRDesigner = lazy(() => import('./pages/OMRDesigner'));
+const StudentNotifier = lazy(() => import('./pages/StudentNotifier'));
+const Settings = lazy(() => import('./pages/Settings'));
+const MockExams = lazy(() => import('./pages/MockExams'));
+const ManualGrades = lazy(() => import('./pages/ManualGrades'));
+const StudentPortal = lazy(() => import('./pages/StudentPortal'));
+const TeacherSeatLookup = lazy(() => import('./pages/TeacherSeatLookup'));
+
+function RouteLoading() {
+  return (
+    <div className="flex flex-col items-center justify-center py-32 font-alexandria">
+      <div className="w-12 h-12 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin mb-4" />
+      <p className="font-black text-slate-500 text-sm">جاري تحميل الصفحة...</p>
+    </div>
+  );
+}
 
 const Dashboard = ({ activeSystem }) => {
   const [stats, setStats] = React.useState({ students: 0, committees: 0, observers: 0 });
@@ -54,11 +78,11 @@ const Dashboard = ({ activeSystem }) => {
   const isGrading = activeSystem === 'grading';
 
   return (
-    <div className="p-4 md:p-8 space-y-8 animate-fade-in text-slate-800">
+    <div className="p-0 sm:p-0 space-y-6 sm:space-y-8 animate-fade-in text-slate-800 max-w-full">
       {/* Welcome Banner */}
-      <div className="luxury-card p-8 flex flex-col md:flex-row justify-between items-center gap-6 bg-gradient-to-br from-white to-slate-50 border-none">
-        <div>
-          <h1 className="text-3xl font-black tracking-tight text-slate-900 font-header leading-tight">
+      <div className="luxury-card p-5 sm:p-8 flex flex-col md:flex-row justify-between items-stretch md:items-center gap-4 sm:gap-6 bg-gradient-to-br from-white to-slate-50 border-none">
+        <div className="min-w-0">
+          <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-slate-900 font-header leading-tight">
              مرحباً بك في <span className="gold-accent underline decoration-gold/20">نخبة الشمال</span>
           </h1>
           <p className="text-slate-500 text-sm mt-3 font-medium tracking-wide max-w-lg">
@@ -69,7 +93,7 @@ const Dashboard = ({ activeSystem }) => {
         </div>
         <button
           onClick={handleClear}
-          className="flex items-center gap-3 px-8 py-4 bg-red-50 text-red-600 border border-red-100 rounded-2xl hover:bg-red-600 hover:text-white transition-all text-sm font-bold shadow-sm active:scale-95 group"
+          className="flex items-center justify-center gap-3 px-5 sm:px-8 py-3.5 sm:py-4 bg-red-50 text-red-600 border border-red-100 rounded-2xl hover:bg-red-600 hover:text-white transition-all text-sm font-bold shadow-sm active:scale-95 group w-full md:w-auto shrink-0"
         >
           <Trash2 size={20} className="group-hover:rotate-12 transition-transform" />
           <span>مسح السجلات</span>
@@ -77,7 +101,7 @@ const Dashboard = ({ activeSystem }) => {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 lg:gap-8">
         {/* Card 1: Students */}
         <div className="luxury-card p-6 group relative overflow-hidden bg-white border-l-4 border-l-indigo-500">
           <div className="absolute -right-4 -top-4 w-20 h-20 bg-indigo-50 rounded-full opacity-40 group-hover:scale-150 transition-transform duration-700"></div>
@@ -119,28 +143,29 @@ const Dashboard = ({ activeSystem }) => {
           </div>
         </div>
 
-        {/* Card 3: Observers/Notifier */}
-        <div className="luxury-card p-6 group relative overflow-hidden bg-white border-l-4 border-l-emerald-500">
+        {/* Card 3: Notifier / Observers */}
+        <Link
+          to="/notifier"
+          className="luxury-card p-6 group relative overflow-hidden bg-white border-l-4 border-l-emerald-500 block hover:shadow-lg transition-shadow"
+        >
           <div className="absolute -right-4 -top-4 w-20 h-20 bg-emerald-50 rounded-full opacity-40 group-hover:scale-150 transition-transform duration-700"></div>
           <div className="flex justify-between items-start relative z-10">
             <div>
               <h3 className="text-slate-400 text-[10px] mb-2 uppercase tracking-[0.2em] font-black font-header">
-                {isGrading ? 'مركز الإشعارات' : 'الكادر التعليمي'}
+                مركز الإشعارات
               </h3>
-              <p className="text-4xl font-black text-slate-900 tracking-tighter">
-                {isGrading ? '-' : stats.observers}
-              </p>
+              <p className="text-2xl font-black text-slate-900 tracking-tight">واتساب</p>
             </div>
             <div className="p-3.5 bg-emerald-50 text-emerald-600 rounded-xl shadow-sm">
-                {isGrading ? <Send size={28} /> : <UserCheck size={28} />}
+                <Send size={28} />
             </div>
           </div>
           <div className="mt-8">
             <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-full uppercase tracking-wider">
-               {isGrading ? 'سجل النتائج والتواصل' : 'مدير الحضور والغياب'}
+               {isGrading ? 'بطاقات الجلوس والنتائج' : 'بطاقات الجلوس وتوزيع اللجان'}
             </span>
           </div>
-        </div>
+        </Link>
       </div>
 
       {loadError && (
@@ -172,7 +197,7 @@ const Dashboard = ({ activeSystem }) => {
   );
 };
 
-const Header = () => {
+const Header = ({ sidebarOpen, onMenuToggle }) => {
   const [config, setConfig] = React.useState(null);
   const [connected, setConnected] = React.useState(true);
 
@@ -184,32 +209,43 @@ const Header = () => {
   }, []);
 
   return (
-    <header className="h-20 px-10 flex items-center justify-between sticky top-0 z-40 bg-white/80 border-b border-gray-50 backdrop-blur-xl shadow-[0_2px_15px_rgba(0,0,0,0.02)]">
-      <div className="flex items-center gap-6">
-        <div className="flex items-center gap-2">
+    <header className="h-14 sm:h-20 px-3 sm:px-6 lg:px-10 flex items-center justify-between gap-2 sticky top-0 z-40 bg-white/80 border-b border-gray-50 backdrop-blur-xl shadow-[0_2px_15px_rgba(0,0,0,0.02)]">
+      <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
+        {onMenuToggle && (
+          <button
+            type="button"
+            onClick={onMenuToggle}
+            className="p-2 sm:p-2.5 rounded-xl bg-slate-100 text-slate-700 hover:bg-indigo-50 hover:text-indigo-600 transition-colors shrink-0"
+            aria-label={sidebarOpen ? 'إخفاء القائمة' : 'إظهار القائمة'}
+          >
+            {sidebarOpen ? <PanelRightClose size={20} /> : <Menu size={20} />}
+          </button>
+        )}
+        <div className="hidden sm:flex items-center gap-2 shrink-0">
            <div className="w-2 h-2 rounded-full bg-gold"></div>
            <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
         </div>
-        <h1 className="text-xl font-black text-slate-800 tracking-tight font-header">
-           منصة <span className="gold-accent">نخبة الشمال</span> الذكية
+        <h1 className="text-sm sm:text-lg lg:text-xl font-black text-slate-800 tracking-tight font-header truncate">
+           <span className="sm:hidden">نخبة الشمال</span>
+           <span className="hidden sm:inline">منصة <span className="gold-accent">نخبة الشمال</span> الذكية</span>
         </h1>
       </div>
-      <div className="flex items-center gap-8">
+      <div className="flex items-center gap-2 sm:gap-4 lg:gap-8 shrink-0">
         {/* Connection indicator */}
-        <div className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${
+        <div className={`flex items-center gap-1.5 sm:gap-2 px-2 sm:px-4 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black transition-all ${
           connected
             ? 'bg-emerald-50 text-emerald-600 border border-emerald-100'
             : 'bg-rose-50 text-rose-600 border border-rose-100 animate-pulse'
         }`}>
           {connected ? <Wifi size={14} /> : <WifiOff size={14} />}
-          <span>{connected ? 'Supabase متصل' : 'انقطع الاتصال'}</span>
+          <span className="hidden sm:inline">{connected ? 'Supabase متصل' : 'انقطع الاتصال'}</span>
         </div>
 
-        <div className="hidden md:flex flex-col items-end">
+        <div className="hidden lg:flex flex-col items-end">
           <span className="text-[10px] text-slate-400 font-black uppercase tracking-[0.3em] mb-1">مدير المدرسة</span>
           <span className="text-sm font-bold text-slate-700">{config?.managerName || 'الأستاذ محمد نصر الدين'}</span>
         </div>
-        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-50 to-white border border-indigo-100 shadow-sm flex items-center justify-center text-lg font-black text-indigo-600 transform hover:scale-105 transition-all cursor-pointer ring-4 ring-slate-50">
+        <div className="w-9 h-9 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl bg-gradient-to-br from-indigo-50 to-white border border-indigo-100 shadow-sm flex items-center justify-center text-sm sm:text-lg font-black text-indigo-600 transform hover:scale-105 transition-all cursor-pointer ring-2 sm:ring-4 ring-slate-50">
           {config?.managerName ? config.managerName.charAt(0) : 'م'}
         </div>
       </div>
@@ -220,52 +256,92 @@ const Header = () => {
 
 
 const AdminLayout = ({ activeSystem, handleSystemSelect, setActiveSystem }) => {
+  const isLgUp = useIsLgUp();
+  const [sidebarOpen, setSidebarOpen] = React.useState(() =>
+    typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)').matches : true
+  );
+
+  React.useEffect(() => {
+    if (!isLgUp) setSidebarOpen(false);
+  }, [isLgUp]);
+
+  React.useEffect(() => {
+    if (sidebarOpen && !isLgUp) {
+      document.body.classList.add('sidebar-drawer-open');
+      return () => document.body.classList.remove('sidebar-drawer-open');
+    }
+    document.body.classList.remove('sidebar-drawer-open');
+  }, [sidebarOpen, isLgUp]);
+
+  const closeSidebar = () => {
+    if (!isLgUp) setSidebarOpen(false);
+  };
+
   if (!activeSystem) {
     return <SystemSelector onSelect={handleSystemSelect} />;
   }
 
   return (
-    <div className="min-h-screen flex" dir="rtl">
+    <div className="min-h-screen flex overflow-x-hidden" dir="rtl">
       <Sidebar 
-        className="z-50" 
         activeSystem={activeSystem} 
-        onSwitchSystem={() => setActiveSystem(null)} 
+        onSwitchSystem={() => setActiveSystem(null)}
+        open={sidebarOpen}
+        isOverlay={!isLgUp}
+        onToggle={() => setSidebarOpen((v) => !v)}
+        onRequestClose={closeSidebar}
       />
-      <main className="flex-1 mr-64 min-h-screen relative">
-        <Header />
+      <main
+        className={`flex-1 min-h-screen min-w-0 relative transition-[margin] duration-300 ease-in-out ${
+          sidebarOpen && isLgUp ? 'lg:mr-64' : ''
+        }`}
+      >
+        <Header
+          sidebarOpen={sidebarOpen}
+          onMenuToggle={() => setSidebarOpen((v) => !v)}
+        />
 
-        <div className="p-4 sm:p-5 lg:p-8 pb-24">
-          <Routes>
-            <Route path="/" element={<Dashboard activeSystem={activeSystem} />} />
-            {/* Grading System Routes */}
-            {activeSystem === 'grading' ? (
-              <>
-                <Route path="/students" element={<StudentList />} />
-                <Route path="/omr-scanner/:examId?" element={<OMRScanner />} />
-                <Route path="/omr-exams" element={<OMRExams />} />
-                <Route path="/omr-results" element={<OMRResults />} />
-                <Route path="/approved-results" element={<ApprovedResults />} />
-                <Route path="/mock-exams" element={<MockExams />} />
-                <Route path="/grade-recording" element={<GradeRecording />} />
-                <Route path="/omr-designer" element={<OMRDesigner />} />
-                <Route path="/notifier" element={<StudentNotifier />} />
-                <Route path="/photo-renamer" element={<PhotoRenamer />} />
-              </>
-            ) : (
-              <>
-                {/* Control System Routes */}
-                <Route path="/seating-cards" element={<SeatingCards />} />
-                <Route path="/committees" element={<Committees />} />
-                <Route path="/print-sheets" element={<PrintSheets />} />
-                <Route path="/attendance" element={<Attendance />} />
-                <Route path="/observers" element={<Observers />} />
-                <Route path="/committee-observers" element={<CommitteeObservers />} />
-                <Route path="/committee-seating" element={<CommitteeSeating />} />
-                <Route path="/locations" element={<CommitteeLocations />} />
-              </>
-            )}
-            <Route path="/settings" element={<Settings />} />
-          </Routes>
+        <div className="p-3 sm:p-5 lg:p-8 pb-20 sm:pb-24 max-w-[100vw]">
+          <Suspense fallback={<RouteLoading />}>
+            <Routes>
+              <Route path="/" element={<Dashboard activeSystem={activeSystem} />} />
+              {/* Grading System Routes */}
+              {activeSystem === 'grading' ? (
+                <>
+                  <Route path="/students" element={<StudentList />} />
+                  <Route path="/omr-scanner/:examId?" element={<OMRScanner />} />
+                  <Route path="/omr-exams" element={<OMRExams />} />
+                  <Route path="/omr-results" element={<OMRResults />} />
+                  <Route path="/approved-results" element={<ApprovedResults />} />
+                  <Route path="/aggregated-grades" element={<AggregatedGrades />} />
+                  <Route path="/national-stats" element={<NationalExamStats />} />
+                  <Route path="/mock-exams" element={<MockExams />} />
+                  <Route path="/manual-grades" element={<ManualGrades />} />
+                  <Route path="/grade-recording" element={<GradeRecording />} />
+                  <Route path="/omr-designer" element={<OMRDesigner />} />
+                  <Route path="/photo-renamer" element={<PhotoRenamer />} />
+                </>
+              ) : (
+                <>
+                  {/* Control System Routes */}
+                  <Route path="/students" element={<StudentList />} />
+                  <Route path="/seating-cards" element={<SeatingCards />} />
+                  <Route path="/committees" element={<Committees />} />
+                  <Route path="/exam-periods" element={<ExamPeriods />} />
+                  <Route path="/print-sheets" element={<PrintSheets />} />
+                  <Route path="/print-sheets/preview" element={<PrintSheetsPreviewStudio />} />
+                  <Route path="/covers" element={<Covers />} />
+                  <Route path="/observers" element={<Observers />} />
+                  <Route path="/committee-observers" element={<CommitteeObservers />} />
+                  <Route path="/observer-sheets" element={<ObserverSheets />} />
+                  <Route path="/committee-seating" element={<CommitteeSeating />} />
+                  <Route path="/committee-roster-studio" element={<CommitteeRosterStudio />} />
+                </>
+              )}
+              <Route path="/notifier" element={<StudentNotifier activeSystem={activeSystem} />} />
+              <Route path="/settings" element={<Settings />} />
+            </Routes>
+          </Suspense>
         </div>
       </main>
     </div>
@@ -282,18 +358,21 @@ function App() {
 
   return (
     <ToastProvider>
-      <Router>
-        <Routes>
-          <Route path="/portal/*" element={<StudentPortal />} />
-          <Route path="/*" element={
-            <AdminLayout
-              activeSystem={activeSystem}
-              handleSystemSelect={handleSystemSelect}
-              setActiveSystem={setActiveSystem}
-            />
-          } />
-        </Routes>
-      </Router>
+      <AppRouter>
+        <Suspense fallback={<RouteLoading />}>
+          <Routes>
+            <Route path="/portal/*" element={<StudentPortal />} />
+            <Route path="/teacher-lookup" element={<TeacherSeatLookup />} />
+            <Route path="/*" element={
+              <AdminLayout
+                activeSystem={activeSystem}
+                handleSystemSelect={handleSystemSelect}
+                setActiveSystem={setActiveSystem}
+              />
+            } />
+          </Routes>
+        </Suspense>
+      </AppRouter>
     </ToastProvider>
   );
 }

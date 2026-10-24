@@ -159,6 +159,74 @@ const ResultSlip = ({ result, schoolName }) => {
   );
 };
 
+const normalizeNationalId = (value) => {
+  const raw = (value ?? '').toString().trim();
+  if (!raw) return '';
+  const arabicIndicDigits = '٠١٢٣٤٥٦٧٨٩';
+  const easternArabicDigits = '۰۱۲۳۴۵۶۷۸۹';
+  const latin = raw
+    .split('')
+    .map((ch) => {
+      const ia = arabicIndicDigits.indexOf(ch);
+      if (ia >= 0) return String(ia);
+      const ie = easternArabicDigits.indexOf(ch);
+      if (ie >= 0) return String(ie);
+      return ch;
+    })
+    .join('');
+  return latin.replace(/[^a-zA-Z0-9]/g, '').replace(/^0+/, '').trim();
+};
+
+const studentNationalIdNorms = (s) =>
+  [s?.nationalId, s?.national_id, s?.id, s?.studentId, s?.student_id]
+    .map((v) => normalizeNationalId(String(v ?? '')))
+    .filter(Boolean);
+
+const buildSeatStudentMap = (students) => {
+  const m = new Map();
+  for (const s of students || []) {
+    for (const key of [
+      s.nationalId,
+      s.national_id,
+      s.seatNumber,
+      s.seat_number,
+      s.studentId,
+      s.student_id,
+      s.id,
+    ]) {
+      const k = normalizeNationalId(String(key ?? ''));
+      if (k && !m.has(k)) m.set(k, s);
+    }
+  }
+  return m;
+};
+
+const resolveStudentFromResultRow = (r, bySeat) => {
+  const candidates = [
+    r.nationalId,
+    r.national_id,
+    r.studentId,
+    r.detectedStudentId,
+    r.normalizedDetectedStudentId,
+    r.seatNumber,
+    r.seat_number,
+  ].filter(Boolean);
+  for (const c of candidates) {
+    const k = normalizeNationalId(String(c));
+    if (k && bySeat.has(k)) return bySeat.get(k);
+  }
+  return null;
+};
+
+const isApprovedOmrResult = (r) => {
+  const t = (v) => v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true';
+  if (t(r?.approved) || t(r?.confirmed)) return true;
+  if (r?.approvedAt != null && String(r.approvedAt).trim() !== '') return true;
+  const sid = r?.studentId != null ? String(r.studentId).trim() : '';
+  if (sid && r?.score != null) return true;
+  return false;
+};
+
 export default function StudentPortal() {
   const [studentId, setStudentId] = useState('');
   const [results, setResults] = useState(null);
@@ -182,28 +250,33 @@ export default function StudentPortal() {
       const allResults = await getOmrResults();
       const allStudents = await getStudents();
       
-      // Find student by national Id first
-      const student = allStudents.find(s => s.nationalId && s.nationalId.trim() === studentId.trim());
-      
-      let matching = [];
-      if (student) {
-        // Match by student's system id OR seatNumber OR the internal DB id
-        matching = allResults.filter(r => 
-          r.approved === true && (
-            r.studentId === student.id ||         // system id (most common)
-            r.studentId === student.seatNumber || // seat number fallback
-            r.studentName === student.name        // name fallback
-          )
-        );
-      } else {
-        // Fallback: search by studentId directly (might be seat number or system id)
-        matching = allResults.filter(r => r.studentId === studentId.trim() && r.approved === true);
+      const inputNorm = normalizeNationalId(studentId);
+      if (!inputNorm) {
+        setError('يرجى إدخال رقم هوية صالح.');
+        setLoading(false);
+        return;
       }
+
+      const bySeatMap = buildSeatStudentMap(allStudents);
+
+      const natMatchesResult = (r) => {
+        if (!isApprovedOmrResult(r)) return false;
+        const rNat = normalizeNationalId(r.nationalId || r.national_id || '');
+        if (rNat && rNat === inputNorm) return true;
+        for (const raw of [r.studentId, r.detectedStudentId, r.normalizedDetectedStudentId]) {
+          if (normalizeNationalId(String(raw ?? '')) === inputNorm) return true;
+        }
+        const linked = resolveStudentFromResultRow(r, bySeatMap);
+        if (linked && studentNationalIdNorms(linked).includes(inputNorm)) return true;
+        return false;
+      };
+
+      const matching = allResults.filter(natMatchesResult);
 
       if (matching.length > 0) {
         setResults(matching);
       } else {
-        setError('عذراً، لم نتمكن من العثور على أي نتائج معتمدة برقم الهوية هذا.');
+        setError('عذراً، لم نتمكن من العثور على أي نتائج معتمدة لرقم الهوية هذا.');
       }
     } catch (err) {
       console.error(err);

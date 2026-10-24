@@ -1,0 +1,11 @@
+# hajz.northelite0.com — حفل التخرج (SPA)
+# انسخ إلى /etc/caddy/Caddyfile ثم:
+#   sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+
+hajz.northelite0.com {
+	root * /opt/graduation-rsvp/dist
+	encode gzip zstd
+
+	try_files {path} /index.html
+	file_server
+}

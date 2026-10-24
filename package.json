@@ -13,9 +13,12 @@
     "preview": "vite preview",
     "lint": "eslint ."
   },
+  "description": "نظام كنترول نخبة الشمال",
+  "author": "North Elite",
   "build": {
     "appId": "com.northelite.control",
     "productName": "Elite Control",
+    "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "release",
       "buildResources": "public"
@@ -54,7 +57,9 @@
           "!*.pdf",
           "!*.png",
           "!*.jpg",
-          "!*.jpeg"
+          "!*.jpeg",
+          "!venv312/**/__pycache__/**",
+          "!venv312/**/*.pyc"
         ]
       },
       {
@@ -78,7 +83,8 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.11.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "xlsx-js-style": "^1.2.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

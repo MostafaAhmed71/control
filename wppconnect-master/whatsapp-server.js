@@ -11,7 +11,11 @@ import cors from 'cors';
 import { createCanvas } from '@napi-rs/canvas';
 import fs from 'fs';
 import path from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { fileURLToPath } from 'url';
+
+const execAsync = promisify(exec);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3001;
@@ -24,18 +28,91 @@ let sessionStatus = 'disconnected'; // disconnected | connecting | qr | connecte
 let latestQRBase64 = '';
 let latestPairingCode = '';
 let pairingPhone = '';
+let isStarting = false;
+
+const SESSION_TOKEN_DIR = path.join(__dirname, 'tokens', 'control-school');
+
+/** مسارات Chrome / Chromium (Windows + Linux/VPS) */
+function resolveChromeExecutable() {
+  const candidates = [
+    process.env.CHROME_PATH,
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/snap/bin/chromium',
+    '/snap/chromium/current/usr/lib/chromium-browser/chrome',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+  ].filter(Boolean);
+
+  if (process.platform !== 'win32') {
+    try {
+      const snapRoot = '/snap/chromium';
+      if (fs.existsSync(snapRoot)) {
+        for (const ver of fs.readdirSync(snapRoot)) {
+          const p = path.join(snapRoot, ver, 'usr/lib/chromium-browser/chrome');
+          if (fs.existsSync(p)) candidates.push(p);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** إيقاف Chromium العالق بعد logout أو تعطل الجلسة (شائع على VPS) */
+async function killSessionBrowsers() {
+  const tokenNeedle = SESSION_TOKEN_DIR.replace(/\\/g, '/');
+  if (process.platform === 'win32') {
+    try {
+      await execAsync(`taskkill /F /IM chrome.exe /T 2>nul`);
+      await execAsync(`taskkill /F /IM msedge.exe /T 2>nul`);
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+  try {
+    await execAsync(`pkill -f "${tokenNeedle}" 2>/dev/null || true`);
+    await execAsync('pkill -f "control-school" 2>/dev/null || true');
+  } catch {
+    /* ignore */
+  }
+  await new Promise((r) => setTimeout(r, 800));
+}
 
 /* ─────────── WhatsApp Session ─────────── */
 async function startWhatsApp(phoneNumber = null) {
+  if (isStarting) {
+    console.log('⏳ تهيئة واتساب قيد التنفيذ already — تخطي');
+    return wppClient;
+  }
+  isStarting = true;
+
   console.log(phoneNumber ? `🟡 جاري تهيئة واتساب للربط بالرقم: ${phoneNumber}...` : '🟡 جاري تهيئة واتساب (QR)...');
   sessionStatus = 'connecting';
   pairingPhone = phoneNumber;
   latestPairingCode = '';
 
   try {
-    // محاولة تحديد مسار الكروميوم المدمج في نسخة الإنتاج
-    const isProd = process.env.NODE_ENV === 'production' || !fs.existsSync(path.join(__dirname, 'node_modules'));
-    
+    const chromePath = resolveChromeExecutable();
+    if (!chromePath) {
+      throw new Error(
+        'لم يُعثر على Google Chrome أو Edge. ثبّت Chrome أو شغّل: npm run install-browser'
+      );
+    }
+    console.log('🌐 المتصفح:', chromePath);
+
     const client = await wppconnect.create({
       session: 'control-school',
       catchQR: (base64Qr, asciiQR) => {
@@ -60,7 +137,8 @@ async function startWhatsApp(phoneNumber = null) {
         }
       },
       headless: true,
-      useChrome: false, // سنعتمد على الكروميوم المدمج لضمان الاستقرار 100%
+      useChrome: true,
+      puppeteerOptions: { executablePath: chromePath },
       logQR: false,
       autoClose: 0,
       protocolTimeout: 120000,
@@ -83,7 +161,39 @@ async function startWhatsApp(phoneNumber = null) {
     sessionStatus = 'disconnected';
     console.error('❌ فشل الاتصال:', err.message);
     throw err;
+  } finally {
+    isStarting = false;
   }
+}
+
+/** تسجيل خروج، مسح الجلسة المحفوظة، وإعادة التشغيل (اختياري برقم للربط بالكود) */
+async function logoutAndRestart({ phone = null, delayMs = 1200 } = {}) {
+  console.log(phone ? `🔴 تسجيل خروج — إعادة الربط بالرقم: ${phone}` : '🔴 تسجيل خروج — جلسة جديدة (QR)...');
+
+  if (wppClient) {
+    try { await wppClient.logout(); } catch (e) { /* قد يكون مغلقاً */ }
+    try { await wppClient.close(); } catch (e) { /* ignore */ }
+    wppClient = null;
+  }
+
+  await killSessionBrowsers();
+
+  sessionStatus = 'disconnected';
+  latestQRBase64 = '';
+  latestPairingCode = '';
+  pairingPhone = phone || '';
+  isStarting = false;
+
+  if (fs.existsSync(SESSION_TOKEN_DIR)) {
+    try {
+      fs.rmSync(SESSION_TOKEN_DIR, { recursive: true, force: true });
+    } catch (e) {
+      console.warn('⚠️ تعذّر حذف مجلد الجلسة:', e.message);
+    }
+  }
+
+  await new Promise((r) => setTimeout(r, delayMs));
+  startWhatsApp(phone || null).catch((e) => console.error('❌ بدء QR بعد logout:', e.message));
 }
 
 /* ─────────── Result Image Generator ─────────── */
@@ -210,11 +320,11 @@ app.get('/qr', (req, res) => {
     return res.send(`
       <html dir="rtl" style="font-family: Arial, sans-serif; text-align: center; margin-top: 50px;">
         <h2>امسح الـ QR Code لتفعيل الإرسال</h2>
-        <p style="color: gray;">سيتم تحديث الكود تلقائياً كل 5 ثوانٍ لتجنب انتهاء صلاحيته</p>
+        <p style="color: gray;">سيتم تحديث الكود تلقائياً كل دقيقة لتجنب انتهاء صلاحيته</p>
         <img src="${latestQRBase64}" width="280" height="280" style="border: 1px solid #ccc; padding: 15px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);" />
         <script>
           // التحديث التلقائي للحصول على أحدث QR
-          setTimeout(() => location.reload(), 5000);
+          setTimeout(() => location.reload(), 60000);
         </script>
       </html>
     `);
@@ -242,69 +352,36 @@ app.post('/pair-phone', async (req, res) => {
     if (cleanPhone.startsWith('05')) cleanPhone = '966' + cleanPhone.slice(1);
     else if (cleanPhone.startsWith('5') && cleanPhone.length === 9) cleanPhone = '966' + cleanPhone;
     
-    // إعادة تعيين الجلسة الحالية
-    if (wppClient) {
-      try { await wppClient.logout(); } catch(e) {}
-      try { await wppClient.close(); } catch(e) {}
-      wppClient = null;
-    }
-    sessionStatus = 'disconnected';
-    
-    const tokenPath = path.join(__dirname, 'tokens', 'control-school');
-    if (fs.existsSync(tokenPath)) {
-      fs.rmSync(tokenPath, { recursive: true, force: true });
-    }
-
+    await logoutAndRestart({ phone: cleanPhone });
     res.json({ success: true, message: 'جاري توليد كود الربط...' });
-    
-    // تشغيل المحرك مع الرقم
-    setTimeout(() => startWhatsApp(cleanPhone), 500);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// تسجيل الخروج ومسح الجلسة القديمة والبدء من جديد (نسخة JSON للواجهة)
+// تسجيل الخروج وتبديل الحساب (JSON — للواجهة)
+app.post('/logout', async (req, res) => {
+  try {
+    await logoutAndRestart();
+    res.json({ success: true, message: 'تم تسجيل الخروج. امسح QR أو أدخل رقماً جديداً.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// إعادة تعيين الاتصال (مطابق لـ POST /logout)
 app.post('/reset', async (req, res) => {
   try {
-    console.log('🔴 إعادة تعيين الجلسة بطلب من المستخدم...');
-    if (wppClient) {
-      try { await wppClient.logout(); } catch(e) {}
-      try { await wppClient.close(); } catch(e) {}
-      wppClient = null;
-    }
-    sessionStatus = 'disconnected';
-    
-    const tokenPath = path.join(__dirname, 'tokens', 'control-school');
-    if (fs.existsSync(tokenPath)) {
-      fs.rmSync(tokenPath, { recursive: true, force: true });
-    }
-
+    await logoutAndRestart();
     res.json({ success: true, message: 'تم إعادة التعيين، جاري التشغيل...' });
-    
-    // إعادة التشغيل فوراً (بدون رقم جوال ليعود للـ QR)
-    setTimeout(() => startWhatsApp(), 500);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// تسجيل الخروج ومسح الحساب القديم (نسخة HTML)
+// تسجيل الخروج (نسخة HTML للمتصفح المباشر)
 app.get('/logout', async (req, res) => {
   try {
-    if (wppClient) {
-      await wppClient.logout();
-      await wppClient.close();
-      wppClient = null;
-    }
-    sessionStatus = 'disconnected';
-    
-    // مسح مجلد التخزين
-    const tokenPath = path.join(__dirname, 'tokens', 'control-school');
-    if (fs.existsSync(tokenPath)) {
-      fs.rmSync(tokenPath, { recursive: true, force: true });
-    }
-
     res.send(`
       <html dir="rtl" style="font-family: Arial, sans-serif; text-align: center; margin-top: 50px;">
         <h2 style="color: red;">👋 تم تسجيل الخروج بنجاح ومسح البيانات القديمة!</h2>
@@ -312,10 +389,7 @@ app.get('/logout', async (req, res) => {
         <script>setTimeout(() => location.href = '/qr', 3000);</script>
       </html>
     `);
-
-    // إعادة تشغيل المحرك لبدء جلسة نظيفة
-    setTimeout(() => startWhatsApp(), 1000);
-
+    await logoutAndRestart({ delayMs: 1000 });
   } catch (err) {
     res.status(500).send('خطأ في تسجيل الخروج: ' + err.message);
   }
@@ -417,12 +491,24 @@ app.post('/send-image', async (req, res) => {
 });
 
 /* ─────────── Start ─────────── */
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`\n🚀 WhatsApp Server يعمل على http://localhost:${PORT}`);
   console.log(`📱 للاتصال: افتح http://localhost:${PORT}/qr وامسح QR Code`);
   console.log(`📊 للحالة:  GET  http://localhost:${PORT}/status`);
   console.log(`📤 للإرسال: POST http://localhost:${PORT}/send-result\n`);
+  startWhatsApp().catch(console.error);
 });
 
-// بدء واتساب تلقائياً
-startWhatsApp().catch(console.error);
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(
+      `\n⚠️ المنفذ ${PORT} مستخدم بالفعل — خادم واتساب يعمل من نسخة أخرى.\n` +
+        `   • لا تشغّل npm start مرة ثانية؛ استخدم التطبيق مباشرة.\n` +
+        `   • Linux: fuser -k ${PORT}/tcp && pm2 restart wppconnect\n` +
+        `   • Windows: Get-NetTCPConnection -LocalPort ${PORT} | % { Stop-Process -Id $_.OwningProcess -Force }\n`
+    );
+    process.exit(1);
+  }
+  throw err;
+});
+

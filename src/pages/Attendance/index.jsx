@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Printer, Settings, Save, CheckCircle2, FileDown, Layout, UserCircle2, SlidersHorizontal, ChevronRight, X, RotateCcw, AlertCircle, Eye, Maximize2, ShieldCheck, Users } from 'lucide-react';
+import { Printer, Settings, Save, CheckCircle2, FileDown, Download, Layout, UserCircle2, SlidersHorizontal, ChevronRight, X, RotateCcw, AlertCircle, Eye, Maximize2, ShieldCheck, Users } from 'lucide-react';
 import { getAppSettings, saveAppSettings, saveStudent, getStudents } from '../../utils/dataService';
-import html2canvas from 'html2canvas';
-import jsPDF from 'jspdf';
+import { ATTENDANCE_TEMPLATE, resolveAttendanceConfig, formatCommitteeDisplay } from '../../utils/attendanceLayout';
+import { exportAttendanceSheetsToPdf } from '../../utils/pdfExport';
 
 const Attendance = () => {
     const [students, setStudents] = useState([]);
@@ -23,12 +23,12 @@ const Attendance = () => {
         init();
     }, []);
 
-    const config = appConfig?.attendance;
+    const config = resolveAttendanceConfig(appConfig?.attendance);
 
     const handleConfigChange = async (section, prop, value, isChecked = null) => {
         if (!appConfig) return;
 
-        let newAttendance = { ...appConfig.attendance };
+        let newAttendance = { ...resolveAttendanceConfig(appConfig.attendance) };
 
         if (section === 'maxRows') {
             newAttendance.maxRows = parseInt(value) || 1;
@@ -116,7 +116,7 @@ const Attendance = () => {
         const pages = [];
         Object.keys(grouped).sort((a,b) => a.localeCompare(b, undefined, {numeric: true})).forEach(committeeId => {
             const committeeStudents = grouped[committeeId];
-            const max = config.maxRows || 20;
+            const max = config.maxRows || 25;
             const chunks = chunkArray(committeeStudents, max);
             
             const gradesSet = new Set(committeeStudents.map(s => `${s.grade}`).filter(Boolean));
@@ -140,25 +140,20 @@ const Attendance = () => {
     };
 
     const handleExportCardsPDF = async () => {
-        const pages = document.querySelectorAll('.page-to-print');
-        if (pages.length === 0) return;
-        
+        const pagesData = getCommitteesData();
+        if (pagesData.length === 0) {
+            alert('لا توجد صفحات للتصدير.');
+            return;
+        }
+
         setIsExporting(true);
         try {
-            const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-            const pdfWidth = 210;
-            const pdfHeight = 297;
-
-            for (let i = 0; i < pages.length; i++) {
-                const canvas = await html2canvas(pages[i], { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
-                const imgData = canvas.toDataURL('image/jpeg', 0.95);
-
-                if (i > 0) doc.addPage();
-                doc.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
-            }
-            doc.save('كشوف_الحضور.pdf');
-        } catch(error) {
+            await exportAttendanceSheetsToPdf(pagesData, config, 'كشوف_الحضور.pdf', {
+                usePrintSheetConfig: false,
+            });
+        } catch (error) {
             console.error('Error generating PDF:', error);
+            alert(error?.message || 'حدث خطأ أثناء توليد ملف الـ PDF');
         } finally {
             setIsExporting(false);
         }
@@ -168,7 +163,7 @@ const Attendance = () => {
     const presentCount = Object.values(attendanceData).filter(v => v).length;
     const absentCount = students.length - presentCount;
 
-    if (!config) return (
+    if (!appConfig) return (
         <div className="flex flex-col items-center justify-center py-40 opacity-20 font-alexandria">
             <RotateCcw size={64} className="animate-spin mb-4 text-slate-400" />
             <p className="font-black text-xl text-slate-600">جاري استدعاء إعدادات النظام...</p>
@@ -188,7 +183,7 @@ const Attendance = () => {
                     </div>
                     <p className="text-slate-400 font-medium text-sm flex items-center gap-2">
                         <ShieldCheck size={16} className="text-indigo-400" />
-                        رصد التواجد اليومي للطلاب وتوجيههم وتوليد كشوف التوقيع الرسمية
+                        رصد التواجد وتوليد كشوف التوقيع — القالب: attendance_template.jpeg
                     </p>
                 </div>
 
@@ -348,9 +343,19 @@ const Attendance = () => {
                     <div className="mt-8 flex justify-end">
                         <button 
                             onClick={() => {
-                                if(confirm('إعادة الضبط سيمسح جميع الإحداثيات المخصصة، هل أنت متأكد؟')) {
-                                    localStorage.removeItem('attendanceSeatingConfig');
-                                    window.location.reload();
+                                if (
+                                    confirm(
+                                        'استعادة مواضع القالب الافتراضية (attendance_template.jpeg)؟'
+                                    )
+                                ) {
+                                    const next = {
+                                        ...appConfig,
+                                        attendance: resolveAttendanceConfig(null),
+                                    };
+                                    saveAppSettings(next).then(() => {
+                                        setAppConfig(next);
+                                        alert('تم استعادة الإعدادات الافتراضية');
+                                    });
                                 }
                             }}
                             className="text-xs font-black text-rose-400 hover:text-rose-600 px-6 py-3 hover:bg-rose-50 rounded-2xl transition-all flex items-center gap-2 border border-dashed border-rose-100"
@@ -388,23 +393,26 @@ const Attendance = () => {
                             key={page.id}
                             className="page-to-print relative bg-white shadow-[0_30px_90px_rgba(0,0,0,0.15)] mx-auto border border-white group/page transition-all duration-700 print:shadow-none print:border-none print:m-0"
                             style={{
-                                width: '210mm',         
-                                height: '297mm',        
-                                backgroundImage: "url('/attendance_template.jpg')",
-                                backgroundSize: '100% 100%',
-                                backgroundPosition: 'center',
-                                backgroundRepeat: 'no-repeat',
+                                width: '210mm',
+                                height: '297mm',
                                 pageBreakAfter: 'always',
                                 overflow: 'hidden'
                             }}
                         >
+                            <img
+                                src={ATTENDANCE_TEMPLATE}
+                                alt="قالب كشف توقيع الطلاب"
+                                crossOrigin="anonymous"
+                                className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
+                                draggable={false}
+                            />
                             {/* Headers Text Fields */}
                             {config.headerCommittee.show && (
                                 <div 
                                     className="absolute font-black text-slate-900 w-auto text-right font-header z-10"
                                     style={{ top: `${config.headerCommittee.top}%`, right: `${config.headerCommittee.right}%`, fontSize: `${config.headerCommittee.fontSize}rem`, transform: 'translateY(-50%)' }}
                                 >
-                                    {page.committee}
+                                    {formatCommitteeDisplay(page.committee)}
                                 </div>
                             )}
                             {config.headerGrade.show && (

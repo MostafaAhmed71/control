@@ -27,23 +27,27 @@
     },
     "infoRow": {
       "show": true,
-      "y": 72,
+      "y": 58,
       "fields": [
         {
           "label": "اسم الطالب",
-          "width": 180
+          "width": 360
         },
         {
-          "label": "الصف",
-          "width": 90
-        },
-        {
-          "label": "المادة",
-          "width": 90
+          "label": "اليوم",
+          "width": 120
         },
         {
           "label": "التاريخ",
-          "width": 90
+          "width": 120
+        },
+        {
+          "label": "المادة",
+          "width": 120
+        },
+        {
+          "label": "الصف",
+          "width": 120
         }
       ]
     },

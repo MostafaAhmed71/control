@@ -1,7 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { getStudents, saveStudent, deleteStudent, saveStudentsBulk } from '../../utils/dataService';
-import { Plus, Search, Edit2, Trash2, UserPlus, Filter, Download, Upload, FileSpreadsheet, Wand2, X, Phone } from 'lucide-react';
+import { Plus, Search, Edit2, Trash2, UserPlus, Filter, Download, Upload, FileSpreadsheet, Wand2, X, Phone, Hash, Layers, AlertTriangle, CheckSquare, Square } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import ApprovedNamesSync, { parseApprovedFile } from './ApprovedNamesSync';
+
+/** الرقم الفريد في الرمز = رقم الهوية فقط (رقم الجلوس عمود منفصل في الجدول). */
+const getStudentOmUniqueId = (s) =>
+  (s.nationalId || s.national_id || '').toString().trim();
 
 const StudentList = () => {
     const [students, setStudents] = useState([]);
@@ -13,10 +18,37 @@ const StudentList = () => {
     const [isGeneratorOpen, setIsGeneratorOpen] = useState(false);
     const [genConfig, setGenConfig] = useState({ stage: '', grade: '', startNumber: '' });
     const [modalClassValue, setModalClassValue] = useState('');
+    const [listTab, setListTab] = useState('registry'); // 'registry' | 'omrIds'
+    const [filterOmStage, setFilterOmStage] = useState('الكل');
+    const [filterOmGrade, setFilterOmGrade] = useState('الكل');
+    const [searchOm, setSearchOm] = useState('');
+    const [selectedIds, setSelectedIds] = useState(() => new Set());
+    const [approvedSync, setApprovedSync] = useState(null);
+
+    const handleApprovedFile = async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        try {
+            const approved = await parseApprovedFile(file);
+            if (!approved.length) {
+                alert('لم يتم العثور على أسماء في الملف. تأكد من وجود عمود "اسم الطالب" أو أن الأسماء في العمود الأول.');
+                return;
+            }
+            setApprovedSync({ fileName: file.name, approved });
+        } catch (err) {
+            console.error(err);
+            alert('خطأ في قراءة الملف: ' + err.message);
+        }
+    };
 
     useEffect(() => {
         fetchStudents();
     }, []);
+
+    useEffect(() => {
+        setSelectedIds(new Set());
+    }, [searchTerm, selectedStage, listTab]);
 
     useEffect(() => {
         if (!isModalOpen) return;
@@ -52,6 +84,7 @@ const StudentList = () => {
                 const filteredIds = new Set(filteredStudents.map(s => s.id));
                 const remainingStudents = students.filter(s => !filteredIds.has(s.id));
                 await saveStudentsBulk(remainingStudents);
+                setSelectedIds(new Set());
                 fetchStudents();
                 alert('تم الحذف بنجاح!');
             }
@@ -90,8 +123,144 @@ const StudentList = () => {
         return matchesSearch && matchesStage;
     });
 
+    const toggleSelectStudent = (id) => {
+        setSelectedIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const visibleFilteredIds = useMemo(
+        () => filteredStudents.map((s) => s.id),
+        [filteredStudents]
+    );
+
+    const allVisibleSelected =
+        visibleFilteredIds.length > 0 && visibleFilteredIds.every((id) => selectedIds.has(id));
+
+    const toggleSelectAllVisible = () => {
+        setSelectedIds((prev) => {
+            const next = new Set(prev);
+            if (allVisibleSelected) {
+                visibleFilteredIds.forEach((id) => next.delete(id));
+            } else {
+                visibleFilteredIds.forEach((id) => next.add(id));
+            }
+            return next;
+        });
+    };
+
+    const handleDeleteSelected = async () => {
+        const count = selectedIds.size;
+        if (count === 0) return;
+        if (
+            !window.confirm(
+                `هل أنت متأكد من حذف ${count} طالب محدد؟\nلا يمكن التراجع عن هذه الخطوة.`
+            )
+        ) {
+            return;
+        }
+        try {
+            const idSet = new Set(selectedIds);
+            const remaining = students.filter((s) => !idSet.has(s.id));
+            await saveStudentsBulk(remaining);
+            setSelectedIds(new Set());
+            await fetchStudents();
+            alert(`تم حذف ${count} طالب بنجاح.`);
+        } catch (error) {
+            console.error(error);
+            alert('حدث خطأ أثناء الحذف: ' + (error?.message || error));
+        }
+    };
+
     const stages = ['الكل', ...new Set(students.map(s => s.stage))];
     const allGrades = [...new Set(students.map(s => s.grade))];
+
+    const stagesOm = useMemo(
+        () => ['الكل', ...[...new Set(students.map((s) => s.stage).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b), 'ar'))],
+        [students]
+    );
+    const gradesOm = useMemo(() => {
+        const pool =
+            filterOmStage === 'الكل'
+                ? students
+                : students.filter((s) => s.stage === filterOmStage);
+        return [
+            'الكل',
+            ...[...new Set(pool.map((s) => s.grade).filter(Boolean))].sort((a, b) =>
+                String(a).localeCompare(String(b), 'ar')
+            ),
+        ];
+    }, [students, filterOmStage]);
+
+    const omrTabStudents = useMemo(() => {
+        return students.filter((s) => {
+            if (filterOmStage !== 'الكل' && s.stage !== filterOmStage) return false;
+            if (filterOmGrade !== 'الكل' && s.grade !== filterOmGrade) return false;
+            if (searchOm.trim()) {
+                const q = searchOm.trim().toLowerCase();
+                const om = getStudentOmUniqueId(s).toLowerCase();
+                const nm = (s.name || '').toLowerCase();
+                if (!nm.includes(q) && !om.includes(q)) return false;
+            }
+            return true;
+        });
+    }, [students, filterOmStage, filterOmGrade, searchOm]);
+
+    const omrGroupedSections = useMemo(() => {
+        const map = new Map();
+        for (const s of omrTabStudents) {
+            const st = (s.stage || 'غير محدد').toString().trim() || 'غير محدد';
+            const gr = (s.grade || 'غير محدد').toString().trim() || 'غير محدد';
+            const key = `${st}\t${gr}`;
+            if (!map.has(key)) map.set(key, { stage: st, grade: gr, list: [] });
+            map.get(key).list.push(s);
+        }
+        const arr = [...map.values()];
+        arr.forEach((g) => g.list.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ar')));
+        arr.sort((a, b) => {
+            const c = a.stage.localeCompare(b.stage, 'ar');
+            if (c !== 0) return c;
+            return a.grade.localeCompare(b.grade, 'ar');
+        });
+        return arr;
+    }, [omrTabStudents]);
+
+    const omrDuplicateIds = useMemo(() => {
+        const counts = new Map();
+        for (const s of omrTabStudents) {
+            const id = getStudentOmUniqueId(s);
+            if (!id) continue;
+            counts.set(id, (counts.get(id) || 0) + 1);
+        }
+        return [...counts.entries()].filter(([, n]) => n > 1).map(([id]) => id);
+    }, [omrTabStudents]);
+
+    const handleExportOmIds = () => {
+        const flat = omrTabStudents.slice().sort((a, b) => {
+            const st = (a.stage || '').localeCompare(b.stage || '', 'ar');
+            if (st !== 0) return st;
+            const gr = (a.grade || '').localeCompare(b.grade || '', 'ar');
+            if (gr !== 0) return gr;
+            return (a.name || '').localeCompare(b.name || '', 'ar');
+        });
+        const rows = flat.map((s) => ({
+            المرحلة: s.stage || '',
+            الصف: s.grade || '',
+            'اسم الطالب': s.name || '',
+            'رقم الهوية (الرمز)': getStudentOmUniqueId(s) || '—',
+            'رقم الجلوس': s.seatNumber || '',
+            'رقم الهوية': s.nationalId || '',
+            'معرف النظام': s.id || '',
+            الفصل: s.class || '',
+        }));
+        const ws = XLSX.utils.json_to_sheet(rows);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'الأرقام الفريدة');
+        XLSX.writeFile(wb, `الأرقام_الفريدة_للطلاب_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    };
 
     const handleGenerateSeats = async () => {
         if (!genConfig.stage || !genConfig.grade || !genConfig.startNumber) {
@@ -204,10 +373,14 @@ const StudentList = () => {
                         // Merge logic: match by seatNumber or name
                         let updatedCount = 0;
                         const mergedStudents = students.map(existing => {
-                            const match = importedData.find(imp => 
-                                (imp.seatNumber && imp.seatNumber === existing.seatNumber) || 
-                                (imp.name === existing.name)
-                            );
+                            const match = importedData.find(imp => {
+                                const impNat = (imp.nationalId || '').trim();
+                                const existNat = (existing.nationalId || '').trim();
+                                if (impNat && existNat && impNat === existNat) return true;
+                                if (imp.seatNumber && imp.seatNumber === existing.seatNumber) return true;
+                                if (imp.name === existing.name) return true;
+                                return false;
+                            });
                             
                             if (match) {
                                 updatedCount++;
@@ -222,8 +395,19 @@ const StudentList = () => {
                         });
                         
                         // Add purely new students who did not match any existing
-                        const existingMatchKeys = new Set(mergedStudents.map(s => s.seatNumber ? s.seatNumber : s.name));
-                        const newStudents = importedData.filter(imp => !existingMatchKeys.has(imp.seatNumber ? imp.seatNumber : imp.name));
+                        const existingMatchKeys = new Set(
+                            mergedStudents.map((s) => {
+                                const nat = (s.nationalId || '').trim();
+                                if (nat) return `nat:${nat}`;
+                                if (s.seatNumber) return `seat:${s.seatNumber}`;
+                                return `name:${s.name}`;
+                            })
+                        );
+                        const newStudents = importedData.filter((imp) => {
+                            const nat = (imp.nationalId || '').trim();
+                            const key = nat ? `nat:${nat}` : (imp.seatNumber ? `seat:${imp.seatNumber}` : `name:${imp.name}`);
+                            return !existingMatchKeys.has(key);
+                        });
                         
                         const finalList = [...mergedStudents, ...newStudents];
                         await saveStudentsBulk(finalList);
@@ -262,6 +446,7 @@ const StudentList = () => {
                     <p className="text-slate-400 text-sm mt-1 font-medium">إدارة المركزية لبيانات الطلاب بخصوصية وفخامة</p>
                 </div>
 
+                {listTab === 'registry' && (
                 <div className="flex flex-wrap gap-3">
                     <input
                         type="file"
@@ -276,6 +461,20 @@ const StudentList = () => {
                     >
                         <FileSpreadsheet size={18} className="text-indigo-500" />
                         <span>استيراد ملفات</span>
+                    </button>
+                    <input
+                        type="file"
+                        id="approved-names-file"
+                        className="hidden"
+                        accept=".xlsx,.xls,.csv,.txt"
+                        onChange={handleApprovedFile}
+                    />
+                    <button
+                        onClick={() => document.getElementById('approved-names-file').click()}
+                        className="flex items-center gap-2 px-6 py-3 bg-emerald-50 border border-emerald-100 text-emerald-700 rounded-2xl hover:bg-emerald-100 transition-all active:scale-95 text-sm font-bold shadow-sm"
+                    >
+                        <CheckSquare size={18} />
+                        <span>مطابقة بالأسماء المعتمدة</span>
                     </button>
                     <button
                         onClick={() => {
@@ -319,8 +518,191 @@ const StudentList = () => {
                         <span>تفريغ السجل</span>
                     </button>
                 </div>
+                )}
             </div>
 
+            <div className="flex p-1.5 bg-slate-100/90 rounded-2xl border border-slate-100 shadow-inner w-full max-w-xl">
+                <button
+                    type="button"
+                    onClick={() => setListTab('registry')}
+                    className={`flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-black text-sm transition-all ${
+                        listTab === 'registry'
+                            ? 'bg-white text-indigo-600 shadow-md'
+                            : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                >
+                    <UserPlus size={18} className="shrink-0" />
+                    سجل الطلاب
+                </button>
+                <button
+                    type="button"
+                    onClick={() => setListTab('omrIds')}
+                    className={`flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-black text-sm transition-all ${
+                        listTab === 'omrIds'
+                            ? 'bg-white text-indigo-600 shadow-md'
+                            : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                >
+                    <Hash size={18} className="shrink-0" />
+                    الأرقام الفريدة (الهوية)
+                </button>
+            </div>
+
+            {listTab === 'omrIds' && (
+                <div className="luxury-card border-none overflow-hidden bg-white p-6 md:p-8 space-y-6">
+                    <div className="flex flex-col lg:flex-row gap-4 lg:items-end lg:justify-between">
+                        <div>
+                            <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
+                                <Layers className="text-indigo-500 shrink-0" size={22} />
+                                عرض حسب المرحلة والصف
+                            </h2>
+                            <p className="text-xs font-bold text-slate-500 mt-2 leading-relaxed max-w-2xl">
+                                عمود «الرقم الفريد» هو <span className="text-slate-800 font-black">رقم الهوية فقط</span> كما يُطبَع في رمز الاستجابة. رقم الجلوس عمود مستقل ولا يُستخدم للاستعلام عن النتائج أو للرمز.
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={handleExportOmIds}
+                            disabled={omrTabStudents.length === 0}
+                            className="flex items-center justify-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-black text-sm hover:bg-indigo-700 transition-all shadow-lg disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                        >
+                            <Download size={18} />
+                            تصدير Excel
+                        </button>
+                    </div>
+
+                    {omrDuplicateIds.length > 0 && (
+                        <div className="flex items-start gap-3 p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-950">
+                            <AlertTriangle className="shrink-0 mt-0.5" size={20} />
+                            <div className="text-sm font-bold text-right">
+                                <span className="font-black">تنبيه:</span> يوجد أكثر من طالب يشتركان في نفس الرقم الفريد ضمن العرض الحالي:{' '}
+                                <span className="font-mono tabular-nums">{omrDuplicateIds.join('، ')}</span>
+                                . راجع أرقام الجلوس أو الهوية لتفادي التعارض عند المسح.
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="flex flex-col md:flex-row flex-wrap gap-4">
+                        <div className="flex-1 min-w-[160px] space-y-2">
+                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">المرحلة</label>
+                            <select
+                                className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-slate-800 outline-none focus:ring-4 focus:ring-indigo-50"
+                                value={filterOmStage}
+                                onChange={(e) => {
+                                    setFilterOmStage(e.target.value);
+                                    setFilterOmGrade('الكل');
+                                }}
+                            >
+                                {stagesOm.map((s) => (
+                                    <option key={s} value={s}>
+                                        {s === 'الكل' ? 'كل المراحل' : s}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="flex-1 min-w-[160px] space-y-2">
+                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">الصف</label>
+                            <select
+                                className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-slate-800 outline-none focus:ring-4 focus:ring-indigo-50"
+                                value={filterOmGrade}
+                                onChange={(e) => setFilterOmGrade(e.target.value)}
+                            >
+                                {gradesOm.map((g) => (
+                                    <option key={g} value={g}>
+                                        {g === 'الكل' ? 'كل الصفوف' : g}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="flex-[2] min-w-[200px] space-y-2">
+                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">بحث</label>
+                            <div className="relative">
+                                <Search className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                                <input
+                                    type="text"
+                                    dir="rtl"
+                                    placeholder="اسم الطالب أو الرقم الفريد..."
+                                    value={searchOm}
+                                    onChange={(e) => setSearchOm(e.target.value)}
+                                    className="w-full pr-12 pl-4 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm outline-none focus:ring-4 focus:ring-indigo-50"
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="text-center py-2">
+                        <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">
+                            العدد: <span className="text-indigo-600 text-lg tabular-nums">{omrTabStudents.length}</span> طالب
+                        </span>
+                    </div>
+
+                    {omrGroupedSections.length === 0 ? (
+                        <div className="text-center py-16 text-slate-400 font-black">لا يوجد طلاب مطابقون للفلتر.</div>
+                    ) : (
+                        <div className="space-y-8">
+                            {omrGroupedSections.map((sec) => (
+                                <div key={`${sec.stage}-${sec.grade}`} className="rounded-2xl border border-slate-100 overflow-hidden shadow-sm">
+                                    <div className="px-5 py-4 bg-gradient-to-l from-indigo-50 to-white border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2 text-right">
+                                            <span className="px-3 py-1 rounded-lg bg-white text-slate-600 text-[10px] font-black border border-slate-200">
+                                                {sec.stage}
+                                            </span>
+                                            <span className="px-3 py-1 rounded-lg bg-indigo-100 text-indigo-800 text-[10px] font-black border border-indigo-200">
+                                                {sec.grade}
+                                            </span>
+                                            <span className="text-xs font-bold text-slate-500">({sec.list.length})</span>
+                                        </div>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="premium-table text-right w-full min-w-[640px]">
+                                            <thead>
+                                                <tr>
+                                                    <th className="px-6 py-4">اسم الطالب</th>
+                                                    <th className="px-6 py-4 text-center">رقم الهوية (الرمز)</th>
+                                                    <th className="px-6 py-4 text-center">رقم الجلوس</th>
+                                                    <th className="px-6 py-4 text-center">الهوية</th>
+                                                    <th className="px-6 py-4 text-center">معرف النظام</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                                {sec.list.map((s) => {
+                                                    const om = getStudentOmUniqueId(s);
+                                                    const dup = om && omrDuplicateIds.includes(om);
+                                                    return (
+                                                        <tr key={s.id} className={dup ? 'bg-amber-50/50' : ''}>
+                                                            <td className="px-6 py-3.5 font-black text-slate-900">{s.name}</td>
+                                                            <td className="px-6 py-3.5 text-center">
+                                                                <span
+                                                                    className={`inline-block font-mono font-black text-lg tabular-nums px-3 py-1 rounded-xl ${
+                                                                        dup
+                                                                            ? 'text-amber-900 bg-amber-100 border border-amber-200'
+                                                                            : 'text-indigo-700 bg-indigo-50 border border-indigo-100'
+                                                                    }`}
+                                                                >
+                                                                    {om || '—'}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-6 py-3.5 text-center font-mono text-slate-600 text-sm">
+                                                                {s.seatNumber || '—'}
+                                                            </td>
+                                                            <td className="px-6 py-3.5 text-center font-mono text-slate-600 text-sm">
+                                                                {s.nationalId || '—'}
+                                                            </td>
+                                                            <td className="px-6 py-3.5 text-center font-mono text-xs text-slate-400">{s.id}</td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {listTab === 'registry' && (
             <div className="luxury-card border-none overflow-hidden bg-white p-2">
                 <div className="p-8 border-b border-slate-50 flex flex-col md:flex-row gap-8 items-center justify-between bg-slate-50/20">
                     <div className="relative w-full md:w-[450px]">
@@ -346,10 +728,50 @@ const StudentList = () => {
                     </div>
                 </div>
 
+                {selectedIds.size > 0 && (
+                    <div className="mx-4 mb-2 flex flex-wrap items-center justify-between gap-3 px-5 py-4 bg-rose-50 border border-rose-100 rounded-2xl">
+                        <span className="text-sm font-black text-rose-800">
+                            {selectedIds.size} طالب محدد
+                        </span>
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                type="button"
+                                onClick={() => setSelectedIds(new Set())}
+                                className="px-5 py-2.5 bg-white border border-rose-100 text-slate-600 rounded-xl font-black text-sm hover:bg-slate-50"
+                            >
+                                إلغاء التحديد
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleDeleteSelected}
+                                className="px-5 py-2.5 bg-rose-600 text-white rounded-xl font-black text-sm hover:bg-rose-700 flex items-center gap-2"
+                            >
+                                <Trash2 size={16} />
+                                حذف المحدد ({selectedIds.size})
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 <div className="overflow-x-auto p-2">
                     <table className="premium-table text-right">
                         <thead>
                             <tr className="border-none">
+                                <th className="px-4 py-5 w-14 text-center">
+                                    <button
+                                        type="button"
+                                        onClick={toggleSelectAllVisible}
+                                        disabled={filteredStudents.length === 0}
+                                        title={allVisibleSelected ? 'إلغاء تحديد الكل' : 'تحديد المعروض'}
+                                        className="inline-flex items-center justify-center p-2 rounded-xl text-indigo-600 hover:bg-indigo-50 disabled:opacity-30"
+                                    >
+                                        {allVisibleSelected ? (
+                                            <CheckSquare size={22} />
+                                        ) : (
+                                            <Square size={22} className="text-slate-300" />
+                                        )}
+                                    </button>
+                                </th>
                                 <th className="px-8 py-5">اسم الطالب</th>
                                 <th className="px-8 py-5 text-center">رقم الجلوس</th>
                                 <th className="px-8 py-5 text-center">رقم الهوية</th>
@@ -363,11 +785,30 @@ const StudentList = () => {
                         </thead>
                         <tbody className="divide-y-8 divide-transparent">
                             {loading ? (
-                                <tr><td colSpan="9" className="text-center py-20 text-slate-300 font-bold animate-pulse">جاري جلب السجلات...</td></tr>
+                                <tr><td colSpan="10" className="text-center py-20 text-slate-300 font-bold animate-pulse">جاري جلب السجلات...</td></tr>
                             ) : filteredStudents.length === 0 ? (
-                                <tr><td colSpan="9" className="text-center py-24 text-slate-300 font-black text-xl italic opacity-40">لا توجد بيانات مطابقة للبحث</td></tr>
-                            ) : filteredStudents.map((student) => (
-                                <tr key={student.id} className="hover:scale-[1.005] transition-transform">
+                                <tr><td colSpan="10" className="text-center py-24 text-slate-300 font-black text-xl italic opacity-40">لا توجد بيانات مطابقة للبحث</td></tr>
+                            ) : filteredStudents.map((student) => {
+                                const isSelected = selectedIds.has(student.id);
+                                return (
+                                <tr
+                                    key={student.id}
+                                    className={`hover:scale-[1.005] transition-transform ${isSelected ? 'bg-rose-50/50' : ''}`}
+                                >
+                                    <td className="px-4 py-5 text-center">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleSelectStudent(student.id)}
+                                            className="inline-flex items-center justify-center p-2 rounded-xl hover:bg-slate-100"
+                                            aria-label={isSelected ? 'إلغاء التحديد' : 'تحديد'}
+                                        >
+                                            {isSelected ? (
+                                                <CheckSquare size={22} className="text-rose-600" />
+                                            ) : (
+                                                <Square size={22} className="text-slate-300" />
+                                            )}
+                                        </button>
+                                    </td>
                                     <td className="px-8 py-5">
                                         <div className="flex items-center gap-4">
                                           <div className="w-11 h-11 bg-slate-50 text-slate-400 rounded-2xl flex items-center justify-center font-black border border-slate-100 shadow-inner">
@@ -426,11 +867,13 @@ const StudentList = () => {
                                         </div>
                                     </td>
                                 </tr>
-                            ))}
+                            );
+                            })}
                         </tbody>
                     </table>
                 </div>
             </div>
+            )}
 
             {isGeneratorOpen && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
@@ -618,6 +1061,15 @@ const StudentList = () => {
                         </form>
                     </div>
                 </div>
+            )}
+            {approvedSync && (
+                <ApprovedNamesSync
+                    fileName={approvedSync.fileName}
+                    approved={approvedSync.approved}
+                    students={students}
+                    onClose={() => setApprovedSync(null)}
+                    onDone={fetchStudents}
+                />
             )}
         </div>
     );

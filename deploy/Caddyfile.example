@@ -1,0 +1,41 @@
+# مثال لـ control0.northelite0.com
+# انسخ إلى /etc/caddy/Caddyfile (أو import) ثم:
+#   sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+
+control0.northelite0.com {
+	root * /opt/control/dist
+	encode gzip zstd
+
+	# ── API (قبل معالجة الملفات الثابتة) ──
+	handle_path /api/omr/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle_path /api/whatsapp/* {
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	# ── صفحات عامة بدون كلمة مرور ──
+	# استعلام المعلمين + بوابة الطالب + ملفات البناء (JS/CSS)
+	@public {
+		path /teacher-lookup /teacher-lookup/*
+		path /portal /portal/*
+		path /assets/* /vite.svg /favicon.ico
+		path /*.jpeg /*.jpg /*.png /*.ico /*.webp /*.svg
+	}
+	handle @public {
+		try_files {path} /index.html
+		file_server
+	}
+
+	# ── باقي المنصة (لوحة التحكم) — محمية بـ Basic Auth ──
+	handle {
+		basicauth {
+			# أنشئ الملف: sudo htpasswd /etc/caddy/.htpasswd اسم_المستخدم
+			# ثم الصق السطر هنا أو استخدم import:
+			# import /etc/caddy/htpasswd.caddy
+			اسم_المستخدم {$CADDY_BCRYPT_HASH}
+		}
+		try_files {path} /index.html
+		file_server
+	}
+}

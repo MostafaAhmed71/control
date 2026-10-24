@@ -1,13 +1,52 @@
-import React, { useState, useEffect } from 'react';
-import { UserCheck, UsersRound, ArrowLeftRight, Check, X, ShieldCheck, UserPlus, SlidersHorizontal, UserCircle2, ChevronRight, LayoutGrid, CheckCircle2, RotateCcw } from 'lucide-react';
-import { getCommittees, getObservers, getAssignments, saveAssignments } from '../../utils/dataService';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom';
+import {
+    UserCheck,
+    UsersRound,
+    X,
+    UserPlus,
+    LayoutGrid,
+    CheckCircle2,
+    RotateCcw,
+    AlertCircle,
+    ClipboardList,
+    Save,
+    Plus,
+    Calendar,
+    Clock,
+    AlertTriangle,
+} from 'lucide-react';
+import {
+    getCommittees,
+    getObservers,
+    getAssignments,
+    saveAssignments,
+    getAppSettings,
+} from '../../utils/dataService';
+import { COMMITTEE_STAGES } from '../../utils/committeeUtils';
+import { EXAM_WEEKDAYS, PERIOD_OPTIONS, periodLabel } from '../../utils/examSchedule';
+import {
+    getCommitteeObserverIds,
+    getSlotAssignments,
+    checkObserverAssignmentWarnings,
+    addObserverToCommittee as addObserverToStore,
+    removeObserverFromCommittee as removeObserverFromStore,
+    findSameSlotDuplicates,
+    normalizeAssignments,
+} from '../../utils/observerAssignments';
 
 const CommitteeObservers = () => {
     const [committees, setCommittees] = useState([]);
     const [observers, setObservers] = useState([]);
-    const [assignments, setAssignments] = useState({});
-    const [isEditMode, setIsEditMode] = useState(false);
+    const [assignments, setAssignments] = useState({ version: 2, slots: {} });
+    const [appConfig, setAppConfig] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [dirty, setDirty] = useState(false);
+    const [filterStage, setFilterStage] = useState('الكل');
+    const [selectedDay, setSelectedDay] = useState(EXAM_WEEKDAYS[0]);
+    const [selectedPeriod, setSelectedPeriod] = useState(1);
+    const [pendingAdd, setPendingAdd] = useState(null);
 
     useEffect(() => {
         fetchData();
@@ -15,238 +54,515 @@ const CommitteeObservers = () => {
 
     const fetchData = async () => {
         setLoading(true);
-        const [cData, oData, aData] = await Promise.all([
+        const [cData, oData, aData, cfg] = await Promise.all([
             getCommittees(),
             getObservers(),
-            getAssignments()
+            getAssignments(),
+            getAppSettings().catch(() => null),
         ]);
         setCommittees(cData);
         setObservers(oData);
-        setAssignments(aData);
+        setAssignments(normalizeAssignments(aData));
+        setAppConfig(cfg);
+        setDirty(false);
+        setPendingAdd(null);
         setLoading(false);
     };
 
-    const handleSaveAssignments = async () => {
-        await saveAssignments(assignments);
-        setIsEditMode(false);
-        // Custom success notification could be triggered here
-    };
+    const dayDate = appConfig?.examSchedule?.dayDates?.[selectedDay] || '';
 
-    const toggleObserver = (committeeId, observerId) => {
-        if (!isEditMode) return;
-
-        setAssignments(prev => {
-            const current = prev[committeeId] || [];
-            if (current.includes(observerId)) {
-                return { ...prev, [committeeId]: current.filter(id => id !== observerId) };
-            } else {
-                return { ...prev, [committeeId]: [...current, observerId] };
-            }
-        });
-    };
-
-    if (loading) return (
-        <div className="flex flex-col items-center justify-center py-40 opacity-20 font-alexandria">
-            <UsersRound size={64} className="animate-pulse mb-4 text-slate-400" />
-            <p className="font-black text-xl text-slate-600 tracking-tighter uppercase">جاري مزامنة بيانات المراقبين...</p>
-        </div>
+    const stages = useMemo(
+        () => [...new Set(committees.map((c) => c.stage).filter(Boolean))],
+        [committees]
     );
 
+    const filteredCommittees = useMemo(() => {
+        if (filterStage === 'الكل') return committees;
+        return committees.filter((c) => c.stage === filterStage);
+    }, [committees, filterStage]);
+
+    const currentSlot = useMemo(
+        () => getSlotAssignments(assignments, selectedDay, selectedPeriod),
+        [assignments, selectedDay, selectedPeriod]
+    );
+
+    const assignedObserverIds = useMemo(() => {
+        const set = new Set();
+        Object.values(currentSlot).forEach((ids) => {
+            (ids || []).forEach((id) => set.add(id));
+        });
+        return set;
+    }, [currentSlot]);
+
+    const unassignedObservers = useMemo(
+        () => observers.filter((o) => !assignedObserverIds.has(o.id)),
+        [observers, assignedObserverIds]
+    );
+
+    const slotDuplicates = useMemo(
+        () => findSameSlotDuplicates(assignments, selectedDay, selectedPeriod, observers),
+        [assignments, selectedDay, selectedPeriod, observers]
+    );
+
+    const committeesWithObservers = useMemo(
+        () =>
+            committees.filter(
+                (c) => getCommitteeObserverIds(assignments, selectedDay, selectedPeriod, c.id).length > 0
+            ).length,
+        [committees, assignments, selectedDay, selectedPeriod]
+    );
+
+    const tryAddObserver = (committeeId, observerId) => {
+        if (!committeeId || !observerId) return;
+        const current = getCommitteeObserverIds(assignments, selectedDay, selectedPeriod, committeeId);
+        if (current.includes(observerId)) return;
+
+        const warnings = checkObserverAssignmentWarnings(assignments, {
+            day: selectedDay,
+            period: selectedPeriod,
+            committeeId,
+            observerId,
+            committees,
+            observers,
+        });
+
+        if (warnings.length) {
+            setPendingAdd({ committeeId, observerId, warnings });
+            return;
+        }
+
+        applyAddObserver(committeeId, observerId);
+    };
+
+    const applyAddObserver = (committeeId, observerId) => {
+        setAssignments((prev) =>
+            addObserverToStore(prev, selectedDay, selectedPeriod, committeeId, observerId)
+        );
+        setDirty(true);
+        setPendingAdd(null);
+    };
+
+    const removeObserverFromCommittee = (committeeId, observerId) => {
+        setAssignments((prev) =>
+            removeObserverFromStore(prev, selectedDay, selectedPeriod, committeeId, observerId)
+        );
+        setDirty(true);
+    };
+
+    const handleSaveAssignments = async () => {
+        setSaving(true);
+        try {
+            await saveAssignments(assignments);
+            setDirty(false);
+        } catch (err) {
+            console.error(err);
+            alert('فشل حفظ التوزيع');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleDiscard = () => {
+        if (dirty && !window.confirm('إلغاء التعديلات غير المحفوظة؟')) return;
+        fetchData();
+    };
+
+    const pendingObserverName = pendingAdd
+        ? observers.find((o) => o.id === pendingAdd.observerId)?.name || 'الملاحظ'
+        : '';
+
+    if (loading) {
+        return (
+            <div className="flex flex-col items-center justify-center py-40 opacity-20 font-alexandria">
+                <UsersRound size={64} className="animate-pulse mb-4 text-slate-400" />
+                <p className="font-black text-xl text-slate-600 tracking-tighter">جاري التحميل...</p>
+            </div>
+        );
+    }
+
     return (
-        <div className="space-y-10 animate-in fade-in duration-700 font-alexandria pb-20">
-            {/* ── Page Header ── */}
+        <div className="space-y-10 animate-in fade-in duration-700 font-alexandria pb-20" dir="rtl">
+            {pendingAdd && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+                    <div
+                        className="luxury-card max-w-lg w-full p-8 space-y-6 shadow-2xl border-amber-100"
+                        role="dialog"
+                        aria-labelledby="duplicate-dialog-title"
+                    >
+                        <div className="flex items-start gap-4">
+                            <div className="w-12 h-12 shrink-0 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center">
+                                <AlertTriangle size={24} />
+                            </div>
+                            <div className="space-y-2 min-w-0">
+                                <h3
+                                    id="duplicate-dialog-title"
+                                    className="text-lg font-black text-slate-900 font-header"
+                                >
+                                    تنبيه تكرار الملاحظ
+                                </h3>
+                                <p className="text-sm font-bold text-slate-600">
+                                    إسناد «{pendingObserverName}» — {selectedDay}
+                                    {dayDate ? ` (${dayDate})` : ''} · {periodLabel(selectedPeriod)}
+                                </p>
+                            </div>
+                        </div>
+                        <ul className="space-y-2 text-sm font-bold text-amber-900 bg-amber-50 rounded-2xl p-4 border border-amber-100">
+                            {pendingAdd.warnings.map((w, i) => (
+                                <li key={i} className="flex gap-2">
+                                    <span className="text-amber-500 shrink-0">{i + 1}.</span>
+                                    <span>{w.message}</span>
+                                </li>
+                            ))}
+                        </ul>
+                        <p className="text-sm font-bold text-slate-500">
+                            هل تريد إسناده رغم التكرار؟
+                        </p>
+                        <div className="flex gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setPendingAdd(null)}
+                                className="flex-1 py-3 rounded-2xl border border-slate-200 bg-white text-slate-600 font-black text-sm hover:bg-slate-50"
+                            >
+                                رفض
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() =>
+                                    applyAddObserver(pendingAdd.committeeId, pendingAdd.observerId)
+                                }
+                                className="flex-1 py-3 rounded-2xl bg-amber-600 text-white font-black text-sm hover:bg-amber-700 shadow-lg shadow-amber-100"
+                            >
+                                موافق — إسناد رغم التكرار
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 px-2">
                 <div className="space-y-2">
                     <div className="flex items-center gap-3">
                         <div className="w-12 h-12 bg-indigo-600 rounded-2.5xl flex items-center justify-center text-white shadow-xl shadow-indigo-100">
                             <UserCheck size={24} />
                         </div>
-                        <h1 className="text-3xl font-black text-slate-900 font-header tracking-tight">توزيع المراقبين</h1>
+                        <h1 className="text-3xl font-black text-slate-900 font-header tracking-tight">
+                            توزيع الملاحظين يدوياً
+                        </h1>
                     </div>
-                    <p className="text-slate-400 font-medium text-sm flex items-center gap-2">
-                        <ArrowLeftRight size={16} className="text-indigo-400" />
-                        نظام الإسناد السريع للمعلمين والمراقبين على قاعات الاختبارات
+                    <p className="text-slate-400 font-medium text-sm max-w-xl leading-relaxed">
+                        التوزيع حسب اليوم والفترة — كل يوم له ملاحظون مستقلون. عند تكرار ملاحظ في
+                        نفس اليوم أو يوم آخر يظهر تنبيه للموافقة أو الرفض.
                     </p>
                 </div>
 
-                <div className="flex items-center gap-3">
-                    <button
-                        onClick={() => window.location.hash = '/observers'}
+                <div className="flex items-center gap-3 flex-wrap">
+                    <Link
+                        to="/observer-sheets"
+                        className="px-6 py-4 bg-emerald-600 text-white rounded-3xl font-black text-sm hover:bg-emerald-700 transition-all shadow-sm flex items-center gap-3"
+                    >
+                        <ClipboardList size={20} /> طباعة كشوف الملاحظين
+                    </Link>
+                    <Link
+                        to="/observers"
                         className="px-6 py-4 bg-white text-slate-600 rounded-3xl font-black text-sm hover:bg-slate-50 transition-all shadow-sm border border-slate-100 flex items-center gap-3"
                     >
-                        <UserPlus size={20} className="text-indigo-500" /> إدارة الكوادر
-                    </button>
+                        <UserPlus size={20} className="text-indigo-500" /> إدارة الأسماء
+                    </Link>
+                    {dirty && (
+                        <button
+                            type="button"
+                            onClick={handleDiscard}
+                            className="px-5 py-4 bg-white text-slate-500 rounded-3xl font-black text-sm border border-slate-200 hover:bg-slate-50 flex items-center gap-2"
+                        >
+                            <RotateCcw size={18} /> تراجع
+                        </button>
+                    )}
                     <button
-                        onClick={isEditMode ? handleSaveAssignments : () => setIsEditMode(true)}
-                        className={`px-8 py-4 rounded-3xl font-black text-sm transition-all shadow-xl active:scale-95 flex items-center gap-3
-                          ${isEditMode ? 'bg-emerald-500 text-white shadow-emerald-100 hover:bg-emerald-600' : 'bg-indigo-600 text-white shadow-indigo-100 hover:bg-indigo-700'}`}
+                        type="button"
+                        onClick={handleSaveAssignments}
+                        disabled={!dirty || saving}
+                        className="px-8 py-4 rounded-3xl font-black text-sm transition-all shadow-xl active:scale-95 flex items-center gap-3 disabled:opacity-40 bg-emerald-600 text-white shadow-emerald-100 hover:bg-emerald-700"
                     >
-                        {isEditMode ? <Check size={20} /> : <ShieldCheck size={20} />}
-                        <span>{isEditMode ? 'حفظ التشكيل النهائي' : 'بدء عملية التوزيع'}</span>
+                        {saving ? <RotateCcw size={20} className="animate-spin" /> : <Save size={20} />}
+                        {saving ? 'جاري الحفظ...' : 'حفظ التوزيع'}
                     </button>
                 </div>
             </div>
 
-            {/* ── Status Banner for Edit Mode ── */}
-            {isEditMode && (
-                <div className="bg-indigo-900 text-white p-6 rounded-[2rem] shadow-2xl animate-in slide-in-from-top-4 relative overflow-hidden">
-                    <div className="absolute top-0 right-0 w-64 h-64 bg-white/5 rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl"></div>
-                    <div className="flex flex-col md:flex-row items-center justify-between gap-4 relative z-10">
-                        <div className="flex items-center gap-4">
-                           <div className="w-12 h-12 bg-white/10 rounded-2xl flex items-center justify-center animate-pulse">
-                              <SlidersHorizontal size={24} />
-                           </div>
-                           <div>
-                              <p className="text-lg font-black font-header leading-tight">وضع التوزيع التفاعلي مفعل</p>
-                              <p className="text-indigo-200 text-xs font-bold opacity-80 uppercase tracking-widest mt-0.5">انقر على أسماء المراقبين لإضافتهم أو إزالتهم من القافلة</p>
-                           </div>
-                        </div>
-                        <button onClick={() => setIsEditMode(false)} className="px-6 py-3 bg-white/10 hover:bg-white/20 rounded-2xl font-black text-xs transition-colors flex items-center gap-2">
-                           <X size={16} /> إلغاء التعديلات
-                        </button>
-                    </div>
+            <div className="luxury-card p-6 mx-2 bg-indigo-50/40 border-indigo-100 flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-2 font-black text-slate-700 text-sm">
+                    <Calendar size={18} className="text-indigo-500" />
+                    اليوم
+                </div>
+                <select
+                    value={selectedDay}
+                    onChange={(e) => setSelectedDay(e.target.value)}
+                    className="px-4 py-3 rounded-xl border border-indigo-100 font-black text-sm bg-white min-w-[140px]"
+                >
+                    {EXAM_WEEKDAYS.map((d) => (
+                        <option key={d} value={d}>
+                            {d}
+                            {appConfig?.examSchedule?.dayDates?.[d]
+                                ? ` — ${appConfig.examSchedule.dayDates[d]}`
+                                : ''}
+                        </option>
+                    ))}
+                </select>
+                <div className="flex items-center gap-2 font-black text-slate-700 text-sm mr-4">
+                    <Clock size={18} className="text-indigo-500" />
+                    الفترة
+                </div>
+                <select
+                    value={selectedPeriod}
+                    onChange={(e) => setSelectedPeriod(parseInt(e.target.value, 10))}
+                    className="px-4 py-3 rounded-xl border border-indigo-100 font-black text-sm bg-white min-w-[160px]"
+                >
+                    {PERIOD_OPTIONS.map((p) => (
+                        <option key={p.value} value={p.value}>
+                            {p.label}
+                        </option>
+                    ))}
+                </select>
+                <span className="text-xs font-bold text-indigo-700 bg-white px-3 py-2 rounded-xl border border-indigo-100 mr-auto">
+                    التعديلات تُحفظ لهذا اليوم والفترة فقط
+                </span>
+            </div>
+
+            {dirty && (
+                <div className="bg-amber-50 border border-amber-100 text-amber-900 px-6 py-4 rounded-2xl flex items-center gap-3 font-bold text-sm mx-2">
+                    <AlertCircle size={18} className="shrink-0" />
+                    لديك تعديلات غير محفوظة — اضغط «حفظ التوزيع» لحفظها.
                 </div>
             )}
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 px-2">
-                {/* ── Committee Assignments ── */}
+            {slotDuplicates.length > 0 && (
+                <div className="bg-rose-50 border border-rose-100 text-rose-900 px-6 py-4 rounded-2xl mx-2 space-y-2">
+                    <p className="font-black text-sm flex items-center gap-2">
+                        <AlertTriangle size={16} />
+                        ملاحظون مُسنَدون لأكثر من لجنة في {selectedDay} — {periodLabel(selectedPeriod)}
+                    </p>
+                    <ul className="text-xs font-bold space-y-1 mr-6">
+                        {slotDuplicates.map((d) => (
+                            <li key={d.observerId}>
+                                {d.name} — {d.count} لجان
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+
+            {observers.length === 0 && (
+                <div className="luxury-card p-8 bg-indigo-50/50 border-indigo-100 flex items-start gap-3 mx-2">
+                    <AlertCircle size={22} className="text-indigo-600 shrink-0 mt-0.5" />
+                    <p className="text-sm font-bold text-indigo-900">
+                        لا يوجد معلمون في السجل.{' '}
+                        <Link to="/observers" className="underline">
+                            أضف أسماء الملاحظين
+                        </Link>{' '}
+                        ثم عُد للتوزيع اليدوي.
+                    </p>
+                </div>
+            )}
+
+            <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-8 px-2">
                 <div className="space-y-6">
-                    <div className="flex items-center gap-3 px-2">
+                    <div className="flex flex-wrap items-center gap-3">
                         <LayoutGrid size={20} className="text-indigo-500" />
-                        <h2 className="text-xl font-black text-slate-800 font-header uppercase tracking-tight">تشكيل اللجان الحالي</h2>
+                        <h2 className="text-xl font-black text-slate-800 font-header">اللجان</h2>
+                        <select
+                            value={filterStage}
+                            onChange={(e) => setFilterStage(e.target.value)}
+                            className="mr-auto px-4 py-2 rounded-xl border border-slate-100 font-black text-sm bg-white"
+                        >
+                            <option value="الكل">كل المراحل</option>
+                            {stages.map((s) => (
+                                <option key={s} value={s}>
+                                    {COMMITTEE_STAGES.find((x) => x.id === s)?.label || s}
+                                </option>
+                            ))}
+                        </select>
                     </div>
 
                     <div className="space-y-4">
-                        {committees.map(committee => {
-                            const assignedCount = assignments[committee.id]?.length || 0;
-                            return (
-                                <div key={committee.id} className="luxury-card p-0 overflow-hidden bg-white border-none shadow-premium transition-all duration-300">
-                                    <div className="p-8 pb-4 flex justify-between items-center group">
-                                        <div className="flex items-center gap-4">
-                                            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all ${assignedCount > 0 ? 'bg-indigo-600 text-white' : 'bg-slate-50 text-slate-400'}`}>
-                                                <UsersRound size={24} />
-                                            </div>
-                                            <div>
-                                                <h3 className="text-xl font-black text-slate-800 font-header">{committee.name}</h3>
-                                                <p className="text-slate-400 font-bold text-xs uppercase tracking-widest mt-0.5">{committee.room}</p>
-                                            </div>
-                                        </div>
-                                        <div className={`flex flex-col items-end ${assignedCount > 0 ? 'opacity-100' : 'opacity-40'}`}>
-                                            <span className="text-2xl font-black text-slate-800 font-header leading-none">{assignedCount}</span>
-                                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">مراقب مخصص</span>
-                                        </div>
-                                    </div>
+                        {filteredCommittees.length === 0 ? (
+                            <div className="luxury-card py-16 text-center text-slate-400 font-black">
+                                لا توجد لجان
+                            </div>
+                        ) : (
+                            filteredCommittees.map((committee) => {
+                                const assignedIds = getCommitteeObserverIds(
+                                    assignments,
+                                    selectedDay,
+                                    selectedPeriod,
+                                    committee.id
+                                );
+                                const available = observers.filter(
+                                    (o) => !assignedIds.includes(o.id)
+                                );
 
-                                    <div className="px-8 pb-8 pt-4">
-                                        <div className="flex flex-wrap gap-2">
-                                            {assignments[committee.id]?.map(obsId => {
-                                                const observer = observers.find(o => o.id === obsId);
-                                                return (
-                                                    <div key={obsId} className="flex items-center gap-3 bg-slate-50 border border-slate-100/50 rounded-2xl px-4 py-3 group/tag hover:bg-white hover:shadow-sm transition-all animate-in fade-in zoom-in-95">
-                                                        <UserCircle2 size={16} className="text-indigo-400" />
-                                                        <span className="text-sm font-black text-slate-700">{observer?.name || 'مراقب عام'}</span>
-                                                        {isEditMode && (
-                                                            <button 
-                                                                onClick={() => toggleObserver(committee.id, obsId)} 
-                                                                className="w-6 h-6 bg-rose-50 text-rose-400 hover:bg-rose-500 hover:text-white rounded-lg transition-all flex items-center justify-center ml-1"
+                                return (
+                                    <div
+                                        key={committee.id}
+                                        className="luxury-card p-0 overflow-hidden bg-white border-none shadow-premium"
+                                    >
+                                        <div className="p-6 pb-4 flex justify-between items-start gap-4">
+                                            <div className="flex items-center gap-4 min-w-0">
+                                                <div
+                                                    className={`w-12 h-12 shrink-0 rounded-2xl flex items-center justify-center ${
+                                                        assignedIds.length > 0
+                                                            ? 'bg-indigo-600 text-white'
+                                                            : 'bg-slate-50 text-slate-400'
+                                                    }`}
+                                                >
+                                                    <UsersRound size={22} />
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <h3 className="text-lg font-black text-slate-800 font-header">
+                                                        {committee.name}
+                                                    </h3>
+                                                    <p className="text-slate-400 font-bold text-xs mt-0.5 flex flex-wrap items-center gap-2">
+                                                        {committee.stage && (
+                                                            <span className="px-2 py-0.5 rounded-md bg-violet-100 text-violet-700 text-[10px] font-black">
+                                                                {
+                                                                    COMMITTEE_STAGES.find(
+                                                                        (s) => s.id === committee.stage
+                                                                    )?.label
+                                                                }
+                                                            </span>
+                                                        )}
+                                                        {committee.room && <span>{committee.room}</span>}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <span className="text-2xl font-black text-slate-800 shrink-0">
+                                                {assignedIds.length}
+                                            </span>
+                                        </div>
+
+                                        <div className="px-6 pb-6 space-y-4">
+                                            <div className="flex flex-wrap gap-2 min-h-[44px]">
+                                                {assignedIds.map((obsId) => {
+                                                    const observer = observers.find((o) => o.id === obsId);
+                                                    return (
+                                                        <div
+                                                            key={obsId}
+                                                            className="flex items-center gap-2 bg-indigo-50 border border-indigo-100 rounded-2xl px-3 py-2"
+                                                        >
+                                                            <UserCheck size={14} className="text-indigo-500" />
+                                                            <span className="text-sm font-black text-slate-800">
+                                                                {observer?.name || '—'}
+                                                            </span>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    removeObserverFromCommittee(
+                                                                        committee.id,
+                                                                        obsId
+                                                                    )
+                                                                }
+                                                                className="w-6 h-6 bg-white text-rose-500 hover:bg-rose-500 hover:text-white rounded-lg flex items-center justify-center transition-all"
+                                                                title="إزالة"
                                                             >
                                                                 <X size={12} />
                                                             </button>
-                                                        )}
-                                                    </div>
-                                                );
-                                            })}
-                                            {assignedCount === 0 && (
-                                                <div className="flex items-center gap-3 py-3 px-2 opacity-50 italic">
-                                                    <CheckCircle2 size={16} className="text-slate-300" />
-                                                    <span className="text-xs font-bold text-slate-400">بانتظار تخصيص الكوادر...</span>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-
-                {/* ── Assignment Pool ── */}
-                <div className="space-y-6 flex flex-col h-full">
-                    <div className="flex items-center gap-3 px-2">
-                        <UserCheck size={20} className="text-indigo-500" />
-                        <h2 className="text-xl font-black text-slate-800 font-header uppercase tracking-tight">مستودع الكوادر المتاح</h2>
-                    </div>
-
-                    <div className={`luxury-card p-0 flex flex-col bg-white border-none shadow-premium overflow-hidden h-fit sticky top-10 transition-all duration-700 ${isEditMode ? 'ring-4 ring-indigo-500/20 scale-[1.02]' : ''}`}>
-                        <div className="p-8 border-b border-slate-50 flex justify-between items-center">
-                            <div>
-                                <h3 className="font-black text-slate-800 font-header">قائمة المعلمين المتاحين</h3>
-                                <p className="text-slate-400 font-bold text-[10px] uppercase tracking-widest mt-1">انقر للتوزيع على اللجان المحددة</p>
-                            </div>
-                            <button onClick={fetchData} className="p-3 bg-slate-50 text-slate-400 hover:bg-indigo-50 hover:text-indigo-600 rounded-2xl transition-all">
-                                <RotateCcw size={18} />
-                            </button>
-                        </div>
-
-                        <div className="p-8 space-y-10 max-h-[700px] overflow-y-auto custom-scrollbar">
-                            {!isEditMode ? (
-                                <div className="flex flex-col items-center justify-center py-20 text-center space-y-4 opacity-50 grayscale transition-all">
-                                    <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center text-slate-400">
-                                       <ShieldCheck size={40} />
-                                    </div>
-                                    <div>
-                                       <p className="font-black text-slate-600">لوحة التوزيع المؤقتة مقفلة</p>
-                                       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">فعل "بدء عملية التوزيع" للتحكم</p>
-                                    </div>
-                                </div>
-                            ) : (
-                                <div className="space-y-10 animate-in fade-in duration-500">
-                                    {committees.map(committee => (
-                                        <div key={`pool-${committee.id}`} className="space-y-4 group">
-                                            <div className="flex items-center gap-3">
-                                               <div className="w-1 h-6 bg-indigo-600 rounded-full group-hover:h-8 transition-all"></div>
-                                               <h4 className="text-xs font-black text-slate-400 uppercase tracking-[0.3em]">{committee.name}</h4>
-                                            </div>
-                                            <div className="flex flex-wrap gap-3">
-                                                {observers.map(observer => {
-                                                    const isAssigned = assignments[committee.id]?.includes(observer.id);
-                                                    return (
-                                                        <button
-                                                            key={`${committee.id}-${observer.id}`}
-                                                            onClick={() => toggleObserver(committee.id, observer.id)}
-                                                            className={`px-5 py-4 rounded-[1.5rem] text-sm font-black transition-all border relative overflow-hidden group/btn flex items-center gap-3
-                                                              ${isAssigned
-                                                                ? 'bg-indigo-600 text-white border-indigo-600 shadow-xl shadow-indigo-100 scale-105'
-                                                                : 'bg-white text-slate-500 border-slate-100 hover:border-indigo-200 hover:bg-indigo-50/50 hover:text-indigo-600 shadow-sm'
-                                                              }`}
-                                                        >
-                                                            <div className={`w-2 h-2 rounded-full ${isAssigned ? 'bg-white animate-pulse' : 'bg-slate-200'}`}></div>
-                                                            {observer.name}
-                                                            {isAssigned && (
-                                                                <div className="absolute top-0 right-0 p-1">
-                                                                   <Check size={10} className="text-indigo-200" />
-                                                                </div>
-                                                            )}
-                                                        </button>
+                                                        </div>
                                                     );
                                                 })}
+                                                {assignedIds.length === 0 && (
+                                                    <span className="text-xs font-bold text-slate-400 py-2 flex items-center gap-2">
+                                                        <CheckCircle2 size={14} />
+                                                        لم يُضف ملاحظون بعد
+                                                    </span>
+                                                )}
                                             </div>
+
+                                            <label className="flex items-center gap-2">
+                                                <Plus size={16} className="text-indigo-500 shrink-0" />
+                                                <select
+                                                    value=""
+                                                    disabled={!observers.length || !available.length}
+                                                    onChange={(e) => {
+                                                        tryAddObserver(committee.id, e.target.value);
+                                                    }}
+                                                    className="flex-1 px-4 py-3 rounded-xl border border-slate-200 font-black text-sm bg-white disabled:opacity-40"
+                                                >
+                                                    <option value="">
+                                                        {!observers.length
+                                                            ? 'أضف معلمين من إدارة الأسماء'
+                                                            : !available.length
+                                                              ? 'كل المعلمين مضافون لهذه اللجنة'
+                                                              : 'اختر معلمًا لإضافته لهذه اللجنة...'}
+                                                    </option>
+                                                    {available.map((o) => (
+                                                        <option key={o.id} value={o.id}>
+                                                            {o.name}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </label>
                                         </div>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                        
-                        <div className="p-8 bg-slate-50/50 border-t border-slate-50">
-                            <div className="flex items-center gap-3 text-slate-400">
-                                <AlertCircle size={16} className="text-indigo-500" />
-                                <p className="text-[10px] font-bold uppercase tracking-widest leading-relaxed">
-                                    تلميح: يمكنك إسناد المعلم الواحد لأكثر من لجنة في حال الضرورة
-                                </p>
-                            </div>
-                        </div>
+                                    </div>
+                                );
+                            })
+                        )}
                     </div>
                 </div>
+
+                <aside className="space-y-4 xl:sticky xl:top-6 h-fit">
+                    <div className="luxury-card p-6 bg-white border-slate-100 space-y-4">
+                        <h3 className="font-black text-slate-800 flex items-center gap-2">
+                            <UserCheck size={18} className="text-indigo-500" />
+                            ملخص — {selectedDay} · {periodLabel(selectedPeriod)}
+                        </h3>
+                        <ul className="space-y-2 text-sm font-bold text-slate-600">
+                            <li className="flex justify-between">
+                                <span>عدد اللجان</span>
+                                <span className="text-indigo-600">{committees.length}</span>
+                            </li>
+                            <li className="flex justify-between">
+                                <span>عدد المعلمين</span>
+                                <span className="text-indigo-600">{observers.length}</span>
+                            </li>
+                            <li className="flex justify-between">
+                                <span>لجان بملاحظين</span>
+                                <span className="text-emerald-600">{committeesWithObservers}</span>
+                            </li>
+                            <li className="flex justify-between">
+                                <span>غير موزّعين (هذا اليوم)</span>
+                                <span className="text-amber-600">{unassignedObservers.length}</span>
+                            </li>
+                        </ul>
+                    </div>
+
+                    {unassignedObservers.length > 0 && (
+                        <div className="luxury-card p-6 bg-slate-50/80 border-slate-100">
+                            <h4 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-3">
+                                معلمون لم يُوزَّعوا في {selectedDay} — {periodLabel(selectedPeriod)}
+                            </h4>
+                            <ul className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar">
+                                {unassignedObservers.map((o) => (
+                                    <li
+                                        key={o.id}
+                                        className="text-sm font-bold text-slate-700 bg-white px-3 py-2 rounded-xl border border-slate-100"
+                                    >
+                                        {o.name}
+                                    </li>
+                                ))}
+                            </ul>
+                            <p className="text-[10px] font-bold text-slate-400 mt-3 leading-relaxed">
+                                غيّر اليوم أو الفترة لتوزيع ملاحظين مختلفين.
+                            </p>
+                        </div>
+                    )}
+
+                    <button
+                        type="button"
+                        onClick={fetchData}
+                        className="w-full py-3 rounded-2xl border border-slate-200 bg-white text-slate-500 font-black text-sm hover:bg-slate-50 flex items-center justify-center gap-2"
+                    >
+                        <RotateCcw size={16} /> تحديث من السيرفر
+                    </button>
+                </aside>
             </div>
         </div>
     );

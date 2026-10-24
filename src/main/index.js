@@ -130,14 +130,30 @@ function startBackends() {
   const wppPath = path.join(resourcesPath, 'wppconnect-master')
 
   // ─── Python OMR Engine ───────────────────────
-  const venvSitePackages = path.join(omrEnginePath, 'venv', 'Lib', 'site-packages')
-  const pythonPath = isProd 
-    ? path.join(omrEnginePath, 'venv', 'Scripts', 'python.exe')
+  // Try venv312 first (primary), then venv as fallback
+  const venvName = (() => {
+    const fs = require('node:fs')
+    if (isProd) {
+      if (fs.existsSync(path.join(omrEnginePath, 'venv312', 'Scripts', 'python.exe'))) return 'venv312'
+      if (fs.existsSync(path.join(omrEnginePath, 'venv', 'Scripts', 'python.exe'))) return 'venv'
+      return 'venv312' // default
+    }
+    // In dev mode, check which venv exists locally
+    if (fs.existsSync(path.join(omrEnginePath, 'venv312', 'Scripts', 'python.exe'))) return 'venv312'
+    if (fs.existsSync(path.join(omrEnginePath, 'venv', 'Scripts', 'python.exe'))) return 'venv'
+    return null
+  })()
+
+  const venvSitePackages = venvName ? path.join(omrEnginePath, venvName, 'Lib', 'site-packages') : ''
+  const pythonPath = isProd && venvName
+    ? path.join(omrEnginePath, venvName, 'Scripts', 'python.exe')
     : (process.platform === 'win32' ? 'python' : 'python3')
+
+  console.log(`[OMR] Using Python venv: ${venvName || 'system python'} → ${pythonPath}`)
 
   const pythonEnv = {
     ...process.env,
-    PYTHONPATH: venvSitePackages,
+    ...(venvSitePackages ? { PYTHONPATH: venvSitePackages } : {}),
     PYTHONUNBUFFERED: '1',
   }
 

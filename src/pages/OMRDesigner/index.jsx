@@ -22,12 +22,13 @@ const defaultTemplate = () => ({
   schoolName: { show: true, x: A4_W / 2, y: 28, text: 'وزارة التعليم - مدرسة النموذجية', fontSize: 13, bold: true, align: 'center' },
   examTitle: { show: true, x: A4_W / 2, y: 48, text: 'اختبار نهاية الفصل الدراسي الأول', fontSize: 11, bold: true, align: 'center' },
   infoRow: {
-    show: true, y: 72,
+    show: true, y: 58,
     fields: [
-      { label: 'اسم الطالب', width: 180 },
-      { label: 'الصف', width: 90 },
-      { label: 'المادة', width: 90 },
-      { label: 'التاريخ', width: 90 },
+      { label: 'اسم الطالب', width: 360 },
+      { label: 'اليوم', width: 120 },
+      { label: 'التاريخ', width: 120 },
+      { label: 'المادة', width: 120 },
+      { label: 'الصف', width: 120 },
     ]
   },
   qrCode: { show: true, x: A4_W - 90, y: 20, size: 70 },
@@ -35,9 +36,9 @@ const defaultTemplate = () => ({
     show: true,
     count: 20,
     cols: 2,
-    startY: 130,
+    startY: 118,
     rowH: 28,
-    optionSize: 14,
+    optionSize: 12,
     optionGap: 22,
     marginX: 40,
     options: ['أ', 'ب', 'ج', 'د'],
@@ -303,13 +304,13 @@ const OMRDesigner = () => {
   ];
 
   return (
-    <div className="flex bg-[#F1F3F9] min-h-screen font-alexandria" dir="rtl">
+    <div className="flex flex-col lg:flex-row bg-[#F1F3F9] min-h-screen min-h-[100dvh] font-alexandria overflow-x-hidden" dir="rtl">
 
       {/* ── Left Designer Sidebar ── */}
-      <div className="w-[420px] bg-white border-l border-slate-100 shadow-[20px_0_50px_rgba(0,0,0,0.03)] flex flex-col z-20 overflow-hidden shrink-0">
+      <div className="w-full lg:w-[min(100%,420px)] lg:max-w-[420px] max-h-[55vh] lg:max-h-none lg:h-screen bg-white border-b lg:border-b-0 lg:border-l border-slate-100 shadow-[0_10px_40px_rgba(0,0,0,0.04)] lg:shadow-[20px_0_50px_rgba(0,0,0,0.03)] flex flex-col z-20 overflow-hidden shrink-0">
         
         {/* Sidebar Header */}
-        <div className="p-8 pb-6 border-b border-slate-50 bg-gradient-to-l from-slate-900 to-indigo-900 text-white relative overflow-hidden">
+        <div className="p-5 sm:p-8 pb-4 sm:pb-6 border-b border-slate-50 bg-gradient-to-l from-slate-900 to-indigo-900 text-white relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-white/5 rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl"></div>
           <div className="relative z-10">
             <h2 className="text-2xl font-black font-header tracking-tight">استوديو القوالب</h2>
@@ -526,17 +527,17 @@ const OMRDesigner = () => {
       </div>
 
       {/* ── Main Canvas (Preview) Area ── */}
-      <div className="flex-1 flex flex-col h-screen overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0 lg:h-screen overflow-hidden min-w-0">
          {/* Top Info Bar */}
-         <header className="h-20 px-10 flex items-center justify-between bg-white/60 backdrop-blur-xl border-b border-white z-10 shrink-0">
-            <div className="flex items-center gap-4">
-               <h1 className="text-xl font-black text-slate-900 font-header">معاينة المستخرج النهائي</h1>
-               <div className="h-6 w-[2px] bg-slate-200"></div>
-               <div className="flex items-center gap-2 text-slate-400 font-bold text-xs uppercase tracking-widest">
-                  <Maximize2 size={14} /> مقياس الرسم الحالي: {(SCALE * 100).toFixed(0)}%
+         <header className="min-h-14 sm:h-20 px-3 sm:px-6 lg:px-10 py-2 sm:py-0 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-white/60 backdrop-blur-xl border-b border-white z-10 shrink-0">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 min-w-0">
+               <h1 className="text-base sm:text-xl font-black text-slate-900 font-header truncate">معاينة المستخرج النهائي</h1>
+               <div className="hidden sm:block h-6 w-[2px] bg-slate-200"></div>
+               <div className="flex items-center gap-2 text-slate-400 font-bold text-[10px] sm:text-xs uppercase tracking-widest">
+                  <Maximize2 size={14} className="shrink-0" /> مقياس: {(SCALE * 100).toFixed(0)}%
                </div>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0">
                <div className="px-5 py-2 bg-slate-900 text-white rounded-full font-black text-xs shadow-lg shadow-slate-200">A4 STANDARD</div>
                <div className={`px-4 py-2 rounded-full font-black text-[10px] flex items-center gap-2 border 
                  ${engineStatus === 'ok' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-slate-50 text-slate-400 border-slate-100'}`}>
@@ -547,7 +548,7 @@ const OMRDesigner = () => {
          </header>
 
          {/* Spotlight Canvas */}
-         <main className="flex-1 overflow-auto bg-[#F1F3F9] p-20 flex justify-center items-start custom-scrollbar">
+         <main className="flex-1 overflow-auto bg-[#F1F3F9] p-3 sm:p-8 lg:p-20 flex justify-center items-start custom-scrollbar">
             <div className="relative group">
                {/* Hover effect decorations */}
                <div className="absolute -inset-4 bg-indigo-600/5 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity blur-2xl"></div>
@@ -556,7 +557,7 @@ const OMRDesigner = () => {
          </main>
 
          {/* Desktop Footer (Tools) */}
-         <footer className="h-14 px-10 flex items-center justify-center bg-white border-t border-slate-100 text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] shrink-0">
+         <footer className="min-h-12 sm:h-14 px-4 sm:px-10 py-2 flex items-center justify-center bg-white border-t border-slate-100 text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] sm:tracking-[0.3em] shrink-0 text-center">
             💡 نصيحة: استخدم حقول البيانات بحرص لتوفير مساحة كافية للفقرات
          </footer>
       </div>

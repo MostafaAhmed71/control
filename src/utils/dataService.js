@@ -1,10 +1,73 @@
 import { createClient } from '@supabase/supabase-js';
+import { fetchOmrResultPages } from './omrResultPaging.js';
+import { normalizeCoverConfig } from './coverTemplates.js';
+import { normalizeObserverSheetsConfig } from './observerSheetTemplates.js';
+import {
+    enrichOmrResultForSave,
+    getStudentNationalId,
+    getStudentSeatNumber,
+    normalizeStudentId,
+} from './studentIdentity.js';
+
+const OMR_PORTAL_NORM_COLUMNS = [
+    'portal_national_norm',
+    'portal_student_id_norm',
+    'portal_detected_id_norm',
+    'portal_norm_detected_id_norm',
+];
+
+/** أعمدة Postgres مولَّدة أو metadata — يُحذفها من jsonb `data` قبل upsert */
+const STRIP_FROM_JSONB_PAYLOAD = new Set([
+    'created_at',
+    'updated_at',
+    'portal_national_norm',
+    'portal_seat_norm',
+    'portal_student_id_norm',
+    'portal_detected_id_norm',
+    'portal_norm_detected_id_norm',
+]);
+
+const toJsonbPayload = (item) => {
+    if (!item || typeof item !== 'object') return {};
+    const payload = { ...item };
+    for (const k of STRIP_FROM_JSONB_PAYLOAD) {
+        delete payload[k];
+    }
+    return payload;
+};
 
 // --- API Endpoints (Local services) ---
-// In production (behind Caddy/Nginx), prefer same-origin relative paths.
-// You can override these via Vite env vars at build-time.
-export const OMR_API_BASE = (import.meta.env.VITE_OMR_API_BASE || '/api/omr').replace(/\/$/, '');
-export const WHATSAPP_API_BASE = (import.meta.env.VITE_WHATSAPP_API_BASE || '/api/whatsapp').replace(/\/$/, '');
+// Browser/Vite dev: relative proxy paths. Packaged Electron: direct localhost (no reverse proxy).
+// Override via VITE_OMR_API_BASE / VITE_WHATSAPP_API_BASE at build time if needed.
+const isElectron =
+    typeof window !== 'undefined' &&
+    typeof window.electronAPI !== 'undefined';
+const defaultOmrBase = isElectron ? 'http://127.0.0.1:8000' : '/api/omr';
+const defaultWaBase = isElectron ? 'http://127.0.0.1:3001' : '/api/whatsapp';
+
+export const OMR_API_BASE = (import.meta.env.VITE_OMR_API_BASE || defaultOmrBase).replace(/\/$/, '');
+export const WHATSAPP_API_BASE = (import.meta.env.VITE_WHATSAPP_API_BASE || defaultWaBase).replace(
+    /\/$/,
+    ''
+);
+
+/** عنوان WhatsApp الفعلي: إعدادات التطبيق ← متغير البناء ← افتراضي محلي/بروكسي */
+export function resolveWhatsAppApiBase(appConfig) {
+    const fromSettings = appConfig?.whatsappApiBase?.trim();
+    if (fromSettings) return fromSettings.replace(/\/$/, '');
+    const fromEnv = import.meta.env.VITE_WHATSAPP_API_BASE?.trim();
+    if (fromEnv) return fromEnv.replace(/\/$/, '');
+    return WHATSAPP_API_BASE;
+}
+
+export async function getWhatsAppApiBase() {
+    try {
+        const cfg = await getAppSettings();
+        return resolveWhatsAppApiBase(cfg);
+    } catch {
+        return resolveWhatsAppApiBase(null);
+    }
+}
 
 // --- Supabase Configuration ---
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -42,18 +105,43 @@ export class SupabaseError extends Error {
 }
 
 // --- Generic Helpers ---
+// نُبقي على systemViewImage (صورة مدمجة بصيغة JPEG q65) لتمكين عرض الورقة في
+// «كشف المعتمدين». ونحذف reviewRois لأنّها قطع base64 ضخمة لكل سؤال على حدة.
 const slimOmrResult = (item) => {
     if (!item || typeof item !== 'object') return item;
-    const { systemViewImage: _a, reviewRois: _b, ...rest } = item;
+    const { reviewRois: _b, ...rest } = item;
+    return rest;
+};
+
+/** للرصد: بدون صور الورقة لتقليل حجم الجلب وتجنّب انقطاع QUIC على آلاف السجلات */
+const slimOmrResultForGrading = (item) => {
+    if (!item || typeof item !== 'object') return item;
+    const {
+        reviewRois: _a,
+        systemViewImage: _b,
+        systemViewImageThumb: _c,
+        sheetImage: _d,
+        scanImage: _e,
+        originalImage: _f,
+        ...rest
+    } = item;
     return rest;
 };
 
 // --- Core CRUD helpers (Supabase only, throws on error) ---
 
+const mapDataRow = (row) => ({
+    id: row.id,
+    ...(typeof row.data === 'object' && row.data !== null ? row.data : {}),
+});
+
+/** أعمدة الجلب لتجنّب SELECT * على omr_results (PostgREST يولّد استعلاماً ثقيلاً ومهلة 57014 على الجداول الكبيرة). */
+const collectionSelect = (tableName) => (tableName === 'omr_results' ? 'id, data' : '*');
+
 const fetchCollection = async (tableName) => {
     const { data, error } = await supabase
         .from(tableName)
-        .select('*')
+        .select(collectionSelect(tableName))
         .range(0, 1999); // Safety cap: max 2000 records per fetch
 
     if (error) {
@@ -62,10 +150,178 @@ const fetchCollection = async (tableName) => {
     }
 
     _setConnected(true);
-    return (data || []).map(row => ({
-        id: row.id,
-        ...(typeof row.data === 'object' && row.data !== null ? row.data : {}),
-    }));
+    return (data || []).map(mapDataRow);
+};
+
+/** استعلامات أقصر لتجنّب statement timeout على جداول فيها JSONB كبير (مثل صور الورقة). */
+const isTimeoutLike = (msg) => {
+    const m = String(msg || '').toLowerCase();
+    return m.includes('timeout') || m.includes('canceling statement');
+};
+
+const isRetryableFetchError = (msg) => {
+    const m = String(msg || '').toLowerCase();
+    return (
+        isTimeoutLike(m) ||
+        m.includes('failed to fetch') ||
+        m.includes('network') ||
+        m.includes('quic') ||
+        m.includes('aborted') ||
+        m.includes('load failed') ||
+        m.includes('connection')
+    );
+};
+
+/** Supabase Fair Use / تجاوز الحصة (402) */
+export const isSupabaseQuotaError = (error) => {
+    if (!error) return false;
+    const status = error.status ?? error.statusCode;
+    if (status === 402) return true;
+    const m = String(error.message || error.originalMessage || error).toLowerCase();
+    return m.includes('402') || m.includes('quota') || m.includes('egress') || m.includes('fair use');
+};
+
+const GRADING_CACHE_KEY = 'elite_omr_grading_cache_v1';
+const GRADING_CACHE_TTL_MS = 20 * 60 * 1000;
+
+const readGradingCache = () => {
+    try {
+        const raw = localStorage.getItem(GRADING_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed?.at || !Array.isArray(parsed.rows)) return null;
+        if (Date.now() - parsed.at > GRADING_CACHE_TTL_MS) {
+            localStorage.removeItem(GRADING_CACHE_KEY);
+            return null;
+        }
+        const rows = parsed.rows;
+        if (parsed.partial) rows._partialFetch = true;
+        return rows;
+    } catch {
+        return null;
+    }
+};
+
+const writeGradingCache = (rows) => {
+    try {
+        localStorage.setItem(
+            GRADING_CACHE_KEY,
+            JSON.stringify({
+                at: Date.now(),
+                partial: Boolean(rows?._partialFetch),
+                rows: [...rows],
+            })
+        );
+    } catch {
+        /* private mode / quota */
+    }
+};
+
+export const invalidateOmrGradingCache = () => {
+    try {
+        localStorage.removeItem(GRADING_CACHE_KEY);
+    } catch {
+        /* ignore */
+    }
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const mapPagedRow = (row, tableName, opts) => {
+    const item = mapDataRow(row);
+    if (opts.slim === 'grading' && tableName === 'omr_results') return slimOmrResultForGrading(item);
+    if (opts.slim && tableName === 'omr_results') return slimOmrResult(item);
+    return item;
+};
+
+/**
+ * جلب الجدول على دفعات (range). يقلّل حجم كل استعلام ويُجنّب انتهاء مهلة السيرفر.
+ * @param {string} tableName
+ * @param {{ pageSize?: number, maxRows?: number }} [opts]
+ */
+const fetchCollectionPaged = async (tableName, opts = {}) => {
+    if (tableName === 'omr_results') {
+        try {
+            const rows = await fetchOmrResultPages(supabase, {
+                ...opts,
+                pageSize: Math.min(opts.pageSize ?? 10, 10),
+                mapRow: (row) => mapPagedRow(row, tableName, opts),
+            });
+            _setConnected(true);
+            return rows;
+        } catch (error) {
+            _setConnected(false);
+            throw new SupabaseError(tableName, 'fetch', error.message);
+        }
+    }
+    const pageSize = Math.max(10, Math.min(opts.pageSize ?? 80, 500));
+    const maxRows = Math.max(pageSize, Math.min(opts.maxRows ?? 20000, 100000));
+    const partialOnError = opts.partialOnError === true;
+    const maxAttempts = Math.max(3, Math.min(opts.maxAttempts ?? 5, 8));
+    const all = [];
+    let from = 0;
+
+    while (from < maxRows) {
+        const to = from + pageSize - 1;
+        let lastErr = null;
+        let chunkLoaded = false;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            let req = supabase.from(tableName).select(collectionSelect(tableName)).order('id', { ascending: true });
+            if (tableName === 'omr_results') {
+                req = req.order('id', { ascending: true });
+            }
+            const { data, error } = await req.range(from, to);
+
+            if (!error) {
+                const chunk = (data || []).map((row) => mapPagedRow(row, tableName, opts));
+                all.push(...chunk);
+                chunkLoaded = true;
+                if (!data || data.length < pageSize) {
+                    _setConnected(true);
+                    return all;
+                }
+                from += pageSize;
+                if (tableName === 'omr_results') {
+                    await sleep(opts.pageDelayMs ?? 120);
+                }
+                break;
+            }
+
+            lastErr = error;
+            if (isSupabaseQuotaError(error)) {
+                _setConnected(false);
+                throw new SupabaseError(tableName, 'fetch', error.message);
+            }
+            if (attempt < maxAttempts - 1 && isRetryableFetchError(error.message)) {
+                await sleep(600 * (attempt + 1));
+                continue;
+            }
+            break;
+        }
+
+        if (chunkLoaded) continue;
+
+        const errMsg = lastErr?.message || 'Failed to fetch';
+        if (isSupabaseQuotaError(lastErr)) {
+            _setConnected(false);
+            throw new SupabaseError(tableName, 'fetch', errMsg);
+        }
+        if (partialOnError && all.length > 0) {
+            console.warn(
+                `[${tableName}] partial fetch stopped at offset ${from}: ${errMsg} — returning ${all.length} rows`
+            );
+            all._partialFetch = true;
+            _setConnected(true);
+            return all;
+        }
+
+        _setConnected(false);
+        throw new SupabaseError(tableName, 'fetch', errMsg);
+    }
+
+    _setConnected(true);
+    return all;
 };
 
 const saveDocument = async (tableName, item) => {
@@ -74,11 +330,23 @@ const saveDocument = async (tableName, item) => {
         docData.id = `${Date.now()}${Math.floor(Math.random() * 10000)}`;
     }
 
-    const persisted = tableName === 'omr_results' ? slimOmrResult(docData) : docData;
+    const persisted =
+        tableName === 'omr_results'
+            ? slimOmrResult(enrichOmrResultForSave(docData))
+            : docData;
 
-    const { error } = await supabase
-        .from(tableName)
-        .upsert({ id: String(persisted.id), data: persisted });
+    const rowId = String(persisted.id);
+    const payload = { id: rowId, data: toJsonbPayload(persisted) };
+    let error = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+            ({ error } = await supabase.from(tableName).upsert(payload));
+        } catch (e) {
+            error = { message: e?.message || String(e) };
+        }
+        if (!error || !isRetryableFetchError(error.message)) break;
+        await sleep(1000 * (attempt + 1));
+    }
 
     if (error) {
         _setConnected(false);
@@ -117,9 +385,142 @@ export const getLocations    = () => fetchCollection('locations');
 export const saveLocation    = (l) => saveDocument('locations', l);
 export const deleteLocation  = (id) => deleteDocument('locations', id);
 
-export const getStudents     = () => fetchCollection('students');
-export const saveStudent     = (s) => saveDocument('students', s);
+export const getStudents = () => fetchCollectionPaged('students', { pageSize: 500, maxRows: 100000 });
+
+/** يحدّث نتائج OMR المرتبطة بالهوية القديمة أو برقم الجلوس عند تغيير هوية الطالب. */
+export const syncOmrResultsForStudentNationalIdChange = async ({
+    previousNationalId,
+    nextNationalId,
+    seatNumber,
+}) => {
+    const oldNat = normalizeStudentId(previousNationalId);
+    const newNat = normalizeStudentId(nextNationalId);
+    if (!newNat) return { updated: 0, scanned: 0 };
+
+    const seatNorm = normalizeStudentId(seatNumber);
+    const norms = [...new Set([oldNat, seatNorm].filter(Boolean))];
+    const seen = new Set();
+    let scanned = 0;
+    let updated = 0;
+
+    for (const norm of norms) {
+        for (const col of OMR_PORTAL_NORM_COLUMNS) {
+            const { data, error } = await supabase
+                .from('omr_results')
+                .select('id, data')
+                .eq(col, norm)
+                .limit(500);
+
+            if (error) {
+                const em = String(error.message || '');
+                if (error.code !== '42703' && !em.includes('portal_')) {
+                    console.warn('[syncOmrResults] فهرس', col, error.message || error);
+                }
+                continue;
+            }
+
+            for (const row of data || []) {
+                const rid = row?.id != null ? String(row.id) : '';
+                if (!rid || seen.has(rid)) continue;
+                seen.add(rid);
+                scanned++;
+
+                const d = row.data && typeof row.data === 'object' ? row.data : {};
+                const patch = enrichOmrResultForSave({
+                    ...d,
+                    id: rid,
+                    nationalId: newNat,
+                });
+                const prevNat = normalizeStudentId(d.nationalId || d.national_id);
+                const prevSid = normalizeStudentId(d.studentId);
+                if (prevNat === newNat && prevSid === newNat) continue;
+
+                await saveOmrResult(patch);
+                updated++;
+            }
+        }
+    }
+
+    return { updated, scanned };
+};
+
+export const saveStudent = async (s) => {
+    let previousNationalId = '';
+    let previousSeat = '';
+
+    if (s?.id) {
+        const { data } = await supabase
+            .from('students')
+            .select('id, data')
+            .eq('id', String(s.id))
+            .maybeSingle();
+        if (data?.data && typeof data.data === 'object') {
+            previousNationalId = getStudentNationalId(data.data);
+            previousSeat = getStudentSeatNumber(data.data);
+        }
+    }
+
+    const saved = await saveDocument('students', s);
+    const newNat = getStudentNationalId(saved);
+    const newSeat = getStudentSeatNumber(saved) || previousSeat;
+    const oldNorm = normalizeStudentId(previousNationalId);
+    const newNorm = normalizeStudentId(newNat);
+
+    if (newNorm && oldNorm && oldNorm !== newNorm) {
+        try {
+            const { updated } = await syncOmrResultsForStudentNationalIdChange({
+                previousNationalId,
+                nextNationalId: newNat,
+                seatNumber: newSeat,
+            });
+            if (updated > 0) {
+                console.info(
+                    `[saveStudent] تم تحديث هوية ${updated} نتيجة OMR بعد تغيير الهوية (${oldNorm} → ${newNorm}).`
+                );
+            }
+        } catch (e) {
+            console.error('[saveStudent] فشل مزامنة نتائج OMR:', e);
+        }
+    }
+
+    return saved;
+};
+
 export const deleteStudent   = (id) => deleteDocument('students', id);
+
+/** حذف مجموعة طلاب بالمعرّف دون المساس ببقية السجل */
+export const deleteStudentsByIds = async (ids) => {
+    const list = [...new Set((ids || []).map(String).filter(Boolean))];
+    const CHUNK = 150;
+    for (let i = 0; i < list.length; i += CHUNK) {
+        const { error } = await supabase.from('students').delete().in('id', list.slice(i, i + CHUNK));
+        if (error) {
+            _setConnected(false);
+            throw new SupabaseError('students', 'bulk-delete', error.message);
+        }
+    }
+    _setConnected(true);
+    return list.length;
+};
+
+/** تحديث/إضافة مجموعة طلاب دون حذف من ليسوا في القائمة */
+export const upsertStudents = async (studentList) => {
+    const list = (studentList || []).map((s) => ({
+        ...s,
+        id: String(s.id || `${Date.now()}${Math.floor(Math.random() * 100000)}`),
+    }));
+    const CHUNK = 100;
+    for (let i = 0; i < list.length; i += CHUNK) {
+        const rows = list.slice(i, i + CHUNK).map((s) => ({ id: s.id, data: toJsonbPayload(s) }));
+        const { error } = await supabase.from('students').upsert(rows);
+        if (error) {
+            _setConnected(false);
+            throw new SupabaseError('students', 'bulk-upsert', error.message);
+        }
+    }
+    _setConnected(true);
+    return list.length;
+};
 
 export const saveStudentsBulk = async (studentList) => {
     const list = Array.isArray(studentList) ? studentList : [];
@@ -156,7 +557,10 @@ export const saveStudentsBulk = async (studentList) => {
     const CHUNK = 100;
     for (let i = 0; i < normalized.length; i += CHUNK) {
         const batch = normalized.slice(i, i + CHUNK);
-        const rows = batch.map((s) => ({ id: String(s.id), data: s }));
+        const rows = batch.map((s) => ({
+            id: String(s.id),
+            data: toJsonbPayload(s),
+        }));
         const { error } = await supabase.from('students').upsert(rows);
         if (error) {
             _setConnected(false);
@@ -166,6 +570,8 @@ export const saveStudentsBulk = async (studentList) => {
     _setConnected(true);
     return normalized;
 };
+
+import { normalizeAssignments } from './observerAssignments';
 
 // --- Assignments ---
 export const getAssignments = async () => {
@@ -183,9 +589,9 @@ export const getAssignments = async () => {
     _setConnected(true);
     if (!data) {
         await supabase.from('settings').upsert({ id: 'assignments', data: {} });
-        return {};
+        return normalizeAssignments({});
     }
-    return data.data || {};
+    return normalizeAssignments(data.data || {});
 };
 
 export const saveAssignments = async (assignments) => {
@@ -207,9 +613,49 @@ const DEFAULT_APP_SETTINGS = {
     managerName: 'اسم المدير هنا',
     academicWeight: '2025/2026',
     primaryColor: '#4f46e5',
+    examSchedule: {
+        dayDates: {
+            الأحد: '',
+            الاثنين: '',
+            الثلاثاء: '',
+            الأربعاء: '',
+            الخميس: '',
+        },
+        entries: [],
+    },
     attendance: {
-        table: { startTop: 15, rowHeight: 2.2, nameRight: 5, seatRight: 35, indexRight: 1, gradeRight: 45, signatureRight: 55 },
-        maxRows: 25,
+        headerSubject: { top: 22.5, right: 10, fontSize: 0.85, show: false, bold: true },
+        headerDay: { top: 22.5, right: 24, fontSize: 0.85, show: false, bold: true },
+        headerDate: { top: 22.5, right: 36, fontSize: 0.85, show: false, bold: true },
+        headerPeriod: { top: 22.5, right: 48, fontSize: 0.85, show: false, bold: true },
+        headerCommittee: { top: 22.5, right: 60, fontSize: 0.82, show: true },
+        headerGrade: { top: 22.5, right: 55, fontSize: 0.85, show: false },
+        headerCount: { top: 22.5, right: 76, fontSize: 0.82, show: true },
+        table: {
+            startTop: 34.2,
+            rowHeight: 2.05,
+            fontSize: 0.62,
+            indexShow: true,
+            indexRight: 6.5,
+            indexTop: 0,
+            nameShow: true,
+            nameRight: 15,
+            nameTop: 0,
+            nameWidthPct: 38,
+            seatShow: true,
+            seatRight: 46,
+            seatTop: 0,
+            gradeShow: true,
+            gradeRight: 53,
+            gradeTop: 0,
+            omrShow: false,
+            signatureShow: false,
+            signatureRight: 78,
+            signatureTop: 0,
+            rowOverrides: {},
+        },
+        maxRows: 25, // ATTENDANCE_PAGE_ROWS — قالب ثابت 25 صف
+        sheetMetaPreview: {},
     },
     seating: {
         name:       { top: 20, right: 10, fontSize: 1.2 },
@@ -217,11 +663,56 @@ const DEFAULT_APP_SETTINGS = {
         grade:      { top: 60, right: 10, fontSize: 1.0 },
         committee:  { top: 80, right: 10, fontSize: 1.0 },
     },
+    seatCard: {
+        name: {
+            top: 42,
+            left: 11,
+            fontSize: 1.05,
+            color: '#0f172a',
+            textAlign: 'left',
+            shrinkToFit: true,
+            maxWidthPct: 46,
+            minFontSize: 0.88,
+        },
+        grade:      { top: 52, left: 14, fontSize: 0.95, color: '#0f172a', textAlign: 'left' },
+        seatNumber: { top: 62, left: 14, fontSize: 2.2, color: '#2563eb', textAlign: 'left' },
+    },
+    notifyCard: {
+        name: {
+            top: 22,
+            right: 12,
+            fontSize: 1.1,
+            color: '#111827',
+            textAlign: 'right',
+            shrinkToFit: true,
+            maxWidthPct: 55,
+            minFontSize: 0.85,
+        },
+        seatNumber: { top: 38, right: 12, fontSize: 1.8, color: '#4f46e5', textAlign: 'right' },
+        grade: { top: 52, right: 12, fontSize: 0.95, color: '#1f2937', textAlign: 'right' },
+        committee: { top: 66, right: 12, fontSize: 1.05, color: '#065f46', textAlign: 'right' },
+    },
+    coverLibrary: {
+        items: [],
+    },
+    covers: {},
+    observerSheets: {},
+    /** إنتاج: خادم WPP على VPS */
+    whatsappApiBase: 'https://wpp.northelite0.com',
+    /** رمز المدرسة في نموذج الاختبارات الوطنية (وزارة التعليم) */
+    moeSchoolCode: '',
     messages: {
         committee: 'عزيزي ولي أمر الطالب {name}، موعد اختبار ابنكم في لجنة {committee}، رقم الجلوس: {seatNumber}',
         result:    'تم إعلان نتائج {name}. يمكنك الاطلاع عليها عبر البوابة.',
     },
 };
+
+function normalizeAppSettings(config = {}) {
+    const next = { ...DEFAULT_APP_SETTINGS, ...config };
+    const wa = String(next.whatsappApiBase ?? DEFAULT_APP_SETTINGS.whatsappApiBase ?? '').trim();
+    next.whatsappApiBase = wa ? wa.replace(/\/$/, '') : '';
+    return next;
+}
 
 export const getAppSettings = async () => {
     const { data, error } = await supabase
@@ -237,23 +728,29 @@ export const getAppSettings = async () => {
 
     _setConnected(true);
     if (!data) {
-        await supabase.from('settings').upsert({ id: 'app_config', data: DEFAULT_APP_SETTINGS });
-        return DEFAULT_APP_SETTINGS;
+        const initial = normalizeObserverSheetsConfig(
+            normalizeCoverConfig(normalizeAppSettings(DEFAULT_APP_SETTINGS))
+        );
+        await supabase.from('settings').upsert({ id: 'app_config', data: initial });
+        return initial;
     }
-    return { ...DEFAULT_APP_SETTINGS, ...data.data };
+    return normalizeObserverSheetsConfig(
+        normalizeCoverConfig(normalizeAppSettings({ ...DEFAULT_APP_SETTINGS, ...data.data }))
+    );
 };
 
 export const saveAppSettings = async (config) => {
+    const data = normalizeObserverSheetsConfig(normalizeCoverConfig(normalizeAppSettings(config)));
     const { error } = await supabase
         .from('settings')
-        .upsert({ id: 'app_config', data: config });
+        .upsert({ id: 'app_config', data });
 
     if (error) {
         _setConnected(false);
         throw new SupabaseError('settings/app_config', 'save', error.message);
     }
     _setConnected(true);
-    return config;
+    return data;
 };
 
 // --- OMR Subjects (persisted in Supabase) ---
@@ -313,16 +810,187 @@ const examIsArchived = (e) => {
 /** @param {{ includeArchived?: boolean }} [opts] — if false (default), rows with `archived: true` are omitted */
 export const getOmrExams = async (opts = {}) => {
     const { includeArchived = false } = opts;
-    const rows = await fetchCollection('omr_exams');
+    let rows;
+    if (opts.summary) {
+        const fields = ['title', 'grade', 'grades', 'stage', 'subject', 'date', 'createdAt', 'archived', 'qCount'];
+        const all = [];
+        for (let from = 0; ; from += 500) {
+            const { data, error } = await supabase.from('omr_exams')
+                .select(['id', ...fields.map((key) => `${key}:data->${key}`)].join(','))
+                .order('id').range(from, from + 499);
+            if (error) throw new SupabaseError('omr_exams', 'fetch', error.message);
+            all.push(...(data || []));
+            if (!data || data.length < 500) break;
+        }
+        rows = all;
+    } else {
+        rows = await fetchCollection('omr_exams');
+    }
     if (includeArchived) return rows;
     return rows.filter((e) => !examIsArchived(e));
 };
 export const saveOmrExam    = (e) => saveDocument('omr_exams', e);
 export const deleteOmrExam  = (id) => deleteDocument('omr_exams', id);
 
-export const getOmrResults  = () => fetchCollection('omr_results');
-export const saveOmrResult  = (r) => saveDocument('omr_results', r);
-export const deleteOmrResult = (id) => deleteDocument('omr_results', id);
+/** نتائج OMR: جلب صفحي (صفوف أقل لكل استعلام) لأن حقل data قد يحتوي صوراً كبيرة وتسبب statement timeout */
+export const getOmrResults = (opts = {}) =>
+    fetchCollectionPaged('omr_results', { ...opts, pageSize: 10, maxRows: 25000 });
+
+// Select scalar fields in Postgres: images never travel to the browser.
+const RESULT_LIST_FIELDS = ['examId', 'examTitle', 'subject', 'studentId', 'nationalId',
+    'seatNumber', 'studentName', 'studentGrade', 'classroom', 'assignedStudentId', 'phone',
+    'score', 'total', 'percentage', 'approved', 'confirmed', 'approvedAt', 'timestamp',
+    'updatedAt', 'createdAt', 'manualEntry', 'detectedStudentId', 'normalizedDetectedStudentId'];
+export const getOmrResultList = async (examId) => {
+    if (!examId) return [];
+    // Filtering a toasted JSON document scans/decompresses every sheet and times out.
+    // Read only the indexed IDs first, then fetch this exam's scalar fields by PK.
+    const ids = [];
+    let cursor = null;
+    const prefix = `omr_${examId}_`;
+    for (;;) {
+        let query = supabase.from('omr_results').select('id').order('id').limit(1000);
+        if (cursor !== null) query = query.gt('id', cursor);
+        const { data, error } = await query;
+        if (error) throw new SupabaseError('omr_results', 'fetch', error.message);
+        for (const row of data || []) {
+            if (row.id.startsWith(prefix) || !/^omr_\d+_/.test(row.id)) ids.push(row.id);
+        }
+        if (!data?.length || data.length < 1000) break;
+        cursor = data.at(-1).id;
+    }
+    const rows = [];
+    for (let offset = 0; offset < ids.length; offset += 30) {
+        const { data, error } = await supabase.from('omr_results')
+            .select(['id', ...RESULT_LIST_FIELDS.map((key) => `${key}:data->${key}`)].join(','))
+            .in('id', ids.slice(offset, offset + 30));
+        if (error) throw new SupabaseError('omr_results', 'fetch', error.message);
+        rows.push(...(data || []).filter((row) => String(row.examId) === String(examId))
+            .map((row) => ({ ...row, _listOnly: true })));
+    }
+    return rows;
+};
+
+const mapGradingRpcRow = (row) => ({
+    id: row.id,
+    ...(typeof row.payload === 'object' && row.payload !== null ? row.payload : {}),
+});
+
+/** جلب خفيف عبر RPC (بدون صور) — يقلّل Egress بشكل كبير */
+const fetchOmrResultsGradingViaRpc = async (opts = {}) => {
+    const pageSize = Math.max(20, Math.min(opts.pageSize ?? 80, 200));
+    const maxRows = Math.max(pageSize, Math.min(opts.maxRows ?? 25000, 100000));
+    const partialOnError = opts.partialOnError === true;
+    const all = [];
+    let offset = 0;
+
+    while (offset < maxRows) {
+        let lastErr = null;
+        let chunk = null;
+
+        for (let attempt = 0; attempt < 4; attempt++) {
+            const { data, error } = await supabase.rpc('fetch_omr_results_grading_page', {
+                p_limit: pageSize,
+                p_offset: offset,
+            });
+
+            if (!error) {
+                chunk = (data || []).map(mapGradingRpcRow);
+                break;
+            }
+
+            lastErr = error;
+            const missingFn =
+                error.code === 'PGRST202' ||
+                String(error.message || '').includes('fetch_omr_results_grading_page');
+            if (missingFn) return null;
+
+            if (isSupabaseQuotaError(error)) throw new SupabaseError('omr_results/rpc', 'fetch', error.message);
+
+            if (attempt < 3 && isRetryableFetchError(error.message)) {
+                await sleep(700 * (attempt + 1));
+                continue;
+            }
+            break;
+        }
+
+        if (chunk) {
+            all.push(...chunk);
+            if (chunk.length < pageSize) {
+                _setConnected(true);
+                return all;
+            }
+            offset += pageSize;
+            await sleep(opts.pageDelayMs ?? 80);
+            continue;
+        }
+
+        const errMsg = lastErr?.message || 'Failed to fetch';
+        if (partialOnError && all.length > 0) {
+            all._partialFetch = true;
+            _setConnected(true);
+            return all;
+        }
+        _setConnected(false);
+        throw new SupabaseError('omr_results/rpc', 'fetch', errMsg);
+    }
+
+    _setConnected(true);
+    return all;
+};
+
+/**
+ * نتائج للرصد: RPC خفيف (إن وُجد) + كاش محلي 20 دقيقة + fallback بدون صور.
+ */
+export const getOmrResultsForGrading = async (opts = {}) => {
+    if (!opts.forceRefresh) {
+        const cached = readGradingCache();
+        if (cached) return cached;
+    }
+
+    let rows = await fetchOmrResultsGradingViaRpc({
+        pageSize: 80,
+        maxRows: 25000,
+        partialOnError: true,
+        pageDelayMs: 80,
+    });
+
+    if (rows === null) {
+        rows = await fetchCollectionPaged('omr_results', {
+            pageSize: 35,
+            maxRows: 25000,
+            partialOnError: true,
+            slim: 'grading',
+            pageDelayMs: 150,
+            maxAttempts: 6,
+        });
+    }
+
+    writeGradingCache(rows);
+    return rows;
+};
+
+export const saveOmrResult = async (r) => {
+    let payload = r;
+    if (r._listOnly) {
+        const { data, error } = await supabase.from('omr_results').select('id,data').eq('id', String(r.id)).single();
+        if (error) throw new SupabaseError('omr_results', 'fetch', error.message);
+        payload = { ...mapDataRow(data), ...r };
+        delete payload._listOnly;
+        if (r.manualEntry) {
+            delete payload.details;
+            delete payload.answers;
+        }
+    }
+    const out = await saveDocument('omr_results', payload);
+    invalidateOmrGradingCache();
+    return out;
+};
+
+export const deleteOmrResult = async (id) => {
+    await deleteDocument('omr_results', id);
+    invalidateOmrGradingCache();
+};
 
 // --- Clear All Data (Supabase) ---
 export const clearAllData = async () => {

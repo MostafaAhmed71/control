@@ -15,6 +15,12 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 from omr_constants import *
 from font_utils import truetype, has_raqm
+from sheet_helpers import (
+    option_labels_for_subject,
+    draw_student_info_rows,
+    draw_footer_with_manual_name,
+    fit_question_row_spacing,
+)
 
 def ar(text):
     if not text: return ""
@@ -76,10 +82,16 @@ DEFAULT_CONFIG = {
     "year":          "العام الدراسي ١٤٤٧ هــ",
     "principal":     "مدير المدرسة : محمد نصر الدين",
     "footer":        "نظام التصحيح الآلي بمتوسطة وثانوية نخبة الشمال الأهلية",
+    "show_name_row": True,
     "show_date_row": True,
     "show_day_row":  True,
     "show_class_row": True,
     "show_subject_row": True,
+    "show_seat_row": True,
+    "show_committee_row": True,
+    # نص ثابت لخانتي الصف/المادة على كل الأوراق (يُرسل من الواجهة مع template_config)
+    "header_class_text": "",
+    "header_subject_text": "",
 }
 
 
@@ -147,108 +159,17 @@ def draw_header(img, draw, student_info, cfg):
                 img.paste(logo, (lx, ly), logo)
         except: pass
 
-    # Student info rows (NAFS order: Name → Class|Subject → Date|Day)
-    start_y = HEADER_START_Y
-    row_h   = HEADER_ROW_H
-    w       = HEADER_WIDTH
-    x       = MARGIN
-    P       = 40
+    info = dict(student_info)
+    tpl_class = str(cfg.get("header_class_text") or "").strip()
+    tpl_subject = str(cfg.get("header_subject_text") or "").strip()
+    if tpl_class:
+        info["class"] = tpl_class
+    if tpl_subject:
+        info["subject"] = tpl_subject
 
-    def rt(label, box_right, y_top, font=FONT_LABEL):
-        t  = ar(label)
-        tw = _tl(draw, t, font=font)
-        ty = y_top + (row_h - 60) // 2
-        _dt(draw, (box_right - tw - P, ty), t, fill=BLACK, font=font)
-        return box_right - tw - P * 2
-
-    # Row 1: Name (always shown)
-    draw.rectangle([x, start_y, x + w, start_y + row_h], outline=BLACK, width=3)
-    ll = rt("اسم الطالب:", x + w, start_y)
-    nv = ar(student_info.get("name", ""))
-    _dt(draw, (ll - _tl(draw, nv, font=FONT_LG) - P,
-               start_y + (row_h - 65) // 2), nv, fill=BLACK, font=FONT_LG)
-
-    row_offset = 1
-
-    show_class = bool(cfg.get("show_class_row", True))
-    show_subject = bool(cfg.get("show_subject_row", True))
-
-    # Class / subject (same row when both on — matches NAFS header placement)
-    if show_class and show_subject:
-        y = start_y + row_offset * row_h
-        draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
-        mid_x = x + w // 2
-        draw.line([(mid_x, y), (mid_x, y + row_h)], fill=BLACK, width=3)
-
-        def draw_cell_cs(label, value, cell_left, cell_right):
-            ll = rt(label, cell_right, y)
-            vv = ar(value)
-            _dt(draw, (ll - _tl(draw, vv, font=FONT_LG) - P,
-                       y + (row_h - 65) // 2), vv, fill=BLACK, font=FONT_LG)
-
-        draw_cell_cs("الصف:", student_info.get("class", ""), mid_x, x + w)
-        draw_cell_cs("المادة:", student_info.get("subject", ""), x, mid_x)
-        row_offset += 1
-    else:
-        if show_class:
-            y = start_y + row_offset * row_h
-            draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
-            llc = rt("الصف:", x + w, y)
-            cv = ar(student_info.get("class", ""))
-            _dt(draw, (llc - _tl(draw, cv, font=FONT_LG) - P,
-                       y + (row_h - 65) // 2), cv, fill=BLACK, font=FONT_LG)
-            row_offset += 1
-
-        if show_subject:
-            y = start_y + row_offset * row_h
-            draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
-            lls = rt("المادة:", x + w, y)
-            sv = ar(student_info.get("subject", ""))
-            _dt(draw, (lls - _tl(draw, sv, font=FONT_LG) - P,
-                       y + (row_h - 65) // 2), sv, fill=BLACK, font=FONT_LG)
-            row_offset += 1
-
-    show_date = bool(cfg.get("show_date_row", True))
-    show_day = bool(cfg.get("show_day_row", True))
-
-    # Date / day (one compact row when both enabled)
-    if show_date and show_day:
-        y = start_y + row_offset * row_h
-        draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
-        mid_x = x + w // 2
-        draw.line([(mid_x, y), (mid_x, y + row_h)], fill=BLACK, width=3)
-
-        day_num, month, year_ar = fmt_date_parts(student_info.get("date", ""))
-        date_val = f"{day_num} - {month} - {year_ar}" if year_ar else day_num
-
-        def draw_cell_dt(label, value, cell_left, cell_right):
-            ll = rt(label, cell_right, y)
-            vv = ar(value)
-            _dt(draw, (ll - _tl(draw, vv, font=FONT_LG) - P,
-                       y + (row_h - 65) // 2), vv, fill=BLACK, font=FONT_LG)
-
-        draw_cell_dt("التاريخ:", date_val, mid_x, x + w)
-        draw_cell_dt("اليوم:", student_info.get("day", ""), x, mid_x)
-        row_offset += 1
-    else:
-        if show_date:
-            y = start_y + row_offset * row_h
-            draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
-            lld = rt("التاريخ:", x + w, y)
-            day_num, month, year_ar = fmt_date_parts(student_info.get("date", ""))
-            dv = ar(f"{day_num} - {month} - {year_ar}") if year_ar else ar(day_num)
-            _dt(draw, (lld - _tl(draw, dv, font=FONT_LG) - P,
-                       y + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
-            row_offset += 1
-
-        if show_day:
-            y = start_y + row_offset * row_h
-            draw.rectangle([x, y, x + w, y + row_h], outline=BLACK, width=3)
-            lly = rt("اليوم:", x + w, y)
-            dy_val = ar(student_info.get("day", ""))
-            _dt(draw, (lly - _tl(draw, dy_val, font=FONT_LG) - P,
-                       y + (row_h - 65) // 2), dy_val, fill=BLACK, font=FONT_LG)
-            row_offset += 1
+    draw_student_info_rows(
+        draw, info, fmt_date_parts, ar, _tl, _dt, FONT_LG, FONT_SM, visibility=cfg
+    )
 
 
 def build_qr_payload(student_info, num_questions=30, template="custom"):
@@ -257,6 +178,9 @@ def build_qr_payload(student_info, num_questions=30, template="custom"):
         "nq": int(num_questions),
         "tpl": str(template),
     }
+    exam_id = str(student_info.get("exam_id") or "").strip()
+    if exam_id:
+        payload["ex"] = exam_id
     import json
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -266,18 +190,19 @@ def draw_qr_code(img, qr_payload):
     qr.add_data(qr_payload)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    qr_img = qr_img.resize((QR_SIZE, QR_SIZE))
+    qr_img = qr_img.resize((QR_SIZE, QR_SIZE), Image.NEAREST)
     img.paste(qr_img, (QR_X, QR_Y))
 
 
-def draw_questions_section(draw, start_y, num_questions=30):
+def draw_questions_section(draw, start_y, num_questions=30, subject=""):
     half    = (WIDTH - 2 * MARGIN) // 2
     GAP     = 60
     col_w   = half - GAP // 2
     r_col_x = MARGIN + half + GAP // 2
     l_col_x = MARGIN
 
-    opt_labels_ar = [ar(o) for o in OPT_LABELS]
+    opt_labels = option_labels_for_subject(subject)
+    opt_labels_ar = [o if o in "ABCD" else ar(o) for o in opt_labels]
     header_y      = start_y - 100
     NUM_AREA      = 120
 
@@ -289,12 +214,13 @@ def draw_questions_section(draw, start_y, num_questions=30):
             tw = int(_tl(draw, t, font=FONT_SM))
             _dt(draw, (int(ox) - tw // 2, header_y), t, fill=BLACK, font=FONT_SM)
 
+    row_spacing = fit_question_row_spacing(num_questions, start_y, QS_ROW_SPACING)
     per_col = (num_questions + 1) // 2
     for q in range(num_questions):
         col_x = r_col_x if q < per_col else l_col_x
         row   = q if q < per_col else q - per_col
         q_num = q + 1
-        y     = start_y + row * QS_ROW_SPACING
+        y     = start_y + row * row_spacing
         num_right = col_x + col_w - 10
         bub_right = num_right - NUM_AREA
 
@@ -317,16 +243,12 @@ def generate_personalized_sheet(student_info, template_config=None, num_question
     draw_header(img, draw, student_info, cfg)
     qr_payload = build_qr_payload(student_info, num_questions=num_questions, template="custom")
     draw_qr_code(img, qr_payload)
-    draw_questions_section(draw, QS_START_Y, num_questions=num_questions)
+    subj = str(cfg.get("header_subject_text") or "").strip() or student_info.get("subject", "")
+    draw_questions_section(draw, QS_START_Y, num_questions=num_questions, subject=subj)
 
-    # Footer
-    fy_top = HEIGHT - MARGIN - 160
-    fy_bot = HEIGHT - MARGIN - 40
-    pt  = ar(cfg["principal"])
-    _dt(draw, (MARGIN + 40, fy_top), pt, fill=BLACK, font=FONT_MD)
-    st  = ar(cfg["footer"])
-    stw = _tl(draw, st, font=FONT_MD)
-    _dt(draw, ((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
+    draw_footer_with_manual_name(
+        draw, cfg["principal"], cfg["footer"], ar, _tl, _dt, FONT_MD
+    )
 
     if filename:
         img.save(filename)

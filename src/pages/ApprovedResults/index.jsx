@@ -1,10 +1,94 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
-  Search, FileText, CheckCircle2, Printer, Trophy,
+  Search, FileText, CheckCircle2, Printer, Trophy, Table2,
   Users, BookOpen, ChevronDown, AlertCircle, Download,
-  Filter, Star, TrendingUp, ClipboardList, RefreshCcw, Wrench, Loader2, Edit2, X, Trash2, Calendar
+  Filter, Star, TrendingUp, ClipboardList, RefreshCcw, Wrench, Loader2, Edit2, X, Trash2, Calendar,
+  Image as ImageIcon, UserPlus, UserCheck, UserX, Phone
 } from 'lucide-react';
-import { getOmrResults, getOmrExams, getStudents, saveOmrResult, deleteOmrResult } from '../../utils/dataService';
+import { Link } from 'react-router-dom';
+import { gradesXlsx as XLSX, createGradesWorkbook } from '../../utils/approvedResultsExcel';
+import { exportUsingGradeTemplate } from '../../utils/gradeTemplateRegistry';
+import JSZip from 'jszip';
+import { createApprovedResultsPdf } from '../../utils/approvedResultsPdf';
+import { isLevelMatch } from '../../utils/gradeMatch';
+import { getOmrResults, getOmrResultList, getOmrExams, getStudents, saveOmrResult, deleteOmrResult, saveStudent } from '../../utils/dataService';
+import { findStudentByName, studentNamesMatch, getStudentNationalId, getStudentSeatNumber } from '../../utils/studentIdentity';
+import { buildExamAttendance } from '../../utils/examAttendance';
+import {
+  printAggregatedGradesSheet,
+  resolveResultClass,
+  resolveResultSubject,
+} from '../../utils/aggregatedGradesPrint';
+
+/* ── طالب غير معرّف؟ ── */
+const isUnknownStudent = (r) => {
+  const n = String(r?.studentName || '').trim();
+  return !n || n === 'طالب غير معروف' || n === 'طالب غير معرف' || n === 'غير معروف' || n === '—';
+};
+
+/* ── تطبيع رقم الطالب (يطابق OMR Scanner) ── */
+const normalizeStudentIdAR = (value) => {
+  const raw = (value ?? '').toString().trim();
+  if (!raw) return '';
+  const arabicIndic = '٠١٢٣٤٥٦٧٨٩';
+  const easternArabic = '۰۱۲۳۴۵۶۷۸۹';
+  const latin = raw.split('').map(ch => {
+    const i = arabicIndic.indexOf(ch);
+    if (i >= 0) return String(i);
+    const j = easternArabic.indexOf(ch);
+    if (j >= 0) return String(j);
+    return ch;
+  }).join('');
+  return latin.replace(/[^a-zA-Z0-9]/g, '').replace(/^0+/, '').trim();
+};
+
+/* ── بناء فهرس سريع للطلاب ── */
+const buildStudentIndex = (students) => {
+  const byId = new Map();
+  (students || []).forEach(s => {
+    [
+      s.id, s.seatNumber, s.seat_number,
+      s.nationalId, s.national_id,
+      s.studentId, s.student_id,
+    ].filter(Boolean).forEach(v => {
+      const k = normalizeStudentIdAR(v);
+      if (k) byId.set(k, s);
+    });
+  });
+  return byId;
+};
+
+/* ── البحث عن طالب لنتيجة معينة ── */
+const findStudentForResult = (r, byIdMap) => {
+  if (!byIdMap || !byIdMap.size) return null;
+  const candidates = [
+    r.studentId, r.detectedStudentId, r.normalizedDetectedStudentId,
+  ].filter(Boolean);
+  for (const c of candidates) {
+    const k = normalizeStudentIdAR(c);
+    if (k && byIdMap.has(k)) return byIdMap.get(k);
+  }
+  return null;
+};
+
+/* ── خريطة يدوية: detectedId → بيانات الطالب (محفوظة محلياً) ── */
+const MANUAL_MAP_KEY = 'omr_manual_student_map';
+const getManualMap = () => {
+  try {
+    const raw = localStorage.getItem(MANUAL_MAP_KEY);
+    const obj = raw ? JSON.parse(raw) : {};
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch { return {}; }
+};
+const saveManualMapEntry = (detectedId, info) => {
+  try {
+    const k = normalizeStudentIdAR(detectedId);
+    if (!k) return;
+    const cur = getManualMap();
+    cur[k] = { ...(cur[k] || {}), ...info, savedAt: new Date().toISOString() };
+    localStorage.setItem(MANUAL_MAP_KEY, JSON.stringify(cur));
+  } catch { /* ignore */ }
+};
 
 /* ── Grade helpers ── */
 const getGradeLabel = (pct) => {
@@ -22,33 +106,56 @@ const getSchoolNameByStage = (stage = '') => {
   return 'متوسطة وثانوية نخبة الشمال الأهلية';
 };
 
+const absentStudentId = (s) => getStudentNationalId(s) || getStudentSeatNumber(s) || '';
+const absentStudentClass = (s) => [s?.grade, s?.classroom].filter(Boolean).join(' / ');
+
+const statusBadge = (present) => present
+  ? '<span style="background:#dcfce7;color:#15803d;padding:3px 10px;border-radius:20px;font-weight:800;font-size:12px;border:1px solid #86efac">حاضر</span>'
+  : '<span style="background:#fee2e2;color:#b91c1c;padding:3px 10px;border-radius:20px;font-weight:800;font-size:12px;border:1px solid #fca5a5">غائب</span>';
+
 /* ── Print approved list ── */
-const printApprovedList = (results, examTitle, examStage) => {
-  if (!results.length) return;
+const printApprovedList = (results, examTitle, examStage, absent = []) => {
+  if (!results.length && !absent.length) return;
   const schoolName = getSchoolNameByStage(examStage);
 
   const sorted = [...results].sort((a, b) => parseFloat(b.percentage) - parseFloat(a.percentage));
+  const cell = 'border:1px solid #e2e8f0;padding:8px 12px';
 
-  const rows = sorted.map((r, idx) => {
+  const presentRows = sorted.map((r, idx) => {
     const g = getGradeLabel(r.percentage);
     const pct = parseFloat(r.percentage).toFixed(1);
     return `
     <tr style="background:${idx % 2 === 0 ? '#f8fafc' : '#ffffff'}">
-      <td style="border:1px solid #e2e8f0;padding:8px 12px;text-align:center;font-weight:700;color:#475569">${idx + 1}</td>
-      <td style="border:1px solid #e2e8f0;padding:8px 12px;font-weight:700;color:#1e293b">${r.studentName || r.studentId}</td>
-      <td style="border:1px solid #e2e8f0;padding:8px 12px;text-align:center;font-family:monospace;color:#64748b">${r.studentId}</td>
-      <td style="border:1px solid #e2e8f0;padding:8px 12px;text-align:center;color:#475569">${r.studentGrade || '—'}</td>
-      <td style="border:1px solid #e2e8f0;padding:8px 12px;text-align:center;font-weight:900;font-size:16px;color:#1e293b">${r.score} / ${r.total}</td>
-      <td style="border:1px solid #e2e8f0;padding:8px 12px;text-align:center;font-weight:700;color:${g.color.replace('text-', '')}">${pct}%</td>
-      <td style="border:1px solid #e2e8f0;padding:8px 12px;text-align:center">
+      <td style="${cell};text-align:center;font-weight:700;color:#475569">${idx + 1}</td>
+      <td style="${cell};font-weight:700;color:#1e293b">${r.studentName || r.studentId}</td>
+      <td style="${cell};text-align:center;font-family:monospace;color:#64748b">${r.studentId}</td>
+      <td style="${cell};text-align:center;color:#475569">${r.studentGrade || '—'}</td>
+      <td style="${cell};text-align:center">${statusBadge(true)}</td>
+      <td style="${cell};text-align:center;font-weight:900;font-size:16px;color:#1e293b">${r.score} / ${r.total}</td>
+      <td style="${cell};text-align:center;font-weight:700;color:${g.color.replace('text-', '')}">${pct}%</td>
+      <td style="${cell};text-align:center">
         <span style="background:${g.bg.replace('bg-','')};color:${g.color.replace('text-','')};padding:3px 10px;border-radius:20px;font-weight:700;font-size:12px;border:1px solid">${g.label}</span>
       </td>
     </tr>`;
   }).join('');
 
+  const absentRows = absent.map(({ student, exam }, i) => `
+    <tr style="background:#fef2f2">
+      <td style="${cell};text-align:center;font-weight:700;color:#475569">${sorted.length + i + 1}</td>
+      <td style="${cell};font-weight:700;color:#991b1b">${student.name || '—'}</td>
+      <td style="${cell};text-align:center;font-family:monospace;color:#64748b">${absentStudentId(student) || '—'}</td>
+      <td style="${cell};text-align:center;color:#475569">${absentStudentClass(student) || '—'}</td>
+      <td style="${cell};text-align:center">${statusBadge(false)}</td>
+      <td style="${cell};text-align:center;color:#94a3b8" colspan="3">${exam?.subject ? `لم يحضر اختبار ${exam.subject}` : 'لم يحضر'}</td>
+    </tr>`).join('');
+
+  const rows = presentRows + absentRows;
+  const presentCount = sorted.length;
+  const absentCount = absent.length;
+
   const pass = sorted.filter(r => parseFloat(r.percentage) >= 50).length;
   const fail = sorted.length - pass;
-  const avg = sorted.reduce((s, r) => s + parseFloat(r.percentage), 0) / sorted.length;
+  const avg = sorted.length ? sorted.reduce((s, r) => s + parseFloat(r.percentage), 0) / sorted.length : 0;
 
   const win = window.open('', '_blank', 'width=1000,height=750');
   win.document.write(`<!DOCTYPE html><html lang="ar" dir="rtl"><head>
@@ -66,7 +173,7 @@ const printApprovedList = (results, examTitle, examStage) => {
     </style>
   </head><body>
     <div class="no-print" style="background:#1e3a5f;color:white;padding:12px 24px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:99">
-      <span style="font-weight:700">📋 كشف المعتمدين — ${results.length} طالب</span>
+      <span style="font-weight:700">📋 كشف المعتمدين — ${presentCount} حاضر • ${absentCount} غائب</span>
       <button onclick="window.print()" style="background:#2563eb;color:white;border:none;padding:8px 20px;border-radius:8px;font-weight:bold;cursor:pointer;font-size:14px">🖨️ طباعة الآن</button>
     </div>
 
@@ -85,7 +192,15 @@ const printApprovedList = (results, examTitle, examStage) => {
       </div>
 
       <!-- Summary Cards -->
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px">
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-bottom:24px">
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:28px;font-weight:900;color:#15803d">${presentCount}</div>
+          <div style="font-size:12px;color:#64748b;font-weight:600">عدد الحضور</div>
+        </div>
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:28px;font-weight:900;color:#b91c1c">${absentCount}</div>
+          <div style="font-size:12px;color:#64748b;font-weight:600">عدد الغياب</div>
+        </div>
         <div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;text-align:center">
           <div style="font-size:28px;font-weight:900;color:#16a34a">${pass}</div>
           <div style="font-size:12px;color:#64748b;font-weight:600">ناجح</div>
@@ -108,6 +223,7 @@ const printApprovedList = (results, examTitle, examStage) => {
             <th style="padding:12px;border:1px solid #2d5a9e;text-align:right">اسم الطالب</th>
             <th style="padding:12px;border:1px solid #2d5a9e;text-align:center">الرقم التعريفي</th>
             <th style="padding:12px;border:1px solid #2d5a9e;text-align:center">الصف</th>
+            <th style="padding:12px;border:1px solid #2d5a9e;text-align:center">الحالة</th>
             <th style="padding:12px;border:1px solid #2d5a9e;text-align:center">الدرجة</th>
             <th style="padding:12px;border:1px solid #2d5a9e;text-align:center">النسبة</th>
             <th style="padding:12px;border:1px solid #2d5a9e;text-align:center">التقدير</th>
@@ -263,18 +379,35 @@ const printApprovedSlips = (results, examStage) => {
 
 /* ── Main Component ── */
 const ApprovedResults = () => {
+  const loadVersion = useRef(0);
+  const [loadError, setLoadError] = useState('');
   const [allResults, setAllResults] = useState([]);
+  const [students, setStudents] = useState([]);
   const [exams, setExams] = useState([]);
   const [selectedExamId, setSelectedExamId] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
+  const [bulkExportProgress, setBulkExportProgress] = useState(null);
+  const [bulkExportError, setBulkExportError] = useState('');
   const [gradeFilter, setGradeFilter] = useState('all');
+  const [identityFilter, setIdentityFilter] = useState('all'); // all | unknown | known
+  /* فلاتر تعليمية: المرحلة/الصف/المادة (اختياري كله) */
+  const [stageFilter, setStageFilter] = useState('all');
+  const [classFilter, setClassFilter] = useState('all');
+  const [subjectFilter, setSubjectFilter] = useState('all');
   const [isRepairing, setIsRepairing] = useState(false);
   const [repairReport, setRepairReport] = useState(null);
   const [editingResult, setEditingResult] = useState(null);
   const [editScore, setEditScore] = useState('');
   const [editTotal, setEditTotal] = useState('');
   const [editDate, setEditDate] = useState('');
+  /* بيانات الطالب داخل شاشة التعديل */
+  const [editStudentName, setEditStudentName] = useState('');
+  const [editStudentId, setEditStudentId] = useState('');
+  const [editStudentGrade, setEditStudentGrade] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [studentLookup, setStudentLookup] = useState('');
+  const [editAssignedStudentId, setEditAssignedStudentId] = useState('');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
   const [selectedIds, setSelectedIds] = useState(() => new Set());
@@ -284,24 +417,195 @@ const ApprovedResults = () => {
   const [bulkDateValue, setBulkDateValue] = useState(new Date().toISOString().split('T')[0]);
   const [isSavingBulkDate, setIsSavingBulkDate] = useState(false);
   const [bulkDateIndex, setBulkDateIndex] = useState(0);
+  /* مودال عرض الصورة */
+  const [imageModalResult, setImageModalResult] = useState(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
 
   useEffect(() => {
     loadData();
-  }, []);
+    return () => { loadVersion.current += 1; };
+  }, [selectedExamId]);
+
+  /* ── ضغط الصورة قبل الحفظ (لتجنّب تضخّم سجلات Supabase) ── */
+  const compressImageToDataUrl = (file, maxWidth = 1400, quality = 0.65) =>
+    new Promise((resolve, reject) => {
+      try {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const img = new Image();
+          img.onload = () => {
+            const scale = img.width > maxWidth ? maxWidth / img.width : 1;
+            const w = Math.round(img.width * scale);
+            const h = Math.round(img.height * scale);
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, w, h);
+            try {
+              const url = canvas.toDataURL('image/jpeg', quality);
+              resolve(url);
+            } catch (e) { reject(e); }
+          };
+          img.onerror = reject;
+          img.src = ev.target.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      } catch (e) { reject(e); }
+    });
+
+  /* ── رفع/استبدال صورة الورقة لنتيجة محفوظة ── */
+  const handleSheetImageUpload = async (file) => {
+    if (!file || !imageModalResult) return;
+    if (!file.type.startsWith('image/')) {
+      alert('الرجاء اختيار ملف صورة فقط (JPG / PNG).');
+      return;
+    }
+    setIsUploadingImage(true);
+    try {
+      const dataUrl = await compressImageToDataUrl(file);
+      const sizeKB = Math.round((dataUrl.length * 3) / 4 / 1024);
+      // حد علوي حذِر لتجنّب تضخّم سجل JSONB
+      if (sizeKB > 1500) {
+        alert(`الصورة كبيرة جداً بعد الضغط (${sizeKB}KB). جرّب صورة أصغر.`);
+        return;
+      }
+      const updated = { ...imageModalResult, systemViewImage: dataUrl };
+      await saveOmrResult({ ...updated, reviewRois: undefined });
+      // حدّث الذاكرة فوراً
+      setAllResults(prev => prev.map(r => r.id === updated.id ? updated : r));
+      setImageModalResult(updated);
+    } catch (err) {
+      alert('تعذّر رفع الصورة: ' + (err?.message || err));
+    } finally {
+      setIsUploadingImage(false);
+    }
+  };
+
+  const handleRemoveSheetImage = async () => {
+    if (!imageModalResult) return;
+    if (!window.confirm('هل تريد إزالة صورة الورقة من هذه النتيجة؟')) return;
+    setIsUploadingImage(true);
+    try {
+      const updated = { ...imageModalResult };
+      delete updated.systemViewImage;
+      await saveOmrResult({ ...updated, reviewRois: undefined });
+      setAllResults(prev => prev.map(r => r.id === updated.id ? updated : r));
+      setImageModalResult(updated);
+    } catch (err) {
+      alert('تعذّر إزالة الصورة: ' + (err?.message || err));
+    } finally {
+      setIsUploadingImage(false);
+    }
+  };
 
   const loadData = async () => {
+    const version = ++loadVersion.current;
     setLoading(true);
-    const [results, examList] = await Promise.all([getOmrResults(), getOmrExams()]);
-    const approved = results.filter(r =>
+    setLoadError('');
+    setAllResults([]);
+    setSelectedIds(new Set());
+    try {
+    const [results, examList, studentList] = await Promise.all([
+      selectedExamId ? getOmrResultList(selectedExamId) : [],
+      getOmrExams({ summary: true }), selectedExamId ? getStudents() : [],
+    ]);
+    if (version !== loadVersion.current) return;
+    setStudents(studentList || []);
+
+    const approved = (results || []).filter(r =>
       r.approved === true ||
       r.confirmed === true ||
       r.approvedAt != null ||
       (r.studentId && r.score != null)
     );
-    approved.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    setAllResults(approved);
-    setExams(examList);
-    setLoading(false);
+
+    // ── Auto-match: ربط النتائج «غير معرّفة» تلقائياً بقائمة الطلاب ──
+    const studentIndex = buildStudentIndex(studentList || []);
+    const manualMap = getManualMap();
+    const autoFixedToSave = [];
+    const enriched = approved.map(r => {
+      if (!isUnknownStudent(r) && r.studentName && r.studentId) return r;
+      const matched = findStudentForResult(r, studentIndex);
+      if (matched) {
+        const fixed = {
+          ...r,
+          studentName: matched.name || r.studentName || '',
+          studentId:   r.studentId || matched.seatNumber || matched.seat_number || matched.id || '',
+          studentGrade: r.studentGrade || matched.grade || matched.classroom || '',
+          phone:       r.phone || matched.phone || matched.phoneNumber || '',
+          autoMatchedAt: new Date().toISOString(),
+        };
+        if (isUnknownStudent(r)) autoFixedToSave.push(fixed);
+        return fixed;
+      }
+      // Fallback: الخريطة اليدوية المحفوظة من تعديلات سابقة
+      const detKey = normalizeStudentIdAR(r.detectedStudentId || r.studentId || '');
+      const manual = detKey ? manualMap[detKey] : null;
+      if (manual) {
+        return {
+          ...r,
+          studentName: r.studentName && !isUnknownStudent(r) ? r.studentName : (manual.studentName || r.studentName),
+          studentId:   r.studentId   || manual.studentId   || '',
+          studentGrade: r.studentGrade || manual.studentGrade || '',
+          phone:       r.phone       || manual.phone        || '',
+        };
+      }
+      return r;
+    });
+
+    // حفظ التطابقات التلقائية في القاعدة (بدون انتظار النتيجة)
+    if (autoFixedToSave.length) {
+      Promise.all(
+        autoFixedToSave.map(r =>
+          saveOmrResult({ ...r, reviewRois: undefined }).catch(() => null)
+        )
+      ).catch(() => null);
+    }
+
+    // ── إزالة التكرار الذكي: نفضّل الأحدث + المُعرّف على غير المُعرّف ──
+    const tsOf = (r) => {
+      const t = r.updatedAt || r.approvedAt || r.timestamp || r.createdAt;
+      return t ? new Date(t).getTime() : 0;
+    };
+    const isBetter = (a, b) => {
+      // نفضّل من ليس "غير معرّف"
+      const aUnk = isUnknownStudent(a), bUnk = isUnknownStudent(b);
+      if (aUnk !== bUnk) return !aUnk;
+      // ثم المُعتمد على غيره
+      const aApr = !!(a.approved || a.confirmed || a.approvedAt);
+      const bApr = !!(b.approved || b.confirmed || b.approvedAt);
+      if (aApr !== bApr) return aApr;
+      // ثم الأحدث
+      return tsOf(a) > tsOf(b);
+    };
+    const bestByKey = new Map();
+    for (const r of enriched) {
+      const sid  = String(r.studentId || '').trim();
+      const eid  = String(r.examId || r.examTitle || '').trim();
+      const key  = sid ? `${sid}__${eid}` : `__row__${r.id}`;
+      const prev = bestByKey.get(key);
+      if (!prev || isBetter(r, prev)) bestByKey.set(key, r);
+    }
+    const deduped = Array.from(bestByKey.values())
+      .sort((a, b) => tsOf(b) - tsOf(a));
+    setAllResults(deduped);
+
+    // ── إزالة التكرار في قائمة الاختبارات ──
+    const examMap = new Map();
+    for (const e of (examList || [])) {
+      const key = e.id || `${e.title || ''}__${e.grade || ''}__${e.subject || ''}`;
+      if (!examMap.has(key)) examMap.set(key, e);
+    }
+    setExams(Array.from(examMap.values()));
+
+    } catch (error) {
+      if (version === loadVersion.current) setLoadError('تعذر تحميل البيانات. اضغط تحديث للمحاولة مرة أخرى.');
+      console.error('ApprovedResults load error:', error);
+    } finally {
+      if (version === loadVersion.current) setLoading(false);
+    }
   };
 
   /* ── Repair: Re-match all saved results to students ── */
@@ -310,43 +614,50 @@ const ApprovedResults = () => {
     setIsRepairing(true);
     setRepairReport(null);
     try {
-      const [results, students] = await Promise.all([getOmrResults(), getStudents()]);
+      const [results, studentList] = await Promise.all([getOmrResults(), getStudents()]);
+      const idx = buildStudentIndex(studentList);
+      const manualMap = getManualMap();
 
-      // Build a lookup: every possible ID → student
-      const byId = {};
-      students.forEach(s => {
-        [
-          (s.id          || '').toString().trim(),
-          (s.seatNumber  || s.seat_number  || '').toString().trim(),
-          (s.nationalId  || s.national_id  || '').toString().trim(),
-        ].filter(Boolean).forEach(key => { byId[key] = s; });
-      });
-
-      let fixed = 0, skipped = 0;
+      let fixed = 0, manualFixed = 0, skipped = 0, notFound = 0;
       for (const r of results) {
-        const rawId  = (r.studentId || '').toString().trim();
-        const cleanId = rawId.replace(/^0+/, '');
-        const found = byId[rawId] || byId[cleanId];
+        const found = findStudentForResult(r, idx);
         if (found) {
-          const alreadyOk = r.studentName && r.studentName !== 'طالب غير معروف';
+          const alreadyOk = r.studentName && !isUnknownStudent(r);
           if (!alreadyOk) {
             await saveOmrResult({
               ...r,
               studentName:  found.name  || r.studentName,
+              studentId:    r.studentId || found.seatNumber || found.seat_number || found.id || '',
               studentGrade: found.grade || found.classroom || r.studentGrade || '',
               phone:        found.phone || r.phone || '',
-              systemViewImage: undefined,
-              reviewRois:  undefined,
+              updatedAt:    new Date().toISOString(),
+              reviewRois:   undefined,
             });
             fixed++;
           } else {
             skipped++;
           }
+          continue;
+        }
+        // Fallback: الخريطة اليدوية المحفوظة
+        const detKey = normalizeStudentIdAR(r.detectedStudentId || r.studentId || '');
+        const manual = detKey ? manualMap[detKey] : null;
+        if (manual && isUnknownStudent(r)) {
+          await saveOmrResult({
+            ...r,
+            studentName:  manual.studentName  || r.studentName,
+            studentId:    r.studentId || manual.studentId || '',
+            studentGrade: manual.studentGrade || r.studentGrade || '',
+            phone:        manual.phone        || r.phone || '',
+            updatedAt:    new Date().toISOString(),
+            reviewRois:   undefined,
+          });
+          manualFixed++;
         } else {
-          skipped++;
+          notFound++;
         }
       }
-      setRepairReport({ fixed, skipped, total: results.length });
+      setRepairReport({ fixed, manualFixed, skipped, notFound, total: results.length });
       await loadData();
     } catch (e) {
       alert('حدث خطأ أثناء الإصلاح: ' + e.message);
@@ -355,14 +666,113 @@ const ApprovedResults = () => {
     }
   };
 
+  /* ── خرائط الاختبارات + استخراج (المرحلة/الصف/المادة) لكل نتيجة ── */
+  const examById = useMemo(() => {
+    const m = new Map();
+    exams.forEach(e => { if (e?.id) m.set(String(e.id), e); });
+    return m;
+  }, [exams]);
+
+  const examByTitle = useMemo(() => {
+    const m = new Map();
+    exams.forEach(e => { if (e?.title) m.set(String(e.title), e); });
+    return m;
+  }, [exams]);
+
+  const getExamForResult = (r) =>
+    examById.get(String(r.examId || '')) || examByTitle.get(String(r.examTitle || '')) || null;
+
+  /* القيم الفريدة لقوائم الفلاتر */
+  const stageOptions = useMemo(() => {
+    const set = new Set();
+    exams.forEach(e => { if (e?.stage) set.add(String(e.stage).trim()); });
+    return Array.from(set);
+  }, [exams]);
+
+  const classOptions = useMemo(() => {
+    const set = new Set();
+    exams.forEach(e => {
+      const arr = Array.isArray(e?.grades) && e.grades.length ? e.grades : [e?.grade].filter(Boolean);
+      arr.forEach(g => { if (g) set.add(String(g).trim()); });
+    });
+    // أضِف أيضاً الصف المُسجَّل في النتائج (studentGrade) لو غير موجود
+    allResults.forEach(r => { if (r?.studentGrade) set.add(String(r.studentGrade).trim()); });
+    return Array.from(set);
+  }, [exams, allResults]);
+
+  const subjectOptions = useMemo(() => {
+    const set = new Set();
+    exams.forEach(e => { if (e?.subject) set.add(String(e.subject).trim()); });
+    return Array.from(set);
+  }, [exams]);
+
   /* Derived data */
   const filteredByExam = useMemo(() => {
-    return selectedExamId
-      ? allResults.filter(r => r.examId === selectedExamId || r.examTitle === exams.find(e => e.id === selectedExamId)?.title)
-      : allResults;
-  }, [allResults, selectedExamId, exams]);
+    return allResults.filter(r => {
+      const ex = getExamForResult(r);
+
+      if (selectedExamId) {
+        const sel = examById.get(selectedExamId);
+        const okExam = r.examId === selectedExamId || (sel && r.examTitle === sel.title);
+        if (!okExam) return false;
+      }
+
+      if (stageFilter !== 'all') {
+        const stg = String(ex?.stage || '').trim();
+        if (stg !== stageFilter) return false;
+      }
+      if (classFilter !== 'all') {
+        const examGrades = Array.isArray(ex?.grades) && ex.grades.length
+          ? ex.grades.map(g => String(g).trim())
+          : [String(ex?.grade || '').trim()].filter(Boolean);
+        const studentGrade = String(r.studentGrade || '').trim();
+        const ok = examGrades.includes(classFilter) || studentGrade === classFilter;
+        if (!ok) return false;
+      }
+      if (subjectFilter !== 'all') {
+        const subj = String(ex?.subject || r.subject || '').trim();
+        if (subj !== subjectFilter) return false;
+      }
+      return true;
+    });
+  }, [allResults, selectedExamId, examById, stageFilter, classFilter, subjectFilter]);
 
   const selectedExam = useMemo(() => exams.find(e => e.id === selectedExamId), [exams, selectedExamId]);
+
+  /* عدّاد سجلات كل اختبار بعد تطبيق فلاتر المرحلة/الصف/المادة (بدون فلتر الاختبار نفسه) */
+  const examCounts = useMemo(() => {
+    const m = new Map();
+    allResults.forEach(r => {
+      const ex = getExamForResult(r);
+      if (stageFilter !== 'all' && String(ex?.stage || '').trim() !== stageFilter) return;
+      if (subjectFilter !== 'all' && String(ex?.subject || r.subject || '').trim() !== subjectFilter) return;
+      if (classFilter !== 'all') {
+        const examGrades = Array.isArray(ex?.grades) && ex.grades.length
+          ? ex.grades.map(g => String(g).trim())
+          : [String(ex?.grade || '').trim()].filter(Boolean);
+        const studentGrade = String(r.studentGrade || '').trim();
+        if (!(examGrades.includes(classFilter) || studentGrade === classFilter)) return;
+      }
+      const k = String(r.examId || `t::${r.examTitle || ''}`);
+      m.set(k, (m.get(k) || 0) + 1);
+    });
+    return m;
+  }, [allResults, examById, stageFilter, classFilter, subjectFilter]);
+
+  /* الاختبارات المرئية بعد تطبيق فلاتر المرحلة/الصف/المادة */
+  const visibleExams = useMemo(() => {
+    return exams.filter(e => {
+      if (stageFilter !== 'all' && String(e.stage || '').trim() !== stageFilter) return false;
+      if (subjectFilter !== 'all' && String(e.subject || '').trim() !== subjectFilter) return false;
+      if (classFilter !== 'all') {
+        const examGrades = Array.isArray(e?.grades) && e.grades.length
+          ? e.grades.map(g => String(g).trim())
+          : [String(e?.grade || '').trim()].filter(Boolean);
+        if (!examGrades.includes(classFilter)) return false;
+      }
+      return true;
+    });
+  }, [exams, stageFilter, classFilter, subjectFilter]);
 
   const filteredResults = useMemo(() => {
     return filteredByExam.filter(r => {
@@ -379,9 +789,36 @@ const ApprovedResults = () => {
         gradeFilter === 'excellent' ? pct >= 90 :
         gradeFilter === 'good' ? pct >= 70 && pct < 90 : true;
 
-      return matchSearch && matchGrade;
+      const isUnk = isUnknownStudent(r);
+      const matchIdentity =
+        identityFilter === 'all' ? true :
+        identityFilter === 'unknown' ? isUnk :
+        identityFilter === 'known' ? !isUnk : true;
+
+      return matchSearch && matchGrade && matchIdentity;
     });
-  }, [filteredByExam, searchTerm, gradeFilter]);
+  }, [filteredByExam, searchTerm, gradeFilter, identityFilter]);
+
+  const unknownCount = useMemo(
+    () => filteredByExam.filter(isUnknownStudent).length,
+    [filteredByExam]
+  );
+
+  /* البحث عن طالب من قاعدة البيانات لربطه بالنتيجة */
+  const studentSuggestions = useMemo(() => {
+    const q = String(studentLookup || '').trim();
+    if (!q || q.length < 2) return [];
+    const lower = q.toLowerCase();
+    return students
+      .filter(s => {
+        const name = String(s.name || '').toLowerCase();
+        const id   = String(s.id || '');
+        const seat = String(s.seatNumber || s.seat_number || '');
+        const nat  = String(s.nationalId || s.national_id || '');
+        return name.includes(lower) || id.includes(q) || seat.includes(q) || nat.includes(q);
+      })
+      .slice(0, 8);
+  }, [studentLookup, students]);
   
   // Keep selection valid as filters/data change
   useEffect(() => {
@@ -401,31 +838,143 @@ const ApprovedResults = () => {
     ? (filteredByExam.reduce((s, r) => s + parseFloat(r.percentage), 0) / totalApproved).toFixed(1)
     : '0';
 
-  /* CSV Export */
-  const exportCSV = () => {
-    if (!filteredResults.length) return;
-    const headers = ['الاسم', 'الرقم التعريفي', 'الصف', 'الاختبار', 'الدرجة', 'الإجمالي', 'النسبة', 'التقدير', 'التاريخ'];
-    const rows = filteredResults.map(r => {
-      const g = getGradeLabel(r.percentage);
-      return [
-        r.studentName || r.studentId,
-        r.studentId,
-        r.studentGrade || '',
-        r.examTitle || '',
-        r.score,
-        r.total,
-        r.percentage + '%',
-        g.label,
-        new Date(r.timestamp).toLocaleDateString('ar-EG'),
-      ];
+  /* الحضور والغياب: كل نتيجة = حاضر، وطلاب صف الاختبار بلا نتيجة = غائب */
+  const attendance = useMemo(() => {
+    const groups = new Map();
+    if (selectedExam) groups.set(String(selectedExam.id), { exam: selectedExam, results: [] });
+    filteredByExam.forEach(r => {
+      const ex = getExamForResult(r);
+      const k = ex ? String(ex.id || ex.title) : '__no_exam__';
+      if (!groups.has(k)) groups.set(k, { exam: ex, results: [] });
+      groups.get(k).results.push(r);
     });
-    const csv = 'data:text/csv;charset=utf-8,\uFEFF' + headers.join(',') + '\n' + rows.map(r => r.join(',')).join('\n');
-    const link = document.createElement('a');
-    link.setAttribute('href', encodeURI(csv));
-    link.setAttribute('download', `كشف_المعتمدين_${selectedExam?.title || 'الكل'}_${new Date().toLocaleDateString()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    return buildExamAttendance([...groups.values()], students, {
+      gradeFilter: classFilter !== 'all' ? classFilter : '',
+    });
+  }, [filteredByExam, selectedExam, students, classFilter, examById, examByTitle]);
+
+  /* الغائبون الظاهرون في الكشف — يُخفون عند فلترة الناجح/الراسب أو غير المعرّفين */
+  const visibleAbsent = useMemo(() => {
+    if (gradeFilter !== 'all' || identityFilter === 'unknown') return [];
+    const q = String(searchTerm || '').trim();
+    const list = q
+      ? attendance.absent.filter(({ student }) =>
+          String(student.name || '').includes(q) || absentStudentId(student).includes(q))
+      : attendance.absent;
+    return [...list].sort((a, b) => String(a.student.name || '').localeCompare(String(b.student.name || ''), 'ar'));
+  }, [attendance, gradeFilter, identityFilter, searchTerm]);
+
+  /* Excel Export */
+  const createExportWorkbook = (exportResults, exportAbsent, title, options = {}) => createGradesWorkbook(
+    exportResults, exportAbsent, {
+      grade: options.grade || (classFilter !== 'all' ? classFilter : selectedExam?.grade || exportResults[0]?.studentGrade || ''),
+      subject: options.subject || selectedExam?.subject || exportResults[0]?.subject || title,
+    }
+  );
+
+  const exportExcel = async () => {
+    if (!filteredResults.length && !visibleAbsent.length) return;
+    if (bulkExportProgress !== null) return;
+    setBulkExportError('');
+    setBulkExportProgress({ done: 0, total: 1 });
+    try {
+    const title = selectedExam?.title || 'جميع الاختبارات';
+    const grade = classFilter !== 'all' ? classFilter : selectedExam?.grade || filteredResults[0]?.studentGrade || '';
+    const subject = selectedExam?.subject || filteredResults[0]?.subject || title;
+    const template = await exportUsingGradeTemplate(filteredResults, visibleAbsent, { grade, subject });
+    if (template) {
+      const url = URL.createObjectURL(new Blob([template], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${subject}_${grade}.xlsx`.replace(/[\\/:*?"<>|]/g, '_');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      return;
+    }
+    const wb = createExportWorkbook(filteredResults, visibleAbsent, title);
+    const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_');
+    XLSX.writeFile(wb, `كشف_المعتمدين_${safeTitle}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    } catch (error) {
+      setBulkExportError(`تعذر التصدير: ${error.message}`);
+    } finally {
+      setBulkExportProgress(null);
+    }
+  };
+
+  const exportGradeSubjects = async (format = 'xlsx') => {
+    if (classFilter === 'all' || bulkExportProgress !== null) return;
+    const grade = classFilter;
+    const gradeExams = exams.filter((exam) => {
+      const grades = Array.isArray(exam.grades) && exam.grades.length ? exam.grades : [exam.grade];
+      return grades.some((value) => isLevelMatch(value, grade))
+        && (stageFilter === 'all' || exam.stage === stageFilter);
+    });
+    setBulkExportError('');
+    setBulkExportProgress({ done: 0, total: gradeExams.length });
+    try {
+      if (!gradeExams.length) throw new Error('لا توجد اختبارات للصف المحدد.');
+      const roster = await getStudents();
+      const gradeStudents = roster.filter((student) => isLevelMatch(student.grade, grade) || isLevelMatch(student.classroom, grade));
+      const index = buildStudentIndex(roster);
+      const groups = new Map();
+      for (const [i, exam] of gradeExams.entries()) {
+        const raw = await getOmrResultList(exam.id);
+        const best = new Map();
+        for (const result of raw) {
+          if (!(result.approved === true || result.confirmed === true || result.approvedAt != null || (result.studentId && result.score != null))) continue;
+          const student = findStudentForResult(result, index);
+          const resultGrade = student?.grade || student?.classroom || result.studentGrade;
+          // Multi-grade exams must never export students from a different grade.
+          if (resultGrade && !isLevelMatch(resultGrade, grade)) continue;
+          const grades = Array.isArray(exam.grades) && exam.grades.length ? exam.grades : [exam.grade];
+          if (!resultGrade && grades.length > 1) continue;
+          const row = { ...result, studentName: student?.name || result.studentName,
+            studentGrade: grade, examTitle: exam.title || result.examTitle };
+          const key = String(student?.id || result.studentId || result.id);
+          const previous = best.get(key);
+          const time = (r) => new Date(r.updatedAt || r.approvedAt || r.timestamp || r.createdAt || 0).getTime() || 0;
+          if (!previous || time(row) >= time(previous)) best.set(key, row);
+        }
+        const results = [...best.values()].sort((a, b) => String(a.studentName || '').localeCompare(String(b.studentName || ''), 'ar'));
+        const subject = resolveResultSubject(results[0], exam);
+        if (!groups.has(subject)) groups.set(subject, { results: [], absent: [] });
+        const group = groups.get(subject);
+        group.results.push(...results);
+        group.absent.push(...buildExamAttendance([{ exam, results }], gradeStudents, { gradeFilter: grade }).absent);
+        setBulkExportProgress({ done: i + 1, total: gradeExams.length });
+      }
+      const zip = new JSZip();
+      const safe = (value) => String(value).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').slice(0, 100) || 'مادة';
+      let fileIndex = 0;
+      for (const [subject, group] of groups) {
+        let content;
+        if (format === 'pdf') {
+          content = await createApprovedResultsPdf(group.results, group.absent, { grade, subject });
+        } else {
+          content = await exportUsingGradeTemplate(group.results, group.absent, { grade, subject });
+          if (!content) {
+            const wb = createExportWorkbook(group.results, group.absent, `${grade} — ${subject}`, { grade, subject });
+            content = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+          }
+        }
+        zip.file(`${++fileIndex}_${safe(subject)}.${format}`, content);
+      }
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `كشوف_${safe(grade)}_${format}_${new Date().toISOString().slice(0, 10)}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (error) {
+      setBulkExportError(`تعذر التصدير: ${error.message}`);
+    } finally {
+      setBulkExportProgress(null);
+    }
   };
 
   const openEditModal = (result) => {
@@ -433,6 +982,12 @@ const ApprovedResults = () => {
     setEditScore(result.score ?? '');
     setEditTotal(result.total ?? '');
     setEditDate(result.timestamp ? new Date(result.timestamp).toISOString().split('T')[0] : '');
+    setEditStudentName(result.studentName || '');
+    setEditStudentId(result.studentId || '');
+    setEditStudentGrade(result.studentGrade || '');
+    setEditPhone(result.phone || '');
+    setStudentLookup('');
+    setEditAssignedStudentId(result.assignedStudentId || '');
   };
 
   const closeEditModal = () => {
@@ -441,6 +996,23 @@ const ApprovedResults = () => {
     setEditScore('');
     setEditTotal('');
     setEditDate('');
+    setEditStudentName('');
+    setEditStudentId('');
+    setEditStudentGrade('');
+    setEditPhone('');
+    setStudentLookup('');
+    setEditAssignedStudentId('');
+  };
+
+  /* ربط النتيجة بطالب من القائمة */
+  const applyStudentMatch = (student) => {
+    if (!student) return;
+    setEditStudentName(student.name || '');
+    setEditStudentId(String(student.seatNumber || student.seat_number || student.id || ''));
+    setEditStudentGrade(student.grade || student.classroom || '');
+    setEditPhone(student.phone || student.phoneNumber || '');
+    setEditAssignedStudentId(student.id || '');
+    setStudentLookup('');
   };
 
   const handleSaveEditedGrade = async (e) => {
@@ -468,14 +1040,50 @@ const ApprovedResults = () => {
     setIsSavingEdit(true);
     try {
       const newTimestamp = editDate ? new Date(editDate).toISOString() : editingResult.timestamp;
-      
+      const finalName  = (editStudentName  || '').trim() || editingResult.studentName;
+      const finalId    = (editStudentId    || '').toString().trim() || editingResult.studentId;
+      const finalGrade = (editStudentGrade || '').trim();
+      const finalPhone = (editPhone        || '').toString().trim();
+
+      const assigned =
+        students.find((s) => String(s.id) === String(editAssignedStudentId || editingResult.assignedStudentId || ''));
+      const assignedOk = assigned && (!finalName || studentNamesMatch(assigned.name, finalName));
+      const linked = assignedOk ? assigned : findStudentByName(students, finalName, finalGrade);
+      if (linked && (linked.name !== finalName || String(linked.grade || linked.classroom || '').trim() !== finalGrade)) {
+        await saveStudent({
+          ...linked,
+          name: finalName || linked.name,
+          grade: finalGrade || linked.grade || '',
+          phone: finalPhone || linked.phone || '',
+        });
+      }
+
       await saveOmrResult({
         ...editingResult,
+        studentName:  finalName,
+        studentId:    finalId,
+        studentGrade: finalGrade,
+        phone:        finalPhone,
+        assignedStudentId: linked?.id || '',
         score: parsedScore,
         total: parsedTotal,
         percentage,
         timestamp: newTimestamp,
+        updatedAt: new Date().toISOString(),
       });
+
+      // احفظ الربط في الذاكرة المحلية ليُستخدم في عمليات التصحيح القادمة
+      // (لو ظهر هذا الـ ID مرة أخرى في QR لورقة جديدة)
+      const detKey = editingResult.detectedStudentId || editingResult.studentId || finalId;
+      if (detKey && finalName && !isUnknownStudent({ studentName: finalName })) {
+        saveManualMapEntry(detKey, {
+          studentName: finalName,
+          studentId:   finalId,
+          studentGrade: finalGrade,
+          phone:       finalPhone,
+        });
+      }
+
       await loadData();
       closeEditModal();
     } catch (error) {
@@ -621,15 +1229,42 @@ const ApprovedResults = () => {
             {isRepairing ? 'جاري الإصلاح...' : 'إصلاح الأسماء'}
           </button>
           {repairReport && (
-            <div className="px-4 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-2xl text-xs font-bold">
-              ✅ تم إصلاح {repairReport.fixed} نتيجة • {repairReport.skipped} موجودة مسبقاً
+            <div className="px-4 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-2xl text-xs font-bold flex flex-col gap-0.5">
+              <span>✅ تم إصلاح {repairReport.fixed || 0} من قائمة الطلاب</span>
+              {repairReport.manualFixed > 0 && (
+                <span className="text-indigo-700">↳ {repairReport.manualFixed} من تعديلات سابقة</span>
+              )}
+              <span className="text-slate-500">
+                {repairReport.skipped || 0} سليمة • {repairReport.notFound || 0} لم يُعثر لها على مطابق
+              </span>
             </div>
           )}
           <button
-            onClick={exportCSV}
-            className="flex items-center gap-2 px-5 py-3 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold text-sm hover:border-indigo-300 hover:text-indigo-600 transition-all active:scale-95 shadow-sm"
+            onClick={exportExcel}
+            disabled={bulkExportProgress !== null}
+            className="flex items-center gap-2 px-5 py-3 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold text-sm hover:border-emerald-300 hover:text-emerald-700 transition-all active:scale-95 shadow-sm"
           >
-            <Download size={16} /> تصدير CSV
+            <Download size={16} /> تصدير Excel
+          </button>
+          <button
+            type="button"
+            onClick={() => exportGradeSubjects('xlsx')}
+            disabled={classFilter === 'all' || bulkExportProgress !== null}
+            title={classFilter === 'all' ? 'اختر الصف أولًا' : 'تصدير جميع مواد الصف، بصرف النظر عن الاختبار والمادة وفلاتر النتائج الحالية'}
+            className="flex items-center gap-2 px-5 py-3 bg-emerald-600 text-white rounded-2xl font-bold text-sm hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {bulkExportProgress ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+            {bulkExportProgress ? `جاري التصدير ${bulkExportProgress.done}/${bulkExportProgress.total}` : 'تصدير جميع مواد الصف (ZIP)'}
+          </button>
+          <button
+            type="button"
+            onClick={() => exportGradeSubjects('pdf')}
+            disabled={classFilter === 'all' || bulkExportProgress !== null}
+            title={classFilter === 'all' ? 'اختر الصف أولًا' : 'ملف PDF مستقل لكل مادة داخل ZIP'}
+            className="flex items-center gap-2 px-5 py-3 bg-rose-600 text-white rounded-2xl font-bold text-sm hover:bg-rose-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {bulkExportProgress ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
+            تصدير جميع مواد الصف PDF
           </button>
           {filteredResults.length > 0 && (
             <div className="flex gap-2">
@@ -640,57 +1275,160 @@ const ApprovedResults = () => {
                 <FileText size={18} /> كشوف منفصلة
               </button>
               <button
-                onClick={() => printApprovedList(filteredResults, selectedExam?.title || 'جميع الاختبارات', selectedExam?.stage)}
+                onClick={() => printApprovedList(filteredResults, selectedExam?.title || 'جميع الاختبارات', selectedExam?.stage, visibleAbsent)}
                 className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold text-sm hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 active:scale-95"
               >
                 <Printer size={18} /> كشف مجمع ({filteredResults.length})
               </button>
+              <button
+                type="button"
+                onClick={() =>
+                  printAggregatedGradesSheet(filteredResults, {
+                    classGrade:
+                      classFilter !== 'all'
+                        ? classFilter
+                        : resolveResultClass(filteredResults[0], selectedExam),
+                    subject:
+                      subjectFilter !== 'all'
+                        ? subjectFilter
+                        : resolveResultSubject(filteredResults[0], selectedExam),
+                    examTitle: selectedExam?.title || '',
+                    examStage: selectedExam?.stage || '',
+                    sheetTitle: 'كشف درجات مجمع',
+                  })
+                }
+                className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold text-sm hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 active:scale-95"
+              >
+                <Table2 size={18} /> كشف درجات مجمع
+              </button>
+              <Link
+                to="/aggregated-grades"
+                className="flex items-center gap-2 px-5 py-3 bg-emerald-50 text-emerald-800 border border-emerald-100 rounded-2xl font-bold text-sm hover:bg-emerald-100 transition-all"
+              >
+                <Table2 size={16} /> صفحة الكشف
+              </Link>
             </div>
           )}
         </div>
       </div>
 
-      {/* ── Exam Selector ── */}
+      {/* ── الفلاتر التعليمية: المرحلة + الصف + المادة (كله اختياري) ── */}
       <div className="luxury-card p-6 bg-white border-none">
-        <div className="flex items-center gap-3 mb-4">
-          <BookOpen size={18} className="text-indigo-500" />
-          <h2 className="text-sm font-black text-slate-700 uppercase tracking-wider">اختر الاختبار</h2>
+        <div className="flex items-center gap-3 mb-4 justify-between flex-wrap">
+          <div className="flex items-center gap-3">
+            <Filter size={18} className="text-indigo-500" />
+            <h2 className="text-sm font-black text-slate-700 uppercase tracking-wider">فلاتر</h2>
+          </div>
+          {(stageFilter !== 'all' || classFilter !== 'all' || subjectFilter !== 'all') && (
+            <button
+              onClick={() => { setStageFilter('all'); setClassFilter('all'); setSubjectFilter('all'); }}
+              className="text-xs font-black text-rose-600 hover:text-rose-700 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-50 border border-rose-100"
+            >
+              <X size={14} /> مسح الفلاتر
+            </button>
+          )}
         </div>
-        <div className="flex flex-wrap gap-3">
-          <button
-            onClick={() => setSelectedExamId('')}
-            className={`px-5 py-2.5 rounded-2xl text-sm font-bold transition-all border
-              ${!selectedExamId
-                ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-100'
-                : 'bg-slate-50 text-slate-600 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}`}
-          >
-            جميع الاختبارات
-            <span className="mr-2 text-[10px] opacity-70">({allResults.length})</span>
-          </button>
-          {exams.map(exam => {
-            const examResults = allResults.filter(r => r.examId === exam.id || r.examTitle === exam.title);
-            return (
-              <button
-                key={exam.id}
-                onClick={() => setSelectedExamId(exam.id)}
-                className={`px-5 py-2.5 rounded-2xl text-sm font-bold transition-all border
-                  ${selectedExamId === exam.id
-                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-100'
-                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}`}
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
+          <div>
+            <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-1.5">المرحلة</label>
+            <div className="relative">
+              <select
+                value={stageFilter}
+                onChange={(e) => setStageFilter(e.target.value)}
+                className="w-full appearance-none p-3 pr-4 pl-10 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm text-slate-700 focus:ring-4 focus:ring-indigo-100 focus:border-indigo-300 transition-all"
               >
-                {exam.title}
-                <span className="mr-2 text-[10px] opacity-70">({examResults.length})</span>
-              </button>
-            );
-          })}
+                <option value="all">جميع المراحل</option>
+                {stageOptions.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <ChevronDown size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-1.5">الصف</label>
+            <div className="relative">
+              <select
+                value={classFilter}
+                onChange={(e) => setClassFilter(e.target.value)}
+                className="w-full appearance-none p-3 pr-4 pl-10 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm text-slate-700 focus:ring-4 focus:ring-indigo-100 focus:border-indigo-300 transition-all"
+              >
+                <option value="all">جميع الصفوف</option>
+                {classOptions.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <ChevronDown size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-1.5">المادة (اختياري)</label>
+            <div className="relative">
+              <select
+                value={subjectFilter}
+                onChange={(e) => setSubjectFilter(e.target.value)}
+                className="w-full appearance-none p-3 pr-4 pl-10 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm text-slate-700 focus:ring-4 focus:ring-indigo-100 focus:border-indigo-300 transition-all"
+              >
+                <option value="all">جميع المواد</option>
+                {subjectOptions.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <ChevronDown size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+            </div>
+          </div>
+        </div>
+
+        {/* قائمة الاختبارات (تتقلّص بناءً على الفلاتر أعلاه) */}
+        <div>
+          <div className="flex items-center gap-3 mb-3">
+            <BookOpen size={16} className="text-indigo-500" />
+            <h3 className="text-xs font-black text-slate-600 uppercase tracking-wider">اختر الاختبار</h3>
+            <span className="text-[10px] text-slate-400 font-bold">({visibleExams.length})</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => setSelectedExamId('')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all border
+                ${!selectedExamId
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-100'
+                  : 'bg-slate-50 text-slate-600 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}`}
+            >
+              اختر الاختبار أولًا
+              <span className="mr-2 text-[10px] opacity-70">({filteredByExam.length})</span>
+            </button>
+            {visibleExams.map(exam => {
+              const key = String(exam.id || `t::${exam.title || ''}`);
+              const count = examCounts.get(key) || 0;
+              return (
+                <button
+                  key={exam.id}
+                  onClick={() => setSelectedExamId(exam.id)}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all border
+                    ${selectedExamId === exam.id
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-100'
+                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}`}
+                >
+                  {exam.title}
+                  <span className="mr-2 text-[10px] opacity-70">({count})</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
+      <p className="text-xs text-slate-500 font-bold">
+        التصدير الجماعي: اختر الصف ثم صيغة Excel أو PDF. يُنزّل ملف ZIP يحتوي ملفًا مستقلًا لكل مادة، ويشمل جميع اختبارات المادة والحضور والغياب.
+      </p>
+      <p className="text-xs text-slate-500 font-bold">
+        Excel يستخدم قالب المادة والصف عند توفره ويحافظ على ترتيب طلابه. عند تعدد اختبارات المادة تُستخدم أحدث درجة للطالب؛ والطلاب غير المشمولين بالتصدير تبقى درجاتهم فارغة. المواد دون قالب تستخدم التنسيق المعتاد.
+      </p>
+      {bulkExportError && <div role="alert" className="p-4 rounded-2xl bg-red-50 text-red-700 font-bold">{bulkExportError}</div>}
       {/* ── Stats Row ── */}
       {totalApproved > 0 && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
           {[
             { label: 'إجمالي المعتمدين', value: totalApproved, icon: <Users size={20}/>, color: 'indigo', desc: 'طالب مُعتمَد' },
+            { label: 'عدد الحضور', value: attendance.presentCount, icon: <UserCheck size={20}/>, color: 'emerald', desc: 'لهم نتيجة معتمدة' },
+            { label: 'عدد الغياب', value: attendance.absentCount, icon: <UserX size={20}/>, color: 'amber', desc: 'من طلاب الصف بلا نتيجة' },
             { label: 'الناجحون', value: passCount, icon: <CheckCircle2 size={20}/>, color: 'emerald', desc: `${totalApproved > 0 ? ((passCount/totalApproved)*100).toFixed(0) : 0}% من الإجمالي` },
             { label: 'الراسبون', value: failCount, icon: <AlertCircle size={20}/>, color: 'rose', desc: `${totalApproved > 0 ? ((failCount/totalApproved)*100).toFixed(0) : 0}% من الإجمالي` },
             { label: 'متوسط الدرجات', value: avgPct + '%', icon: <TrendingUp size={20}/>, color: 'blue', desc: 'متوسط النسب المئوية' },
@@ -741,6 +1479,24 @@ const ApprovedResults = () => {
             </button>
           ))}
         </div>
+        <div className="flex items-center gap-2 flex-wrap border-r border-slate-100 pr-3 mr-1">
+          {[
+            { key: 'all', label: 'الجميع' },
+            { key: 'unknown', label: `❓ غير معرّف${unknownCount ? ` (${unknownCount})` : ''}` },
+            { key: 'known', label: '✓ معرّفون' },
+          ].map(f => (
+            <button
+              key={f.key}
+              onClick={() => setIdentityFilter(f.key)}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all border
+                ${identityFilter === f.key
+                  ? (f.key === 'unknown' ? 'bg-amber-500 text-white border-amber-500' : 'bg-slate-900 text-white border-slate-900')
+                  : 'bg-slate-50 text-slate-500 border-slate-200 hover:border-amber-300'}`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* ── Results Table ── */}
@@ -756,10 +1512,10 @@ const ApprovedResults = () => {
               <ClipboardList size={36} className="opacity-30" />
             </div>
             <p className="font-black text-lg tracking-tight text-slate-400">
-              {allResults.length === 0 ? 'لا توجد نتائج معتمدة بعد' : 'لا توجد نتائج تطابق الفلاتر المحددة'}
+              {loadError || (!selectedExamId ? 'اختر الاختبار أولًا لتحميل كشف المعتمدين' : allResults.length === 0 ? 'لا توجد نتائج معتمدة بعد' : 'لا توجد نتائج تطابق الفلاتر المحددة')}
             </p>
             <p className="text-sm font-medium mt-2 text-slate-300">
-              {allResults.length === 0
+              {!selectedExamId ? 'لن يتم جلب النتائج قبل تحديد الاختبار' : allResults.length === 0
                 ? 'قم باعتماد النتائج من صفحة التصحيح الآلي أولاً'
                 : 'جرب تغيير خيارات البحث أو الفلتر'}
             </p>
@@ -829,8 +1585,12 @@ const ApprovedResults = () => {
                   const pct = parseFloat(res.percentage).toFixed(1);
                   const isPass = parseFloat(res.percentage) >= 50;
                   const isChecked = selectedIds.has(res.id);
+                  const isUnk = isUnknownStudent(res);
                   return (
-                    <tr key={res.id} className="hover:bg-indigo-50/20 transition-colors group">
+                    <tr
+                      key={res.id}
+                      className={`transition-colors group ${isUnk ? 'bg-amber-50/40 hover:bg-amber-50/80' : 'hover:bg-indigo-50/20'}`}
+                    >
                       <td className="text-center px-4 py-4">
                         <input
                           type="checkbox"
@@ -847,12 +1607,21 @@ const ApprovedResults = () => {
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-3">
                           <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm border shrink-0
-                            ${isPass ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-500 border-rose-100'}`}>
-                            {(res.studentName || res.studentId || '?').charAt(0)}
+                            ${isUnk ? 'bg-amber-100 text-amber-700 border-amber-200' : isPass ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-500 border-rose-100'}`}>
+                            {isUnk ? '?' : (res.studentName || res.studentId || '?').charAt(0)}
                           </div>
                           <div>
-                            <div className="font-black text-slate-800 text-sm">{res.studentName || '—'}</div>
-                            <div className="text-[10px] font-mono text-slate-400 mt-0.5">ID: {res.studentId}</div>
+                            <div className="flex items-center gap-2">
+                              <div className={`font-black text-sm ${isUnk ? 'text-amber-700' : 'text-slate-800'}`}>
+                                {res.studentName || 'طالب غير معروف'}
+                              </div>
+                              {isUnk && (
+                                <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 border border-amber-200 text-[10px] font-black">
+                                  غير معرّف
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] font-mono text-slate-400 mt-0.5">ID: {res.studentId || '—'}</div>
                           </div>
                         </div>
                       </td>
@@ -899,15 +1668,27 @@ const ApprovedResults = () => {
                         </div>
                       </td>
                       <td className="px-5 py-4 text-center">
-                        <div className="inline-flex items-center gap-2">
+                        <div className="inline-flex items-center gap-2 flex-wrap justify-center">
+                          <button
+                            onClick={() => setImageModalResult(res)}
+                            disabled={isBulkDeleting}
+                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-50 text-slate-700 border border-slate-200 hover:bg-slate-100 transition-all text-xs font-black"
+                            title="عرض صورة ورقة الإجابة"
+                          >
+                            <ImageIcon size={14} />
+                            الورقة
+                          </button>
                           <button
                             onClick={() => openEditModal(res)}
                             disabled={isBulkDeleting}
-                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100 transition-all text-xs font-black"
-                            title="تعديل درجة الطالب"
+                            className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl border transition-all text-xs font-black
+                              ${isUnk
+                                ? 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'
+                                : 'bg-indigo-50 text-indigo-700 border-indigo-100 hover:bg-indigo-100'}`}
+                            title={isUnk ? 'تعيين بيانات الطالب' : 'تعديل بيانات/درجة الطالب'}
                           >
-                            <Edit2 size={14} />
-                            تعديل
+                            {isUnk ? <UserPlus size={14} /> : <Edit2 size={14} />}
+                            {isUnk ? 'تعيين' : 'تعديل'}
                           </button>
                           <button
                             onClick={() => handleDeleteResult(res)}
@@ -963,11 +1744,15 @@ const ApprovedResults = () => {
 
       {editingResult && (
         <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden">
-            <div className="px-6 py-5 bg-indigo-600 text-white flex items-center justify-between">
+          <div className="w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col">
+            <div className="px-6 py-5 bg-indigo-600 text-white flex items-center justify-between shrink-0">
               <div>
-                <h3 className="text-lg font-black">تعديل درجة الطالب</h3>
-                <p className="text-xs text-indigo-100 mt-1">{editingResult.studentName || editingResult.studentId}</p>
+                <h3 className="text-lg font-black">
+                  {isUnknownStudent(editingResult) ? 'تعيين بيانات الطالب' : 'تعديل النتيجة'}
+                </h3>
+                <p className="text-xs text-indigo-100 mt-1">
+                  {editingResult.studentName || editingResult.studentId || 'طالب غير معروف'}
+                </p>
               </div>
               <button
                 onClick={closeEditModal}
@@ -978,9 +1763,97 @@ const ApprovedResults = () => {
               </button>
             </div>
 
-            <form onSubmit={handleSaveEditedGrade} className="p-6 space-y-4">
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-3">
+            <form onSubmit={handleSaveEditedGrade} className="p-6 space-y-5 overflow-y-auto">
+              {/* قسم: ربط بطالب مسجَّل */}
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <UserCheck size={16} className="text-indigo-500" />
+                  <span className="text-xs font-black text-slate-600">ربط بطالب من قاعدة البيانات (اختياري)</span>
+                </div>
+                <div className="relative">
+                  <Search size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="ابحث بالاسم أو رقم الجلوس أو الرقم التعريفي..."
+                    value={studentLookup}
+                    onChange={(e) => setStudentLookup(e.target.value)}
+                    className="w-full pr-9 pl-4 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-xs focus:ring-2 focus:ring-indigo-200 outline-none"
+                  />
+                </div>
+                {studentSuggestions.length > 0 && (
+                  <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                    {studentSuggestions.map(s => (
+                      <button
+                        type="button"
+                        key={s.id}
+                        onClick={() => applyStudentMatch(s)}
+                        className="w-full text-right px-3 py-2 hover:bg-indigo-50 transition-colors flex items-center justify-between gap-2"
+                      >
+                        <div className="flex flex-col items-end">
+                          <span className="text-xs font-black text-slate-800">{s.name || '—'}</span>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            {(s.seatNumber || s.seat_number) ? `جلوس: ${s.seatNumber || s.seat_number}` : ''}
+                            {' '}{(s.grade || s.classroom) ? `• ${s.grade || s.classroom}` : ''}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-indigo-500 font-black">اختيار</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* بيانات الطالب */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-bold text-slate-500 mb-1.5">اسم الطالب</label>
+                  <input
+                    type="text"
+                    value={editStudentName}
+                    onChange={(e) => setEditStudentName(e.target.value)}
+                    placeholder="مثال: أحمد محمد العنزي"
+                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1.5">الرقم التعريفي / الجلوس</label>
+                  <input
+                    type="text"
+                    value={editStudentId}
+                    onChange={(e) => setEditStudentId(e.target.value)}
+                    placeholder="مثال: 10234"
+                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1.5">الصف</label>
+                  <input
+                    type="text"
+                    value={editStudentGrade}
+                    onChange={(e) => setEditStudentGrade(e.target.value)}
+                    placeholder="مثال: الأول الابتدائي"
+                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-bold text-slate-500 mb-1.5 flex items-center gap-1.5">
+                    <Phone size={12} /> رقم الجوال (للتنبيهات)
+                  </label>
+                  <input
+                    type="tel"
+                    value={editPhone}
+                    onChange={(e) => setEditPhone(e.target.value)}
+                    placeholder="05XXXXXXXX"
+                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm font-mono"
+                    dir="ltr"
+                  />
+                </div>
+              </div>
+
+              {/* الدرجة والتاريخ */}
+              <div className="border-t border-slate-100 pt-5 space-y-3">
+                <span className="text-xs font-black text-slate-500 uppercase tracking-wide">الدرجة والتاريخ</span>
+                <div className="grid grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs font-bold text-slate-500 mb-1.5">الدرجة</label>
                     <input
@@ -1005,22 +1878,21 @@ const ApprovedResults = () => {
                       required
                     />
                   </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1.5">التاريخ</label>
+                    <input
+                      type="date"
+                      value={editDate}
+                      onChange={(e) => setEditDate(e.target.value)}
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm"
+                      required
+                    />
+                  </div>
                 </div>
+              </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-1.5">تاريخ الاعتماد</label>
-                  <input
-                    type="date"
-                    value={editDate}
-                    onChange={(e) => setEditDate(e.target.value)}
-                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm"
-                    required
-                  />
-                </div>
-
-                <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-3">
-                  سيتم تحديث الدرجة والتاريخ والنسبة والتقدير تلقائياً بعد الحفظ.
-                </div>
+              <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-3">
+                سيتم تحديث النسبة والتقدير تلقائياً بعد الحفظ. إن ربطتَ بطالب من القائمة فستُملأ الحقول تلقائياً.
               </div>
 
               <div className="flex items-center gap-3 pt-2">
@@ -1041,6 +1913,134 @@ const ApprovedResults = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── مودال عرض صورة الورقة ── */}
+      {imageModalResult && (
+        <div
+          className="fixed inset-0 z-[130] bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setImageModalResult(null)}
+        >
+          <div
+            className="w-full max-w-5xl bg-white rounded-3xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-white/10 rounded-xl flex items-center justify-center">
+                  <ImageIcon size={20} />
+                </div>
+                <div>
+                  <h3 className="text-base font-black">صورة ورقة الإجابة</h3>
+                  <p className="text-[11px] text-slate-300 mt-0.5">
+                    {imageModalResult.studentName || 'طالب غير معروف'} •
+                    {' '}ID: {imageModalResult.studentId || '—'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setImageModalResult(null)}
+                className="p-2 rounded-xl hover:bg-white/10 transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto bg-slate-50 p-6 flex items-center justify-center">
+              {imageModalResult.systemViewImage ? (
+                <img
+                  src={imageModalResult.systemViewImage}
+                  alt={`ورقة ${imageModalResult.studentName || imageModalResult.studentId}`}
+                  className="max-w-full h-auto rounded-xl shadow-lg border border-slate-200"
+                />
+              ) : (
+                <div className="text-center py-12 max-w-lg w-full">
+                  <div className="w-20 h-20 bg-amber-100 text-amber-600 rounded-3xl flex items-center justify-center mx-auto mb-5">
+                    <AlertCircle size={36} />
+                  </div>
+                  <h4 className="text-base font-black text-slate-700 mb-2">الصورة غير محفوظة في هذا السجل</h4>
+                  <p className="text-sm text-slate-500 font-medium leading-relaxed mb-6">
+                    هذه نتيجة قديمة لم تُحفظ معها صورة وقت الاعتماد.
+                    تستطيع رفع صورة الورقة يدوياً الآن (مثل المسح الضوئي أو من الجوال)
+                    وستظهر في كل مرة تفتح هذا السجل.
+                  </p>
+                  <label
+                    className={`inline-flex items-center gap-2 px-6 py-3 rounded-2xl font-black text-sm border cursor-pointer transition-all
+                      ${isUploadingImage
+                        ? 'bg-slate-200 text-slate-400 border-slate-200 cursor-not-allowed'
+                        : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700 shadow-lg shadow-indigo-100'}`}
+                  >
+                    {isUploadingImage ? <Loader2 size={16} className="animate-spin" /> : <ImageIcon size={16} />}
+                    {isUploadingImage ? 'جاري الرفع...' : 'رفع صورة الورقة'}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      disabled={isUploadingImage}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) handleSheetImageUpload(f);
+                        e.target.value = '';
+                      }}
+                      className="hidden"
+                    />
+                  </label>
+                  <p className="text-[11px] text-slate-400 mt-4">
+                    يتم ضغط الصورة تلقائياً (JPEG، عرض أقصى 1400px) لتوفير المساحة.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 bg-white border-t border-slate-100 flex items-center justify-between shrink-0 gap-3 flex-wrap">
+              <span className="text-[11px] text-slate-400 font-bold">
+                {imageModalResult.systemViewImage
+                  ? 'معاينة النظام لما تم تحليله — بعد محاذاة الورقة'
+                  : 'لا توجد صورة محفوظة'}
+              </span>
+              <div className="flex items-center gap-2 flex-wrap">
+                {imageModalResult.systemViewImage && (
+                  <>
+                    <a
+                      href={imageModalResult.systemViewImage}
+                      download={`sheet_${imageModalResult.studentName || imageModalResult.studentId || 'unknown'}.jpg`}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-50 text-slate-700 border border-slate-200 font-black text-xs hover:bg-slate-100"
+                    >
+                      <Download size={14} /> تنزيل
+                    </a>
+                    <label
+                      className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl border font-black text-xs cursor-pointer
+                        ${isUploadingImage
+                          ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                          : 'bg-indigo-50 text-indigo-700 border-indigo-100 hover:bg-indigo-100'}`}
+                    >
+                      {isUploadingImage ? <Loader2 size={14} className="animate-spin" /> : <ImageIcon size={14} />}
+                      {isUploadingImage ? 'جاري الرفع...' : 'استبدال الصورة'}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        disabled={isUploadingImage}
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) handleSheetImageUpload(f);
+                          e.target.value = '';
+                        }}
+                        className="hidden"
+                      />
+                    </label>
+                    <button
+                      onClick={handleRemoveSheetImage}
+                      disabled={isUploadingImage}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-50 text-rose-700 border border-rose-100 font-black text-xs hover:bg-rose-100 disabled:opacity-60"
+                      title="إزالة الصورة من السجل"
+                    >
+                      <Trash2 size={14} /> إزالة
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}

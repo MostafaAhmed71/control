@@ -17,9 +17,15 @@ import {
     Lock,
     Unlock,
     Activity,
-    Cloud
+    Cloud,
+    SlidersHorizontal,
+    Link2,
+    Copy,
 } from 'lucide-react';
 import { getAppSettings, saveAppSettings, clearAllData, getStudents, getCommittees, getObservers, getOmrExams, getOmrResults, saveStudentsBulk, saveOmrExam, saveOmrResult, supabase } from '../../utils/dataService';
+import { PUBLIC_PATHS, buildPublicUrl } from '../../utils/publicRoutes';
+
+const TEACHER_GRADES_DEFAULT_URL = 'https://grades.northelite0.com';
 
 const Settings = () => {
     const [activeTab, setActiveTab] = useState('identity');
@@ -48,6 +54,16 @@ const Settings = () => {
             setStatus({ type: 'error', msg: 'حدث خطأ أثناء الحفظ' });
         } finally {
             setSaving(false);
+        }
+    };
+
+    const copyPublicLink = async (pathOrUrl, label) => {
+        try {
+            await navigator.clipboard.writeText(/^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : buildPublicUrl(pathOrUrl));
+            setStatus({ type: 'success', msg: `تم نسخ رابط ${label}` });
+            setTimeout(() => setStatus({ type: '', msg: '' }), 2500);
+        } catch {
+            setStatus({ type: 'error', msg: 'تعذّر نسخ الرابط' });
         }
     };
 
@@ -113,7 +129,7 @@ const Settings = () => {
     const TabButton = ({ id, icon: Icon, label, description }) => (
         <button
             onClick={() => setActiveTab(id)}
-            className={`w-full group flex flex-col items-start gap-1 px-8 py-5 rounded-[2rem] transition-all duration-500 relative overflow-hidden
+            className={`w-full min-w-[11rem] lg:min-w-0 shrink-0 lg:shrink group flex flex-col items-start gap-1 px-5 sm:px-8 py-4 sm:py-5 rounded-2xl lg:rounded-[2rem] transition-all duration-500 relative overflow-hidden
               ${activeTab === id 
                 ? 'bg-white shadow-[0_15px_40px_rgba(79,70,229,0.12)] border border-indigo-100' 
                 : 'hover:bg-white/40'}`}
@@ -129,15 +145,15 @@ const Settings = () => {
     );
 
     return (
-        <div className="space-y-10 animate-in fade-in duration-700 font-alexandria pb-20">
+        <div className="space-y-6 sm:space-y-10 animate-in fade-in duration-700 font-alexandria pb-16 sm:pb-20 max-w-full overflow-x-hidden">
             {/* ── Page Header ── */}
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 px-2">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 sm:gap-6 px-0 sm:px-2">
                 <div className="space-y-2">
                     <div className="flex items-center gap-3">
                         <div className="w-12 h-12 bg-indigo-600 rounded-2.5xl flex items-center justify-center text-white shadow-xl shadow-indigo-100">
                             <SettingsIcon size={24} />
                         </div>
-                        <h1 className="text-3xl font-black text-slate-900 font-header tracking-tight">إعدادات النظام المركزية</h1>
+                        <h1 className="text-xl sm:text-2xl lg:text-3xl font-black text-slate-900 font-header tracking-tight app-page-title">إعدادات النظام المركزية</h1>
                     </div>
                     <p className="text-slate-400 font-medium text-sm flex items-center gap-2">
                         <Activity size={16} className="text-indigo-400" />
@@ -145,7 +161,7 @@ const Settings = () => {
                     </p>
                 </div>
 
-                <div className="flex items-center gap-4">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 sm:gap-4 w-full md:w-auto">
                     {status.msg && (
                         <div className={`flex items-center gap-3 px-6 py-3 rounded-2xl text-sm font-black animate-in zoom-in
                           ${status.type === 'success' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-rose-50 text-rose-600 border border-rose-100'}`}>
@@ -156,7 +172,7 @@ const Settings = () => {
                     <button
                         onClick={handleSave}
                         disabled={saving}
-                        className="px-8 py-4 bg-indigo-600 text-white rounded-3xl font-black text-sm hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 active:scale-95 flex items-center gap-3 disabled:opacity-50"
+                        className="px-6 sm:px-8 py-3.5 sm:py-4 bg-indigo-600 text-white rounded-3xl font-black text-sm hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 active:scale-95 flex items-center justify-center gap-3 disabled:opacity-50 w-full sm:w-auto"
                     >
                         {saving ? <RefreshCcw size={20} className="animate-spin" /> : <Save size={20} />}
                         <span>حفظ جميع التغييرات</span>
@@ -164,9 +180,9 @@ const Settings = () => {
                 </div>
             </div>
 
-            <div className="flex flex-col lg:flex-row gap-10">
+            <div className="flex flex-col lg:flex-row gap-6 lg:gap-10">
                 {/* ── Sidebar Navigation ── */}
-                <div className="lg:w-80 space-y-3 shrink-0">
+                <div className="lg:w-80 flex lg:flex-col gap-2 lg:gap-3 shrink-0 overflow-x-auto lg:overflow-visible pb-1 lg:pb-0 -mx-1 px-1 lg:mx-0 lg:px-0 custom-scrollbar">
                     <TabButton id="identity" icon={School} label="الهوية والمدرسة" />
                     <TabButton id="attendance" icon={Layout} label="قوالب التقارير" />
                     <TabButton id="cards" icon={Type} label="قوالب البطاقات" />
@@ -187,7 +203,7 @@ const Settings = () => {
                 <div className="flex-1">
                     <div className="luxury-card p-0 bg-white border-none shadow-premium min-h-[600px] flex flex-col overflow-hidden">
                         {/* Tab Content Wrapper */}
-                        <div className="p-10 flex-1 overflow-y-auto custom-scrollbar">
+                        <div className="p-4 sm:p-6 lg:p-10 flex-1 overflow-y-auto custom-scrollbar">
                             
                             {/* Identity Section */}
                             {activeTab === 'identity' && (
@@ -217,10 +233,101 @@ const Settings = () => {
                                             <input required type="text" value={config.academicWeight} onChange={(e) => setConfig({...config, academicWeight: e.target.value})} className="w-full px-8 py-5 bg-slate-50 border border-transparent rounded-[2rem] focus:bg-white focus:ring-4 focus:ring-indigo-50 outline-none transition-all font-black text-slate-800 font-header" />
                                         </div>
                                         <div className="space-y-4">
+                                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1 block">رمز المدرسة (الاختبارات الوطنية)</label>
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                dir="ltr"
+                                                value={config.moeSchoolCode || ''}
+                                                onChange={(e) => setConfig({...config, moeSchoolCode: e.target.value.replace(/\D/g, '').slice(0, 6)})}
+                                                placeholder="مثال: 123456"
+                                                className="w-full px-8 py-5 bg-slate-50 border border-transparent rounded-[2rem] focus:bg-white focus:ring-4 focus:ring-indigo-50 outline-none transition-all font-black text-slate-800 font-header tracking-widest"
+                                            />
+                                            <p className="text-[11px] font-bold text-slate-400 px-1">يُعبَّأ فقط في فقاعات «رمز المدرسة» الرسمية — دون QR أو بيانات إضافية</p>
+                                        </div>
+                                        <div className="space-y-4">
                                             <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1 block">لون الهوية البصرية</label>
                                             <div className="flex items-center gap-6 p-4 bg-slate-50 rounded-[2rem]">
                                                 <input type="color" value={config.primaryColor} onChange={(e) => setConfig({...config, primaryColor: e.target.value})} className="w-14 h-14 bg-transparent border-none rounded-xl cursor-pointer" />
                                                 <span className="font-header font-black text-slate-900 uppercase tracking-tighter">{config.primaryColor}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="pt-6 border-t border-slate-100 space-y-6">
+                                        <div>
+                                            <h4 className="text-lg font-black text-slate-900 font-header flex items-center gap-2">
+                                                <Link2 size={20} className="text-indigo-600" />
+                                                روابط عامة للمشاركة
+                                            </h4>
+                                            <p className="text-slate-400 font-bold text-xs mt-1">
+                                                انسخ الرابط وأرسله للمعلمين — لا يحتاج تسجيل دخول (بعد ضبط Caddy كما في SERVER_COMMANDS.md)
+                                            </p>
+                                        </div>
+                                        <div className="grid grid-cols-1 gap-4">
+                                            <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-5 bg-amber-50/60 border border-amber-100 rounded-2xl">
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-sm font-black text-amber-900 mb-1">استعلام المعلمين — رقم الجلوس واللجنة ومقرها</p>
+                                                    <p className="text-xs font-bold text-amber-700/80 truncate" dir="ltr">{buildPublicUrl(PUBLIC_PATHS.teacherLookup)}</p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => copyPublicLink(PUBLIC_PATHS.teacherLookup, 'استعلام المعلمين')}
+                                                    className="shrink-0 flex items-center justify-center gap-2 px-5 py-3 bg-amber-500 text-white rounded-xl font-black text-sm hover:bg-amber-600 transition-colors"
+                                                >
+                                                    <Copy size={16} />
+                                                    نسخ الرابط
+                                                </button>
+                                            </div>
+                                            <div className="p-5 bg-indigo-50/60 border border-indigo-100 rounded-2xl space-y-4">
+                                                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="text-sm font-black text-indigo-900 mb-1">رصد الدرجات للمعلمين — إدخال الدرجات واعتمادها (موقع مستقل)</p>
+                                                        <input
+                                                            type="url"
+                                                            value={config.teacherGradesUrl ?? TEACHER_GRADES_DEFAULT_URL}
+                                                            onChange={(e) => setConfig({ ...config, teacherGradesUrl: e.target.value.trim() })}
+                                                            dir="ltr"
+                                                            className="w-full px-3 py-2 bg-white border border-indigo-100 rounded-xl text-xs font-bold text-indigo-700 outline-none focus:ring-4 focus:ring-indigo-100"
+                                                        />
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => copyPublicLink(config.teacherGradesUrl || TEACHER_GRADES_DEFAULT_URL, 'رصد الدرجات للمعلمين')}
+                                                        className="shrink-0 flex items-center justify-center gap-2 px-5 py-3 bg-indigo-600 text-white rounded-xl font-black text-sm hover:bg-indigo-700 transition-colors"
+                                                    >
+                                                        <Copy size={16} />
+                                                        نسخ الرابط
+                                                    </button>
+                                                </div>
+                                                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                                                    <label className="text-xs font-black text-indigo-900 shrink-0">رمز دخول المعلمين</label>
+                                                    <input
+                                                        type="text"
+                                                        value={config.teacherGradesCode || ''}
+                                                        onChange={(e) => setConfig({ ...config, teacherGradesCode: e.target.value.trim() })}
+                                                        placeholder="اتركه فارغاً لإيقاف الرابط"
+                                                        dir="ltr"
+                                                        className="flex-1 px-4 py-2.5 bg-white border border-indigo-100 rounded-xl font-black text-center tracking-widest outline-none focus:ring-4 focus:ring-indigo-100"
+                                                    />
+                                                </div>
+                                                <p className="text-[11px] font-bold text-indigo-700/70">
+                                                    موقع منفصل عن المنصة (مشروع teacher-grades-standalone) — يدخل المعلم اسمه والرمز، ويُسجَّل اسمه مع كل درجة. الدرجات المصححة آلياً تظهر له مقفلة. احفظ التغييرات بعد تعديل الرمز — بعد تغييره يُطلب الرمز الجديد من كل معلم عند فتح الرابط مرة أخرى.
+                                                </p>
+                                            </div>
+                                            <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-5 bg-blue-50/60 border border-blue-100 rounded-2xl">
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-sm font-black text-blue-900 mb-1">بوابة الطالب — الاستعلام عن النتائج</p>
+                                                    <p className="text-xs font-bold text-blue-700/80 truncate" dir="ltr">{buildPublicUrl(PUBLIC_PATHS.portal)}</p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => copyPublicLink(PUBLIC_PATHS.portal, 'بوابة الطالب')}
+                                                    className="shrink-0 flex items-center justify-center gap-2 px-5 py-3 bg-blue-600 text-white rounded-xl font-black text-sm hover:bg-blue-700 transition-colors"
+                                                >
+                                                    <Copy size={16} />
+                                                    نسخ الرابط
+                                                </button>
                                             </div>
                                         </div>
                                     </div>
@@ -249,9 +356,14 @@ const Settings = () => {
                                                     <div className="flex justify-between px-1"><span className="text-[10px] font-black text-slate-400">ارتفاع الصف الواحد %</span><span className="text-xs font-black text-indigo-600">{config.attendance.table.rowHeight}%</span></div>
                                                     <input type="range" min="1" max="10" step="0.1" value={config.attendance.table.rowHeight} onChange={(e) => updateNested('attendance', 'table', parseFloat(e.target.value), 'rowHeight')} className="premium-range" />
                                                 </div>
-                                                <div className="space-y-3">
-                                                    <div className="flex justify-between px-1"><span className="text-[10px] font-black text-slate-400">عدد الصفوف المسموح بها</span><span className="text-xs font-black text-emerald-600">{config.attendance.maxRows} صف</span></div>
-                                                    <input type="range" min="5" max="40" step="1" value={config.attendance.maxRows} onChange={(e) => setConfig({...config, attendance: {...config.attendance, maxRows: parseInt(e.target.value)}})} className="premium-range-success" />
+                                                <div className="space-y-2">
+                                                    <div className="flex justify-between px-1">
+                                                        <span className="text-[10px] font-black text-slate-400">صفوف القالب</span>
+                                                        <span className="text-xs font-black text-emerald-600">25 صف (ثابت)</span>
+                                                    </div>
+                                                    <p className="text-[10px] font-bold text-slate-400">
+                                                        قالب كشف التوقيع مصمم لـ 25 طالباً في كل صفحة A4
+                                                    </p>
                                                 </div>
                                             </div>
                                         </div>
@@ -333,6 +445,27 @@ const Settings = () => {
                                             <MessageSquare size={18} />
                                             <span className="font-header font-black text-sm uppercase">WhatsApp Ready</span>
                                         </div>
+                                    </div>
+
+                                    <div className="luxury-card p-6 bg-white border border-emerald-100 space-y-3">
+                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">
+                                            عنوان خادم WhatsApp (WPP)
+                                        </label>
+                                        <input
+                                            type="url"
+                                            dir="ltr"
+                                            value={config.whatsappApiBase || ''}
+                                            onChange={(e) =>
+                                                setConfig({ ...config, whatsappApiBase: e.target.value })
+                                            }
+                                            placeholder="https://wpp.northelite0.com"
+                                            className="w-full px-5 py-4 bg-slate-50 border border-slate-100 rounded-2xl font-bold text-slate-800 focus:ring-4 focus:ring-emerald-50 outline-none"
+                                        />
+                                        <p className="text-[10px] font-bold text-slate-500">
+                                            إنتاج VPS: <span className="text-emerald-700">https://wpp.northelite0.com</span>
+                                            — اتركه فارغاً لاستخدام البروكسي المحلي{' '}
+                                            <code className="text-[9px]">/api/whatsapp</code>
+                                        </p>
                                     </div>
 
                                     <div className="space-y-8">

@@ -2,7 +2,6 @@ import React from 'react';
 import {
     Users,
     UserCheck,
-    MapPin,
     ClipboardList,
     Printer,
     CreditCard,
@@ -19,15 +18,23 @@ import {
     Palette,
     ShieldCheck,
     ChevronLeft,
+    PanelRightClose,
+    Menu,
     Sparkles,
     Activity,
-    ClipboardCheck
+    ClipboardCheck,
+    Table2,
+    Clock,
+    BookMarked,
+    SlidersHorizontal,
+    BarChart3,
+    PenLine,
 } from 'lucide-react';
 
 import { NavLink } from 'react-router-dom';
 import { getAppSettings } from '../utils/dataService';
 
-const Sidebar = ({ activeSystem, onSwitchSystem }) => {
+const Sidebar = ({ activeSystem, onSwitchSystem, open = true, onToggle, onRequestClose, isOverlay = false }) => {
     const [config, setConfig] = React.useState(null);
 
     React.useEffect(() => {
@@ -38,24 +45,28 @@ const Sidebar = ({ activeSystem, onSwitchSystem }) => {
         { name: 'لوحة التحكم', path: '/', icon: <LayoutDashboard size={18} />, system: 'common' },
         
         // Grading System
-        { name: 'قائمة الطلاب', path: '/students', icon: <Users size={18} />, system: 'grading' },
+        { name: 'قائمة الطلاب', path: '/students', icon: <Users size={18} />, system: 'common' },
         { name: 'تصحيح الـ OMR', path: '/omr-scanner', icon: <ScanLine size={18} />, system: 'grading' },
         { name: 'إدارة الاختبارات', path: '/omr-exams', icon: <FileText size={18} />, system: 'grading' },
+        { name: 'الإدخال اليدوي', path: '/manual-grades', icon: <PenLine size={18} />, system: 'grading' },
         { name: 'كشف المعتمدين', path: '/approved-results', icon: <ClipboardCheck size={18} />, system: 'grading' },
+        { name: 'كشف درجات مجمع', path: '/aggregated-grades', icon: <Table2 size={18} />, system: 'grading' },
+        { name: 'إحصائيات الاختبارات الوطنية', path: '/national-stats', icon: <BarChart3 size={18} />, system: 'grading' },
         { name: 'الاختبارات الوهمية', path: '/mock-exams', icon: <Trophy size={18} />, system: 'grading' },
         { name: 'مصمم القوالب', path: '/omr-designer', icon: <Palette size={18} />, system: 'grading' },
         { name: 'أيقونة الرصد', path: '/grade-recording', icon: <Trophy size={18} />, system: 'grading' },
-        { name: 'مركز المراسلات', path: '/notifier', icon: <Send size={18} />, system: 'grading' },
+        { name: 'مركز الإشعارات', path: '/notifier', icon: <Send size={18} />, system: 'common' },
         
         // Control System
         { name: 'أرقام الجلوس', path: '/seating-cards', icon: <CreditCard size={18} />, system: 'control' },
         { name: 'إدارة اللجان', path: '/committees', icon: <UsersRound size={18} />, system: 'control' },
+        { name: 'ضبط قالب كشف اللجان', path: '/committee-roster-studio', icon: <SlidersHorizontal size={18} />, system: 'control' },
+        { name: 'فترات الاختبار', path: '/exam-periods', icon: <Clock size={18} />, system: 'control' },
         { name: 'طباعة الكشوف', path: '/print-sheets', icon: <Printer size={18} />, system: 'control' },
-        { name: 'كشوف الحضور', path: '/attendance', icon: <ClipboardList size={18} />, system: 'control' },
+        { name: 'أغلفة', path: '/covers', icon: <BookMarked size={18} />, system: 'control' },
         { name: 'إدارة المعلمين', path: '/observers', icon: <UserCheck size={18} />, system: 'control' },
         { name: 'توزيع الملاحظين', path: '/committee-observers', icon: <UserCheck size={18} />, system: 'control' },
-        { name: 'أرقام جلوس اللجان', path: '/committee-seating', icon: <CreditCard size={18} />, system: 'control' },
-        { name: 'إدارة المواقع', path: '/locations', icon: <MapPin size={18} />, system: 'control' },
+        { name: 'كشوف الملاحظين', path: '/observer-sheets', icon: <ClipboardList size={18} />, system: 'control' },
         
         { name: 'إعدادات النظام', path: '/settings', icon: <Settings size={18} />, system: 'common' },
     ];
@@ -64,12 +75,52 @@ const Sidebar = ({ activeSystem, onSwitchSystem }) => {
 
     const isGrading = activeSystem === 'grading';
 
+    const handleNavClick = () => {
+        if (isOverlay) onRequestClose?.();
+    };
+
     return (
-        <aside className="fixed top-0 right-0 z-[100] w-64 h-screen transition-all duration-700 bg-white border-l border-slate-100/80 shadow-[2px_0_40px_rgba(0,0,0,0.01)] flex flex-col font-alexandria overflow-hidden">
+        <>
+            {isOverlay && open && (
+                <button
+                    type="button"
+                    onClick={onRequestClose || onToggle}
+                    className="fixed inset-0 z-[99] bg-slate-900/45 backdrop-blur-[2px] lg:hidden"
+                    aria-label="إغلاق القائمة"
+                />
+            )}
+
+            {!open && (
+                <button
+                    type="button"
+                    onClick={onToggle}
+                    className="fixed top-20 sm:top-24 right-0 z-[101] flex items-center gap-2 py-2.5 sm:py-3 pl-2 pr-3 bg-slate-900 text-white rounded-l-2xl shadow-xl hover:bg-indigo-600 transition-colors font-black text-xs"
+                    aria-label="فتح القائمة"
+                >
+                    <Menu size={18} />
+                    <span className="hidden sm:inline">القائمة</span>
+                </button>
+            )}
+
+            <aside
+                className={`fixed top-0 right-0 z-[100] w-[min(100vw-3rem,16rem)] sm:w-64 h-[100dvh] flex flex-col font-alexandria overflow-hidden bg-white border-l border-slate-100/80 shadow-[2px_0_40px_rgba(0,0,0,0.08)] transition-transform duration-300 ease-in-out ${
+                    open ? 'translate-x-0' : 'translate-x-full pointer-events-none'
+                }`}
+            >
+            <button
+                type="button"
+                onClick={onToggle}
+                className="absolute left-3 top-3 z-20 p-2 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900 transition-colors"
+                aria-label="إخفاء القائمة"
+                title="إخفاء القائمة"
+            >
+                <PanelRightClose size={18} />
+            </button>
+
             {/* ── Background Decals ── */}
             <div className="absolute top-0 right-0 w-full h-[600px] bg-gradient-to-b from-indigo-50/20 to-transparent pointer-events-none"></div>
             
-            <div className="px-6 py-10 overflow-y-auto custom-scrollbar flex-1 relative z-10">
+            <div className="px-4 sm:px-6 py-8 sm:py-10 pt-14 overflow-y-auto custom-scrollbar flex-1 relative z-10">
                 {/* ── Premium Branding Section ── */}
                 <div className="flex flex-col items-center mb-8 px-2 group animate-in fade-in slide-in-from-top-4 duration-1000">
                     <div className={`relative w-16 h-16 mb-4 flex items-center justify-center transition-all duration-700 group-hover:scale-110`}>
@@ -106,6 +157,7 @@ const Sidebar = ({ activeSystem, onSwitchSystem }) => {
                             >
                                 <NavLink
                                     to={item.path}
+                                    onClick={handleNavClick}
                                     className={({ isActive }) =>
                                         `group relative flex items-center p-3.5 rounded-2xl transition-all duration-500
                                         ${isActive
@@ -144,9 +196,12 @@ const Sidebar = ({ activeSystem, onSwitchSystem }) => {
             </div>
 
             {/* ── Bottom Section & System Switcher ── */}
-            <div className="p-8 border-t border-slate-50 bg-slate-50/30 relative z-20">
+            <div className="p-4 sm:p-8 border-t border-slate-50 bg-slate-50/30 relative z-20">
                 <button 
-                    onClick={onSwitchSystem}
+                    onClick={() => {
+                        handleNavClick();
+                        onSwitchSystem();
+                    }}
                     className="w-full relative group overflow-hidden"
                 >
                     <div className="absolute inset-0 bg-white border border-slate-100 rounded-[2rem] transition-all duration-500 group-hover:border-indigo-200 group-hover:shadow-lg group-active:scale-95 shadow-sm"></div>
@@ -172,6 +227,7 @@ const Sidebar = ({ activeSystem, onSwitchSystem }) => {
                @keyframes bounce { 0%, 100% { transform: translateY(-10%); } 50% { transform: none; } }
             `}</style>
         </aside>
+        </>
     );
 };
 

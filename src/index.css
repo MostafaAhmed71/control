@@ -31,12 +31,29 @@
   scroll-behavior: smooth;
 }
 
+html {
+  overflow-x: hidden;
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
+  max-width: 100vw;
+  overflow-x: hidden;
   background-color: var(--color-bg-base);
   color: #1e293b;
   -webkit-font-smoothing: antialiased;
+}
+
+body.sidebar-drawer-open {
+  overflow: hidden;
+}
+
+#root {
+  max-width: 100vw;
+  overflow-x: hidden;
 }
 
 /* ── Typography Shortcuts ── */
@@ -57,10 +74,33 @@ h1, h2, h3, h4, .font-header {
   transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.luxury-card:hover {
-  transform: translateY(-8px);
-  box-shadow: var(--shadow-tactical);
-  border-color: rgba(79, 70, 229, 0.1);
+@media (hover: hover) and (pointer: fine) {
+  .luxury-card:hover {
+    transform: translateY(-8px);
+    box-shadow: var(--shadow-tactical);
+    border-color: rgba(79, 70, 229, 0.1);
+  }
+}
+
+@media (max-width: 1023px) {
+  :root {
+    --radius-luxury: 1.5rem;
+  }
+}
+
+/* جداول ومحتوى عريض — تمرير أفقي آمن على الجوال */
+.table-responsive,
+.responsive-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* عناوين الصفحات تتكيّف مع عرض الشاشة */
+.app-page-title {
+  font-size: clamp(1.25rem, 4.5vw, 1.875rem);
+  line-height: 1.25;
 }
 
 .shadow-premium {
@@ -89,6 +129,13 @@ input:focus, select:focus {
   border-color: var(--color-primary) !important;
   box-shadow: 0 0 0 5px rgba(79, 70, 229, 0.05) !important;
   outline: none !important;
+}
+
+@media (max-width: 640px) {
+  input, select, textarea {
+    font-size: 16px !important;
+    padding: 0.75rem 1rem !important;
+  }
 }
 
 /* ── Premium Sliders (Tactical Range) ── */

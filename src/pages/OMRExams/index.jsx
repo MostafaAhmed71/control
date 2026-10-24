@@ -1,8 +1,16 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Save, FileText, CheckCircle2, XCircle, Download, Users, X, Loader2, Search, CheckSquare, Square, ScanLine, Wifi, WifiOff, AlertCircle, ChevronRight, ChevronDown, Check, Edit2, Settings, Layout, BookOpen, Clock, Calendar, Image as ImageIcon, Layers, FileStack, Printer, RefreshCw, BarChart2, Trophy, Flag, ShieldCheck, Languages, Archive, ArchiveRestore, Folder, Tag, KeyRound } from 'lucide-react';
-import { getOmrExams, saveOmrExam, deleteOmrExam, getStudents, saveOmrResult, getOmrSubjects, saveOmrSubjects, OMR_API_BASE } from '../../utils/dataService';
+import { Plus, Trash2, Save, FileText, CheckCircle2, XCircle, Download, Users, X, Loader2, Search, CheckSquare, Square, ScanLine, Wifi, WifiOff, AlertCircle, ChevronRight, ChevronDown, Check, Edit2, Settings, Layout, BookOpen, Clock, Calendar, Image as ImageIcon, Layers, FileStack, Printer, RefreshCw, BarChart2, Trophy, Flag, ShieldCheck, Languages, Archive, ArchiveRestore, Folder, Tag, ScrollText, KeyRound } from 'lucide-react';
+import { getOmrExams, saveOmrExam, deleteOmrExam, getStudents, saveOmrResult, getOmrResults, getOmrSubjects, saveOmrSubjects, getCommittees, getAppSettings, OMR_API_BASE, syncOmrResultsForStudentNationalIdChange } from '../../utils/dataService';
+import { enrichOmrResultForSave, getStudentNationalId, getStudentSeatNumber } from '../../utils/studentIdentity';
+import { regradeResultWithExam } from '../../utils/omrGrading';
+import { committeesForGrade, committeeLabelWithStage, committeeNumberOnly, getStudentsInCommittee } from '../../utils/committeeUtils';
+import { committeeHeaderNumber } from '../../utils/committeeRosterPrint';
+import { compareStudentsBySeatNumber } from '../../utils/seatNumberGenerator';
 import { useToast } from '../../components/Toast';
+import { resolveExamSchedule } from '../../utils/examSchedule';
+import { toGradeKey, isLevelMatch } from '../../utils/gradeMatch';
+import BulkGradeExamsModal from './BulkGradeExamsModal';
 import { exportAnswerKeyArchive } from '../../utils/answerKeyExport';
 import { withOmrTemplateSnapshot } from '../../utils/omrTemplateSnapshot';
 
@@ -15,6 +23,15 @@ const STAGES = {
 const SUBJECTS_KEY = 'omr_subjects';
 const CUSTOM_TEMPLATES_KEY = 'omr_custom_templates';
 const CUSTOM_TEMPLATE_PREFIX = 'custom:';
+const CUSTOM_HEADER_FIELD_TOGGLES = [
+  { key: 'show_name_row', label: 'اسم الطالب' },
+  { key: 'show_day_row', label: 'اليوم' },
+  { key: 'show_date_row', label: 'التاريخ' },
+  { key: 'show_subject_row', label: 'المادة' },
+  { key: 'show_class_row', label: 'الصف' },
+  { key: 'show_seat_row', label: 'رقم الجلوس' },
+  { key: 'show_committee_row', label: 'رقم اللجنة' },
+];
 const DEFAULT_SUBJECTS = [
   { id: '1', name: 'لغة عربية', grades: ['All'] },
   { id: '2', name: 'رياضيات', grades: ['All'] },
@@ -28,76 +45,15 @@ const DEFAULT_SUBJECTS = [
   { id: '10', name: 'تربية فنية', grades: ['All'] },
 ];
 
-// Robust grade key extractor — works regardless of "ال" prefix or shorthand
-const toGradeKey = (text = '') => {
-  if (!text) return '';
-
-  // 1. Basic normalization
-  let s = String(text)
-    .trim()
-    .replace(/[أإآ]/g, 'ا')
-    .replace(/ة/g, 'ه')
-    .replace(/١/g, '1').replace(/٢/g, '2').replace(/٣/g, '3')
-    .replace(/٤/g, '4').replace(/٥/g, '5').replace(/٦/g, '6')
-    .replace(/٧/g, '7').replace(/٨/g, '8').replace(/٩/g, '9').replace(/٠/g, '0')
-    .replace(/\s+/g, ' ').trim();
-
-  // 2. Handle pure shorthand (1م, 2ث, 3ب etc.)
-  const noSpace = s.replace(/\s/g, '');
-  const shorthandMap = {
-    '1م': '1متوسط', '2م': '2متوسط', '3م': '3متوسط',
-    '1ث': '1ثانوي',  '2ث': '2ثانوي',  '3ث': '3ثانوي',
-    '1ب': '1ابتدائي','2ب': '2ابتدائي','3ب': '3ابتدائي',
-    '4ب': '4ابتدائي','5ب': '5ابتدائي','6ب': '6ابتدائي',
-  };
-  if (shorthandMap[noSpace]) return shorthandMap[noSpace];
-
-  // 3. Word-level analysis — remove "ال" from the start of each word
-  const words = s.split(' ').map(w => w.startsWith('ال') ? w.slice(2) : w).filter(Boolean);
-
-  // 4. Map ordinal words → number
-  const ordinalMap = {
-    'اول': 1, 'اولى': 1, '1': 1,
-    'ثاني': 2, 'ثانيه': 2, 'ثان': 2, '2': 2,
-    'ثالث': 3, 'ثالثه': 3, '3': 3,
-    'رابع': 4, 'رابعه': 4, '4': 4,
-    'خامس': 5, 'خامسه': 5, '5': 5,
-    'سادس': 6, 'سادسه': 6, '6': 6,
-  };
-
-  // 5. Map stage words → canonical stage name
-  const stageMap = {
-    'ابتدائي': 'ابتدائي', 'ابتدائيه': 'ابتدائي',
-    'متوسط': 'متوسط', 'متوسطه': 'متوسط',
-    'ثانوي': 'ثانوي', 'ثانويه': 'ثانوي',
-  };
-
-  let num = null;
-  let stage = null;
-
-  for (const w of words) {
-    if (ordinalMap[w] !== undefined && num === null) num = ordinalMap[w];
-    if (stageMap[w] && !stage) stage = stageMap[w];
-  }
-
-  // Also try numeric prefix directly in the original (for "3م"-style missed above)
-  if (num === null) {
-    const numMatch = noSpace.match(/^([1-6])/);
-    if (numMatch) num = parseInt(numMatch[1]);
-  }
-
-  if (num !== null && stage) return `${num}${stage}`;
-
-  // 6. Fallback: just return cleaned no-space lowercase
-  return noSpace.toLowerCase();
-};
-
 const normalizeText = toGradeKey; // backward-compat alias
 
-const isLevelMatch = (v1, v2) => {
-  if (!v1 || !v2) return false;
-  if (v1 === 'All' || v2 === 'All') return true;
-  return toGradeKey(v1) === toGradeKey(v2);
+const isApprovedOmrResult = (r) => {
+  const t = (v) => v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true';
+  return (
+    t(r?.approved) ||
+    t(r?.confirmed) ||
+    (r?.approvedAt != null && String(r.approvedAt).trim() !== '')
+  );
 };
 
 const normalizeStage = (s = '') => {
@@ -111,6 +67,7 @@ const normalizeStage = (s = '') => {
 const templateOptionsByStage = (stage, customTemplates = []) => {
   return [
     { value: 'nafs', label: 'قالب نافس (موحد لجميع المراحل)' },
+    { value: 'watania', label: 'اختبارات وطنية (نموذج الوزارة — بدون QR)' },
     { value: 'custom', label: 'قالب مخصص (نسخة نافس)' },
     ...customTemplates.map(t => ({
       value: `${CUSTOM_TEMPLATE_PREFIX}${t.id}`,
@@ -118,6 +75,8 @@ const templateOptionsByStage = (stage, customTemplates = []) => {
     })),
   ];
 };
+
+const isWataniaTemplate = (value) => String(value || '').trim() === 'watania';
 
 /** يتعامل مع archived كقيمة منطقية أو نصاً من JSON القديم */
 const examArchived = (e) => {
@@ -151,6 +110,159 @@ const stickerGradeLabel = (exam) => {
   return String(exam?.grade || '').trim() || '—';
 };
 
+/**
+ * اسم الفصل الدراسي على ورقة التعريف.
+ * opts.selectedClassroom: من فلتر «فصل» في نافذة الطباعة إن وُجد.
+ */
+const resolveExamClassLabel = (exam, opts = {}) => {
+  const sel = opts.selectedClassroom;
+  if (sel && sel !== 'All') {
+    return String(sel)
+      .replace(/^فصل:\s*/i, '')
+      .trim();
+  }
+  if (opts.classLabelOverride != null && String(opts.classLabelOverride).trim()) {
+    return String(opts.classLabelOverride).trim();
+  }
+  return String(exam?.classroom || '').trim() || '—';
+};
+
+/** نص الصف المعروض في رأس ورقة الطباعة — من الاختبار */
+const derivePrintHeaderClassFromExam = (exam) => {
+  if (!exam || typeof exam !== 'object') return '';
+  const g = stickerGradeLabel(exam);
+  return g === '—' ? '' : g;
+};
+const derivePrintHeaderSubjectFromExam = (exam) => String(exam?.subject || '').trim();
+
+const getStudentQRNationalId = (s) =>
+  (s.nationalId || s.national_id || '').toString().trim();
+
+const sanitizePdfFilenamePart = (text, maxLen = 56) => {
+  const s = String(text ?? '')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/[،,;|]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+  if (!s || s === '—') return '';
+  return s.slice(0, maxLen);
+};
+
+const safeOmrPdfFilename = (exam, opts = {}) => {
+  const subject =
+    sanitizePdfFilenamePart(opts.subjectOverride || exam?.subject || exam?.title, 48) ||
+    'مادة';
+  const grade =
+    sanitizePdfFilenamePart(opts.gradeOverride || stickerGradeLabel(exam), 48) || 'صف';
+  return `${subject}_${grade}.pdf`;
+};
+
+const safeCommitteeOmrPdfFilename = (exam, committee, opts = {}) => {
+  const comm =
+    sanitizePdfFilenamePart(committeeNumberOnly(committee) || committee?.name, 24) ||
+    'لجنة';
+  const subject =
+    sanitizePdfFilenamePart(
+      opts.subjectOverride || exam?.subject || exam?.title,
+      48
+    ) || 'مادة';
+  const grade =
+    sanitizePdfFilenamePart(
+      opts.gradeOverride || committee?.grade || stickerGradeLabel(exam),
+      48
+    ) || 'صف';
+  return `لجنة_${comm}_${subject}_${grade}.pdf`;
+};
+
+/** طلاب يطابقون مرحلة وصفوف الاختبار */
+const studentsMatchingExam = (exam, allStudents) => {
+  const stageKey = normalizeStage(exam?.stage || '');
+  const allowed = examGrades(exam);
+  return allStudents.filter((s) => {
+    if (stageKey && stageKey !== 'All') {
+      if (s.stage && !isLevelMatch(s.stage, stageKey)) return false;
+    }
+    if (!allowed.length) return true;
+    return allowed.some(
+      (g) =>
+        isLevelMatch(s.grade, g) ||
+        isLevelMatch(s.classroom, g) ||
+        isLevelMatch(s.stage, g)
+    );
+  });
+};
+
+async function streamOmrPdfBase64(res, onProgress) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let pdfB64 = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const evt = JSON.parse(line);
+        if (evt.type === 'progress' && onProgress) onProgress(evt);
+        else if (evt.type === 'done') pdfB64 = evt.pdf;
+        else if (evt.type === 'error') throw new Error(evt.msg || 'خطأ في التوليد');
+      } catch (e) {
+        if (e instanceof SyntaxError) continue;
+        throw e;
+      }
+    }
+  }
+  return pdfB64;
+}
+
+function downloadPdfBase64(pdfB64, filename) {
+  const byteChars = atob(pdfB64);
+  const byteArr = new Uint8Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+  const blob = new Blob([byteArr], { type: 'application/pdf' });
+  const a = document.createElement('a');
+  const href = URL.createObjectURL(blob);
+  a.href = href;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(href);
+}
+
+const AR_WEEKDAYS = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+
+const formatExamPrintDate = (dateStr, type = 'gregorian') => {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return String(dateStr).trim();
+  if (type === 'hijri') {
+    return d.toLocaleDateString('ar-SA-u-ca-islamic-umalqura', { day: 'numeric', month: 'long', year: 'numeric' });
+  }
+  return d.toLocaleDateString('ar-EG', { day: 'numeric', month: '2-digit', year: 'numeric' });
+};
+
+/** تاريخ ويوم الطباعة من بيانات الاختبار */
+const resolveExamPrintTiming = (exam, dateType = 'gregorian') => {
+  const raw = exam?.date;
+  if (!raw) {
+    return { dateStr: '', dayStr: '', hasDate: false, label: 'بدون تاريخ' };
+  }
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) {
+    const text = String(raw).trim();
+    return { dateStr: text, dayStr: '', hasDate: Boolean(text), label: text || 'بدون تاريخ' };
+  }
+  const dateStr = formatExamPrintDate(raw, dateType);
+  const dayStr = AR_WEEKDAYS[d.getDay()] || '';
+  const label = dayStr ? `${dayStr} — ${dateStr}` : dateStr;
+  return { dateStr, dayStr, hasDate: true, label };
+};
+
 const getSubjectIcon = (subject = '', size = 24) => {
   const s = String(subject).toLowerCase();
   if (s.includes('رياضيات')) return <BarChart2 size={size} />;
@@ -174,8 +286,13 @@ const OMRExams = () => {
   const [loading, setLoading] = useState(true);
   const [exportingAnswerKeys, setExportingAnswerKeys] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
+  const [isBulkAdding, setIsBulkAdding] = useState(false);
+  const [examSchedule, setExamSchedule] = useState(null);
   const [editingExam, setEditingExam] = useState(null);
+  const [regradingExamId, setRegradingExamId] = useState(null);
+  const [backfillingPortal, setBackfillingPortal] = useState(false);
   const [students, setStudents] = useState([]);
+  const [committees, setCommittees] = useState([]);
   const [activeTab, setActiveTab] = useState('exams'); // 'exams' | 'subjects'
   const [scannerAvailable, setScannerAvailable] = useState(false);
 
@@ -234,8 +351,17 @@ const OMRExams = () => {
     year: 'العام الدراسي ١٤٤٧ هــ',
     principal: 'مدير المدرسة : محمد نصر الدين',
     footer: 'نظام التصحيح الآلي بمدارس نخبة الشمال الأهلية والعالمية',
+    show_name_row: true,
+    show_day_row: true,
+    show_date_row: true,
     show_class_row: true,
     show_subject_row: true,
+    show_seat_row: true,
+    show_committee_row: true,
+    /** نص حقل «الصف» على الورقة عند الطباعة مع هذا القالب (اختياري) */
+    header_class_text: '',
+    /** نص حقل «المادة» على الورقة (اختياري) */
+    header_subject_text: '',
     logoDataUrl: '',
   };
   const [customConfig, setCustomConfig] = useState({ ...defaultCustomConfig });
@@ -296,6 +422,37 @@ const OMRExams = () => {
   const printStartRef = React.useRef(null);                     // Date.now() when print started
   const timerRef = React.useRef(null);                          // setInterval handle
   const [selectedTemplate, setSelectedTemplate] = useState('nafs');
+  const [wataniaBlankCopies, setWataniaBlankCopies] = useState(30);
+  /** بعد تنزيل ملف الأوراق، فتح طباعة ورقة تعريف (مادة + فصل) */
+  const [printCoverWithBulk, setPrintCoverWithBulk] = useState(true);
+  /** حقول الرأس على الأوراق (قالب مخصص — نفس واحد لكل الطلاب إن وُجد نصاً) */
+  const [printHeaderClass, setPrintHeaderClass] = useState('');
+  const [printHeaderSubject, setPrintHeaderSubject] = useState('');
+  /** طباعة نافذة واحدة: حسب الطلاب أو حسب اللجنة (ملف PDF لكل لجنة) */
+  const [bulkPrintMode, setBulkPrintMode] = useState('students');
+  const [selectedCommitteeIds, setSelectedCommitteeIds] = useState(() => new Set());
+  /** تحديد عدة اختبارات — ملف PDF منفصل لكل اختبار */
+  const [selectedExamIds, setSelectedExamIds] = useState(() => new Set());
+  const [bulkTemplateValue, setBulkTemplateValue] = useState('');
+  const [applyingTemplate, setApplyingTemplate] = useState(false);
+  const [showMultiPrintModal, setShowMultiPrintModal] = useState(false);
+  const [multiPrintTemplate, setMultiPrintTemplate] = useState('nafs');
+  const [moeSchoolCode, setMoeSchoolCode] = useState('');
+  /** طباعة متعددة: ملف لكل اختبار، أو ملف لكل لجنة داخل كل اختبار */
+  const [multiPrintMode, setMultiPrintMode] = useState('exam');
+  const [multiPrintProgress, setMultiPrintProgress] = useState({
+    examIndex: 0,
+    examTotal: 0,
+    examTitle: '',
+    done: 0,
+    total: 0,
+    currentName: '',
+  });
+  const [committeeBulkProgress, setCommitteeBulkProgress] = useState({
+    committeeIndex: 0,
+    committeeTotal: 0,
+    committeeLabel: '',
+  });
 
   // Helper: format seconds → "MM:SS"
   const fmtTime = (sec) => {
@@ -314,10 +471,20 @@ const OMRExams = () => {
     } catch (_) {}
   }, []);
 
+  useEffect(() => {
+    setSelectedExamIds(new Set());
+  }, [examArchiveTab, filterStage, filterGrade, filterSubject]);
+
   const load = async () => {
     setLoading(true);
     try {
-      const [ed, sd, subs] = await Promise.all([getOmrExams({ includeArchived: true }), getStudents(), getOmrSubjects()]);
+      const [ed, sd, subs, comm, appCfg] = await Promise.all([
+        getOmrExams({ includeArchived: true }),
+        getStudents(),
+        getOmrSubjects(),
+        getCommittees(),
+        getAppSettings(),
+      ]);
       // Backfill older exams from the templates saved on this control computer.
       let savedTemplates = [];
       try {
@@ -339,6 +506,9 @@ const OMRExams = () => {
       setExams(syncedExams);
       setStudents(sd);
       setSubjects(subs);
+      setCommittees(comm);
+      setMoeSchoolCode(String(appCfg?.moeSchoolCode || '').replace(/\D/g, '').slice(0, 6));
+      setExamSchedule(resolveExamSchedule(appCfg?.examSchedule));
     } catch (err) {
       toast.error('فشل تحميل بيانات الاختبارات.', 'خطأ في التحميل');
       console.error('OMRExams load error:', err);
@@ -377,9 +547,52 @@ const OMRExams = () => {
 
   const handleTemplateSelectChange = (value) => {
     setSelectedTemplate(value);
-    if (!isTemplateCustom(value)) { setSelectedCustomTemplateId(''); return; }
+    const exam = selectedBulkExam;
+
+    if (!isTemplateCustom(value)) {
+      setSelectedCustomTemplateId('');
+      if (exam) {
+        setPrintHeaderClass(derivePrintHeaderClassFromExam(exam));
+        setPrintHeaderSubject(derivePrintHeaderSubjectFromExam(exam));
+      }
+      return;
+    }
+
     const id = getCustomTemplateIdFromValue(value);
-    if (id) handleLoadNamedCustomTemplate(id);
+    if (id) {
+      const tpl = customTemplates.find((t) => t.id === id);
+      handleLoadNamedCustomTemplate(id);
+      const cfg = { ...defaultCustomConfig, ...(tpl?.config || {}) };
+      if (exam) {
+        setPrintHeaderClass(
+          String(cfg.header_class_text ?? '').trim() !== ''
+            ? String(cfg.header_class_text).trim()
+            : derivePrintHeaderClassFromExam(exam)
+        );
+        setPrintHeaderSubject(
+          String(cfg.header_subject_text ?? '').trim() !== ''
+            ? String(cfg.header_subject_text).trim()
+            : derivePrintHeaderSubjectFromExam(exam)
+        );
+      }
+      return;
+    }
+
+    /* قالب مخصص عام (نسخة نافس) بدون اسم محفوظ */
+    setSelectedCustomTemplateId('');
+    const cfgMerged = { ...defaultCustomConfig, ...customConfig };
+    if (exam) {
+      setPrintHeaderClass(
+        String(cfgMerged.header_class_text ?? '').trim() !== ''
+          ? String(cfgMerged.header_class_text).trim()
+          : derivePrintHeaderClassFromExam(exam)
+      );
+      setPrintHeaderSubject(
+        String(cfgMerged.header_subject_text ?? '').trim() !== ''
+          ? String(cfgMerged.header_subject_text).trim()
+          : derivePrintHeaderSubjectFromExam(exam)
+      );
+    }
   };
 
   const openCustomEditorForCurrentTemplate = () => {
@@ -411,6 +624,12 @@ const OMRExams = () => {
       handleSaveNamedCustomTemplate();
       toast.success(`تم حفظ القالب "${name}" في القائمة ✓`, 'حفظ القالب');
     }
+    if (showBulkModal && selectedBulkExam && isTemplateCustom(selectedTemplate)) {
+      const hc = String(customConfig.header_class_text ?? '').trim();
+      const hs = String(customConfig.header_subject_text ?? '').trim();
+      setPrintHeaderClass(hc || derivePrintHeaderClassFromExam(selectedBulkExam));
+      setPrintHeaderSubject(hs || derivePrintHeaderSubjectFromExam(selectedBulkExam));
+    }
     setShowCustomEditor(false);
   };
 
@@ -433,6 +652,182 @@ const OMRExams = () => {
     if (filterSubject !== 'All' && e.subject !== filterSubject) return false;
     return true;
   }), [exams, examArchiveTab, filterStage, filterGrade, filterSubject]);
+
+  const selectedExamsForMultiPrint = useMemo(
+    () => visibleExams.filter((e) => selectedExamIds.has(e.id)),
+    [visibleExams, selectedExamIds]
+  );
+
+  const allVisibleExamsSelected =
+    visibleExams.length > 0 && visibleExams.every((e) => selectedExamIds.has(e.id));
+
+  const toggleExamSelection = (examId) => {
+    setSelectedExamIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(examId)) next.delete(examId);
+      else next.add(examId);
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisibleExams = () => {
+    setSelectedExamIds((prev) => {
+      const next = new Set(prev);
+      if (allVisibleExamsSelected) {
+        visibleExams.forEach((e) => next.delete(e.id));
+      } else {
+        visibleExams.forEach((e) => next.add(e.id));
+      }
+      return next;
+    });
+  };
+
+  const applyTemplateToSelected = async () => {
+    const targets = exams.filter((e) => selectedExamIds.has(e.id));
+    if (!bulkTemplateValue || targets.length === 0) return;
+    const label = templateOptionsByStage('', customTemplates).find((o) => o.value === bulkTemplateValue)?.label || bulkTemplateValue;
+    if (!window.confirm(`تطبيق القالب «${label}» على ${targets.length} اختبار؟`)) return;
+
+    setApplyingTemplate(true);
+    try {
+      const now = new Date().toISOString();
+      const results = await Promise.allSettled(
+        targets.map((e) => saveOmrExam(withOmrTemplateSnapshot({ ...e, template: bulkTemplateValue, updatedAt: now }, customTemplates, customConfig, true)))
+      );
+      const failed = targets.filter((_, i) => results[i].status === 'rejected');
+      const okCount = targets.length - failed.length;
+      if (okCount > 0) toast.success(`تم تطبيق القالب على ${okCount} اختبار.`, 'تم التحديث');
+      if (failed.length > 0) toast.error(`فشل تحديث: ${failed.map((e) => e.title || e.subject).join('، ')}`, 'خطأ');
+      setBulkTemplateValue('');
+      await load();
+    } finally {
+      setApplyingTemplate(false);
+    }
+  };
+
+  const openMultiPrintModal = () => {
+    if (selectedExamIds.size === 0) {
+      toast.warning('حدّد اختباراً واحداً على الأقل.', 'طباعة متعددة');
+      return;
+    }
+    setMultiPrintTemplate('nafs');
+    setMultiPrintMode('exam');
+    setShowMultiPrintModal(true);
+  };
+
+  /** لجان مطابقة لاختبار معيّن ولديها طلاب قابلون للطباعة */
+  const resolveExamCommittees = useCallback(
+    (exam) => {
+      if (!exam) return [];
+      const stageKey = normalizeStage(exam.stage || '');
+      const grades = examGrades(exam);
+
+      let list = committees || [];
+      if (stageKey && stageKey !== 'All') {
+        list = list.filter((c) => !c.stage || c.stage === stageKey);
+      }
+      if (grades.length === 1) {
+        list = committeesForGrade(list, students, grades[0], stageKey !== 'All' ? stageKey : null);
+      } else if (grades.length > 1) {
+        list = list.filter((c) => {
+          if (!c.grade) return true;
+          return grades.some((g) => isLevelMatch(c.grade, g));
+        });
+      }
+
+      const printableInCommittee = (committee) => {
+        let roster = getStudentsInCommittee(committee, students, false);
+        if (grades.length) {
+          roster = roster.filter((s) =>
+            grades.some(
+              (g) => isLevelMatch(s.grade, g) || isLevelMatch(s.classroom, g) || isLevelMatch(s.stage, g)
+            )
+          );
+        }
+        return roster.filter((s) => getStudentQRNationalId(s));
+      };
+
+      return list
+        .filter((c) => printableInCommittee(c).length > 0)
+        .sort((a, b) =>
+          committeeHeaderNumber(a).localeCompare(committeeHeaderNumber(b), 'ar', { numeric: true })
+        );
+    },
+    [committees, students]
+  );
+
+  const multiPrintEstimatedFiles = useMemo(() => {
+    if (multiPrintMode === 'exam') return selectedExamsForMultiPrint.length;
+    return selectedExamsForMultiPrint.reduce(
+      (sum, ex) => sum + resolveExamCommittees(ex).length,
+      0
+    );
+  }, [multiPrintMode, selectedExamsForMultiPrint, resolveExamCommittees]);
+
+  const resolveEffectiveCustomConfig = useCallback(
+    (templateValue, exam = null) => {
+      let cfg = { ...customConfig };
+      if (String(templateValue).startsWith(CUSTOM_TEMPLATE_PREFIX)) {
+        const id = getCustomTemplateIdFromValue(templateValue);
+        const tpl = customTemplates.find((t) => t.id === id);
+        const savedConfig = tpl?.config || (exam?.template === templateValue ? (exam.template_config || exam.customConfig) : null);
+        if (savedConfig) cfg = { ...defaultCustomConfig, ...savedConfig };
+      }
+      return cfg;
+    },
+    [customConfig, customTemplates, defaultCustomConfig]
+  );
+
+  const buildExamPrintPayload = useCallback(
+    (exam, targetStudents, { templateValue, headerClass, headerSubject, dateStr, dayStr, committeeNumber }) => {
+      const sheetSubject = (headerSubject || '').trim() || exam.subject || '';
+      const fixedClass = (headerClass || '').trim();
+      const commFallback = committeeNumberOnly(committeeNumber);
+      const studentPayload = targetStudents.map((s, i) => ({
+        id: getStudentQRNationalId(s) || String(s.id || `p${i + 1}`),
+        name: s.name || `ورقة ${i + 1}`,
+        class_name: fixedClass || (s.grade || s.classroom || exam.grade || ''),
+        subject: sheetSubject,
+        date: dateStr,
+        day: dayStr,
+        seat_number: String(s.seatNumber ?? s.seat_number ?? '').trim(),
+        committee_number: commFallback || committeeNumberOnly(s.committee),
+        national_id: getStudentQRNationalId(s),
+        school_code: moeSchoolCode,
+      }));
+
+      if (isTemplateCustom(templateValue)) {
+        const effectiveCustomConfig = resolveEffectiveCustomConfig(templateValue, exam);
+        return {
+          url: `${OMR_API_BASE}/generate-custom-batch-stream`,
+          body: JSON.stringify({
+            subject: sheetSubject,
+            template_config: {
+              ...effectiveCustomConfig,
+              header_class_text: fixedClass,
+              header_subject_text: (headerSubject || '').trim(),
+            },
+            num_questions: exam.qCount || 30,
+            exam_id: String(exam.id || ''),
+            students: studentPayload,
+          }),
+        };
+      }
+
+      return {
+        url: `${OMR_API_BASE}/generate-batch-stream`,
+        body: JSON.stringify({
+            subject: sheetSubject,
+            template: templateValue,
+            num_questions: isWataniaTemplate(templateValue) ? 30 : (exam.qCount || 30),
+            school_code: moeSchoolCode,
+            exam_id: String(exam.id || ''),
+            students: studentPayload,
+          }),
+      };
+    },
+    [resolveEffectiveCustomConfig, moeSchoolCode]
+  );
 
   const existingArchiveFolders = useMemo(() => {
     const set = new Set();
@@ -474,14 +869,19 @@ const OMRExams = () => {
 
   const handleAddExam = async () => {
     const selectedGrades = Array.isArray(newExam.grades) && newExam.grades.length ? newExam.grades : (newExam.grade ? [newExam.grade] : []);
-    if (!newExam.stage || selectedGrades.length === 0 || !newExam.subject) return;
-    
-    // Use manually entered title if provided, otherwise generate it
+    if (!newExam.stage || selectedGrades.length === 0) return;
     const isNafs = newExam.template === 'nafs';
-    // Use chosen subject if provided, default to 'اختبار مجمع' ONLY if template is nafs and no subject chosen
-    const finalSubject = newExam.subject || (isNafs ? 'اختبار مجمع' : '');
+    const isWatania = isWataniaTemplate(newExam.template);
+    if (!isWatania && !isNafs && !newExam.subject) return;
+    const finalSubject = isWatania
+      ? 'اختبارات وطنية'
+      : (newExam.subject || (isNafs ? 'اختبار مجمع' : ''));
     const gradeLabel = selectedGrades.length === 1 ? selectedGrades[0] : `(${selectedGrades.length} صفوف)`;
-    const generatedTitle = isNafs ? `اختبار نافس - ${gradeLabel}` : `${finalSubject || 'اختبار'} - ${gradeLabel}`;
+    const generatedTitle = isWatania
+      ? `اختبارات وطنية - ${gradeLabel}`
+      : isNafs
+        ? `اختبار نافس - ${gradeLabel}`
+        : `${finalSubject || 'اختبار'} - ${gradeLabel}`;
     const title = newExam.title || generatedTitle;
 
     const payload = { 
@@ -491,7 +891,7 @@ const OMRExams = () => {
       subject: finalSubject, 
       title, 
       classroom: newExam.classroom || '',
-      qCount: parseInt(newExam.qCount) || 30,
+      qCount: isWatania ? 30 : (parseInt(newExam.qCount) || 30),
       updatedAt: new Date().toISOString() 
     };
 
@@ -503,6 +903,47 @@ const OMRExams = () => {
     await saveOmrExam(withOmrTemplateSnapshot(payload, customTemplates, customConfig, payload.template !== exams.find((exam) => exam.id === payload.id)?.template));
     setIsAdding(false);
     setNewExam({ stage: '', grade: '', grades: [], subject: '', qCount: 30, template: 'nafs', title: '', classroom: '', date: '' });
+    load();
+  };
+
+  const hasExistingExam = (grade, subject, classroom = '') =>
+    exams.some(
+      (e) =>
+        !examArchived(e) &&
+        e.subject === subject &&
+        examGrades(e).some((g) => isLevelMatch(g, grade)) &&
+        String(e.classroom || '').trim() === String(classroom || '').trim()
+    );
+
+  const handleBulkAddExams = async ({ stage, grade, template, classroom, items }) => {
+    const now = new Date().toISOString();
+    const base = Date.now();
+    const payloads = items.map((it, i) => ({
+      id: `${base}${String(i).padStart(3, '0')}${Math.floor(Math.random() * 1000)}`,
+      stage,
+      grade,
+      grades: [grade],
+      subject: it.subject,
+      title: `${it.subject} - ${grade}${classroom ? ` (${classroom})` : ''}`,
+      classroom,
+      qCount: it.qCount,
+      template,
+      date: it.date || '',
+      keys: {},
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+    const results = await Promise.allSettled(payloads.map((p) => saveOmrExam(withOmrTemplateSnapshot(p, customTemplates, customConfig))));
+    const failed = payloads.filter((_, i) => results[i].status === 'rejected');
+    const okCount = payloads.length - failed.length;
+
+    if (okCount > 0) toast.success(`تم إنشاء ${okCount} اختبار للصف ${grade}.`, 'تم الحفظ');
+    if (failed.length > 0) {
+      toast.error(`فشل حفظ: ${failed.map((p) => p.subject).join('، ')}`, 'خطأ');
+    } else {
+      setIsBulkAdding(false);
+    }
     load();
   };
 
@@ -582,11 +1023,37 @@ const OMRExams = () => {
     toast.success('تمت استعادة الاختبار إلى القائمة النشطة.', 'استعادة');
   };
 
-  const handlePermanentDelete = async (id) => {
-    if (!window.confirm('حذف هذا الاختبار نهائياً من قاعدة البيانات؟ لا يمكن التراجع.')) return;
-    await deleteOmrExam(id);
-    load();
-    toast.success('تم الحذف النهائي.', 'حذف');
+  const handlePermanentDelete = async (examOrId) => {
+    const exam =
+      typeof examOrId === 'object' && examOrId != null
+        ? examOrId
+        : exams.find((e) => e.id === examOrId);
+    const id = exam?.id ?? examOrId;
+    if (!id) return;
+
+    const title = exam?.title || exam?.subject || id;
+    if (
+      !window.confirm(
+        `حذف الاختبار «${title}» نهائياً من قاعدة البيانات؟\n\nلا يمكن التراجع — النتائج المرتبطة قد تبقى في السجل.`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await deleteOmrExam(id);
+      setSelectedExamIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      if (selectedBulkExam?.id === id) setShowBulkModal(false);
+      await load();
+      toast.success('تم حذف الاختبار.', 'حذف');
+    } catch (err) {
+      console.error('delete exam:', err);
+      toast.error(err.message || 'تعذّر حذف الاختبار.', 'خطأ');
+    }
   };
 
   const handleKeyChange = (q, v) => setEditingExam(p => ({ ...p, keys: { ...(p.keys || {}), [String(q)]: v } }));
@@ -626,21 +1093,170 @@ const OMRExams = () => {
     });
   };
 
-  const saveKeys = async () => { 
+  const regradeApprovedResultsForExam = async (exam, { forceSave = false } = {}) => {
+    if (!exam?.id) return { total: 0, updated: 0 };
+    if (!exam?.keys || Object.keys(exam.keys).length === 0) {
+      throw new Error('لا يوجد مفتاح إجابة لهذا الاختبار.');
+    }
+
+    const allResults = await getOmrResults();
+    const forExam = allResults.filter(
+      (r) => String(r.examId ?? '') === String(exam.id) && isApprovedOmrResult(r)
+    );
+
+    const versionAt = exam.keysUpdatedAt || new Date().toISOString();
+    let updated = 0;
+
+    for (const row of forExam) {
+      const { changed, result: reg } = regradeResultWithExam(row, exam);
+      if (forceSave || changed) {
+        await saveOmrResult({
+          ...reg,
+          keysVersionAt: versionAt,
+        });
+        updated++;
+      }
+    }
+
+    return { total: forExam.length, updated };
+  };
+
+  const handleBackfillPortalNationalIds = async () => {
+    const ok = window.confirm(
+      'مزامنة هوية الطالب لبوابة النتائج\n\n' +
+        'يربط النتائج المعتمدة برقم الهوية الحالي في سجل كل طالب (بما فيها من تُعرف برقم الجلوس فقط).\n' +
+        'لا يغيّر الدرجات.\n\n' +
+        'قد يستغرق وقتاً حسب عدد الطلاب والنتائج. هل تريد المتابعة؟'
+    );
+    if (!ok) return;
+
+    setBackfillingPortal(true);
+    try {
+      const students = await getStudents();
+      let updated = 0;
+      let scanned = 0;
+      for (const st of students) {
+        const nat = getStudentNationalId(st);
+        if (!nat) continue;
+        const { updated: u, scanned: s } = await syncOmrResultsForStudentNationalIdChange({
+          previousNationalId: '',
+          nextNationalId: nat,
+          seatNumber: getStudentSeatNumber(st),
+        });
+        updated += u;
+        scanned += s;
+      }
+
+      const all = await getOmrResults();
+      const approved = all.filter(isApprovedOmrResult);
+      for (const row of approved) {
+        const enriched = enrichOmrResultForSave(row);
+        const prevNat = String(row.nationalId || row.national_id || '').trim();
+        const newNat = String(enriched.nationalId || enriched.national_id || '').trim();
+        if (newNat && newNat !== prevNat) {
+          await saveOmrResult({ ...enriched, id: row.id });
+          updated++;
+        }
+      }
+
+      if (updated === 0) {
+        toast.info('لا توجد نتائج تحتاج تحديث هوية (أو الهوية مضبوطة مسبقاً).', 'مزامنة البوابة');
+      } else {
+        toast.success(
+          `تم ربط/تحديث هوية ${updated} نتيجة (فُحص ${scanned} سجلًا عبر الجلوس والهوية).`,
+          'مزامنة البوابة'
+        );
+      }
+    } catch (e) {
+      console.error('backfill portal national:', e);
+      toast.error(e.message || 'تعذّرت المزامنة. تحقق من الاتصال.', 'خطأ');
+    } finally {
+      setBackfillingPortal(false);
+    }
+  };
+
+  const handleRegradeApproved = async (exam) => {
+    if (!exam?.keys || Object.keys(exam.keys).length === 0) {
+      toast.warning('أضف مفتاح الإجابة للاختبار أولاً من زر «المفتاح».', 'تنبيه');
+      return;
+    }
+
+    const ok = window.confirm(
+      `إعادة تصحيح النتائج المعتمدة سابقاً\n\n` +
+        `الاختبار: ${exam.title || exam.id}\n` +
+        `سيتم تحديث الدرجات وتفاصيل الإجابات في قاعدة البيانات والبوابة وفق المفتاح الحالي.\n\n` +
+        `هل تريد المتابعة؟`
+    );
+    if (!ok) return;
+
+    setRegradingExamId(exam.id);
+    try {
+      const { total, updated } = await regradeApprovedResultsForExam(exam, { forceSave: true });
+      if (total === 0) {
+        toast.info('لا توجد نتائج معتمدة مسجلة لهذا الاختبار.', 'إعادة التصحيح');
+      } else {
+        toast.success(`تم تحديث ${updated} من ${total} نتيجة معتمدة (سابقة وجديدة).`, 'إعادة التصحيح');
+      }
+    } catch (e) {
+      console.error('regrade approved:', e);
+      toast.error(e.message || 'تعذّر إعادة التصحيح. تحقق من الاتصال.', 'خطأ');
+    } finally {
+      setRegradingExamId(null);
+    }
+  };
+
+  const saveKeys = async () => {
     if (!editingExam) return;
     const finalWeights = {};
     const count = parseInt(editingExam.qCount) || 30;
-    
-    // Ensure all questions have a weight, defaulting to 1
+
     for (let i = 1; i <= count; i++) {
       const rawVal = editingExam.weights?.[String(i)];
       const parsed = parseFloat(rawVal);
       finalWeights[String(i)] = isNaN(parsed) ? 1 : parsed;
     }
 
-    await saveOmrExam({ ...editingExam, weights: finalWeights }); 
-    setEditingExam(null); 
-    load(); 
+    const missingKeys = [];
+    for (let i = 1; i <= count; i++) {
+      if (!editingExam.keys?.[String(i)]) missingKeys.push(i);
+    }
+    if (missingKeys.length > 0) {
+      const ok = window.confirm(
+        `الأسئلة التالية بدون إجابة في المفتاح: ${missingKeys.join('، ')}\n` +
+        `لن تُحتسب في الدرجة (المجموع سيكون ${count - missingKeys.length} بدل ${count}).\n\nهل تريد الحفظ رغم ذلك؟`
+      );
+      if (!ok) return;
+    }
+
+    const examToSave = {
+      ...editingExam,
+      weights: finalWeights,
+      keysUpdatedAt: new Date().toISOString(),
+    };
+    await saveOmrExam(examToSave);
+
+    try {
+      const { total, updated } = await regradeApprovedResultsForExam(examToSave, { forceSave: true });
+      if (updated > 0) {
+        toast.success(
+          `تم حفظ المفتاح وتحديث ${updated} من ${total} نتيجة معتمدة.`,
+          'تم التحديث'
+        );
+      } else if (total > 0) {
+        toast.info('تم حفظ المفتاح. لم يتغير محتوى النتائج المعتمدة.', 'حفظ المفتاح');
+      } else {
+        toast.success('تم حفظ مفتاح الإجابة بنجاح.', 'تم الحفظ');
+      }
+    } catch (e) {
+      console.error('regrade after keys save:', e);
+      toast.warning(
+        'تم حفظ المفتاح، لكن تعذّر إعادة تصحيح النتائج المعتمدة. استخدم «إعادة تصحيح المعتمدة».',
+        'تنبيه'
+      );
+    }
+
+    setEditingExam(null);
+    load();
   };
 
   const stageStudents = useMemo(() => {
@@ -666,6 +1282,34 @@ const OMRExams = () => {
     const eg = examGrades(selectedBulkExam);
     return eg.length ? eg : [];
   }, [selectedBulkExam]);
+
+  /** لجان مطابقة للاختبار ولديها طلاب قابلون للطباعة */
+  const examCommittees = useMemo(
+    () => resolveExamCommittees(selectedBulkExam),
+    [selectedBulkExam, resolveExamCommittees]
+  );
+
+  const committeePrintableCount = useCallback(
+    (committee, exam = selectedBulkExam) => {
+      if (!exam || !committee) return 0;
+      const grades = examGrades(exam);
+      let roster = getStudentsInCommittee(committee, students, false);
+      if (grades.length) {
+        roster = roster.filter((s) =>
+          grades.some(
+            (g) => isLevelMatch(s.grade, g) || isLevelMatch(s.classroom, g) || isLevelMatch(s.stage, g)
+          )
+        );
+      }
+      return roster.filter((s) => getStudentQRNationalId(s)).length;
+    },
+    [selectedBulkExam, students]
+  );
+
+  useEffect(() => {
+    if (!showBulkModal || !selectedBulkExam) return;
+    setSelectedCommitteeIds(new Set(examCommittees.map((c) => c.id)));
+  }, [showBulkModal, selectedBulkExam?.id, examCommittees]);
 
   const isGuestStudent = useCallback((s) => {
     const cls = String(s?.classroom ?? s?.class ?? '').trim().toLowerCase();
@@ -730,10 +1374,16 @@ const OMRExams = () => {
         handleDateChange(exam.date, dateType);
     }
     // Reset template selection to nafs each time the modal opens to avoid stale state
-    setSelectedTemplate('nafs');
+    setSelectedTemplate(isWataniaTemplate(exam.template) ? 'watania' : 'nafs');
+    setWataniaBlankCopies(30);
     setSelectedCustomTemplateId('');
     setCustomConfig({ ...defaultCustomConfig });
     setCustomTemplateName('');
+    setPrintHeaderClass(derivePrintHeaderClassFromExam(exam));
+    setPrintHeaderSubject(derivePrintHeaderSubjectFromExam(exam));
+    setBulkPrintMode('students');
+    setSelectedCommitteeIds(new Set());
+    setCommitteeBulkProgress({ committeeIndex: 0, committeeTotal: 0, committeeLabel: '' });
     setShowBulkModal(true);
   };
 
@@ -743,7 +1393,7 @@ const OMRExams = () => {
     const gradeLine = escapeHtmlSticker(stickerGradeLabel(exam));
     const titleHint = escapeHtmlSticker((exam.title || '').trim());
     const COLS = 3;
-    const ROWS = 6;
+    const ROWS = 8;
     const total = COLS * ROWS;
     const stickerCells = Array.from({ length: total }, () => `
       <div class="sticker">
@@ -767,26 +1417,26 @@ const OMRExams = () => {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
-  h1 { font-size: 11pt; text-align: center; margin: 0 0 6mm; color: #334155; font-weight: 800; }
+  h1 { font-size: 10pt; text-align: center; margin: 0 0 4mm; color: #334155; font-weight: 800; }
   .grid {
     display: grid;
     grid-template-columns: repeat(${COLS}, 1fr);
-    gap: 5mm;
+    gap: 3.5mm;
   }
   .sticker {
     border: 1.2px dashed #475569;
     border-radius: 6px;
-    padding: 4mm 5mm;
-    min-height: 26mm;
+    padding: 3mm 3.5mm;
+    min-height: 22mm;
     display: flex;
     flex-direction: column;
     justify-content: center;
     gap: 2mm;
     background: #fafafa;
   }
-  .line { font-size: 11pt; font-weight: 800; color: #0f172a; line-height: 1.35; }
-  .line.gr { font-size: 10pt; font-weight: 700; color: #1e293b; }
-  .lbl { color: #64748b; font-weight: 700; font-size: 9pt; margin-left: 3mm; }
+  .line { font-size: 10pt; font-weight: 800; color: #0f172a; line-height: 1.3; }
+  .line.gr { font-size: 9pt; font-weight: 700; color: #1e293b; }
+  .lbl { color: #64748b; font-weight: 700; font-size: 8pt; margin-left: 2mm; }
   .hint {
     font-size: 7.5pt;
     color: #64748b;
@@ -824,6 +1474,163 @@ const OMRExams = () => {
     }, 250);
   }, [toast]);
 
+  /** ورقة A4 تعريفية: المادة + اسم الفصل + بيانات الاختبار — للمرافقة مع الدفعة أو طباعتها منفردة */
+  const printExamCoverSheet = useCallback((exam, opts = {}) => {
+    if (!exam) return;
+    const subject = escapeHtmlSticker(
+      opts.subjectOverride != null && String(opts.subjectOverride).trim()
+        ? String(opts.subjectOverride).trim()
+        : (exam.subject || '—')
+    );
+    const title = escapeHtmlSticker(exam.title || '—');
+    const classNameLine = escapeHtmlSticker(resolveExamClassLabel(exam, opts));
+    const gradesLine = escapeHtmlSticker(
+      opts.gradeLabelOverride != null && String(opts.gradeLabelOverride).trim()
+        ? String(opts.gradeLabelOverride).trim()
+        : stickerGradeLabel(exam)
+    );
+    const stage = escapeHtmlSticker(exam.stage || '—');
+    let metaDate = '';
+    if (opts.examDateLine != null && String(opts.examDateLine).trim()) {
+      metaDate = escapeHtmlSticker(String(opts.examDateLine).trim());
+    } else if (exam.date) {
+      const t = new Date(exam.date);
+      if (!isNaN(t.getTime())) metaDate = escapeHtmlSticker(t.toLocaleDateString('ar-SA'));
+    }
+
+    const html = `<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+<meta charset="utf-8"/>
+<title>ورقة تعريف — ${subject}</title>
+<style>
+  @page { size: A4 portrait; margin: 14mm; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', 'Tahoma', sans-serif;
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .sheet {
+    border: 3px solid #312e81;
+    border-radius: 16px;
+    padding: 16mm 14mm;
+    min-height: calc(100vh - 28mm);
+    background: linear-gradient(165deg, #fafbff 0%, #fff 45%);
+  }
+  .ribbon {
+    display: inline-block;
+    font-size: 10pt;
+    font-weight: 800;
+    color: #4338ca;
+    letter-spacing: 0.06em;
+    margin-bottom: 8mm;
+    padding: 6px 14px;
+    background: #eef2ff;
+    border-radius: 999px;
+  }
+  h1 {
+    margin: 0 0 12mm;
+    font-size: 18pt;
+    font-weight: 900;
+    color: #0f172a;
+    line-height: 1.35;
+    text-align: center;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5mm 8mm;
+  }
+  .cell {
+    border: 2px dashed #94a3b8;
+    border-radius: 12px;
+    padding: 5mm 6mm;
+    background: #fff;
+  }
+  .cell.full { grid-column: 1 / -1; }
+  .lbl {
+    display: block;
+    font-size: 9pt;
+    font-weight: 800;
+    color: #64748b;
+    margin-bottom: 3mm;
+  }
+  .val {
+    font-size: 14pt;
+    font-weight: 900;
+    color: #0f172a;
+    line-height: 1.3;
+  }
+  .meta {
+    margin-top: 10mm;
+    text-align: center;
+    font-size: 11pt;
+    font-weight: 700;
+    color: #475569;
+  }
+  .hint {
+    margin-top: 12mm;
+    padding-top: 8mm;
+    border-top: 1px solid #e2e8f0;
+    text-align: center;
+    font-size: 9pt;
+    color: #94a3b8;
+    font-weight: 600;
+  }
+  @media print {
+    .no-print { display: none !important; }
+  }
+</style>
+</head>
+<body>
+  <p class="no-print" style="text-align:center;font-size:10pt;color:#64748b;margin:0 0 6mm">اطبع هذه الصفحة وضعها مع حزمة أوراق الاختبار أو على المجلد.</p>
+  <div class="sheet">
+    <span class="ribbon">ورقة تعريف — مادة وفصل</span>
+    <h1>${title}</h1>
+    <div class="grid">
+      <div class="cell">
+        <span class="lbl">المادة</span>
+        <span class="val">${subject}</span>
+      </div>
+      <div class="cell">
+        <span class="lbl">اسم الفصل</span>
+        <span class="val">${classNameLine}</span>
+      </div>
+      <div class="cell">
+        <span class="lbl">الصف الدراسي</span>
+        <span class="val">${gradesLine}</span>
+      </div>
+      <div class="cell">
+        <span class="lbl">المرحلة</span>
+        <span class="val">${stage}</span>
+      </div>
+    </div>
+    ${metaDate ? `<p class="meta">${metaDate}</p>` : ''}
+    <p class="hint">لا تُلصق على منطقة الرمز أو دوائر الإجابة — للتعريف والفرز فقط.</p>
+  </div>
+</body>
+</html>`;
+
+    const w = window.open('', '_blank');
+    if (!w) {
+      toast.error('فتح نافذة الطباعة فشل. اسمح بالنوافذ المنبثقة.', 'ورقة التعريف');
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => {
+      try {
+        w.focus();
+        w.print();
+      } catch (_) { /* ignore */ }
+    }, 280);
+  }, [toast]);
+
+  /** نموذج الإجابات الصحيحة — للمراقب/المصحّح وفق مفتاح الاختبار */
   const printExamAnswerKeySheet = useCallback((exam, returnHtml = false) => {
     if (!exam) return;
     const keys = exam.keys || {};
@@ -1095,120 +1902,258 @@ const OMRExams = () => {
 
   const allFilteredSel = filteredModalStudents.length > 0 && filteredModalStudents.every(s => selectedStudentIds.has(s.id));
 
-  const handleBulkPrint = async () => {
-    if (!selectedBulkExam || selectedStudentIds.size === 0) return;
-    setIsGenerating(true);
-    setPrintProgress({ done: 0, total: selectedStudentIds.size, currentName: '' });
-    setPrintTotalTime(null);
+  const toggleCommittee = (id) =>
+    setSelectedCommitteeIds((prev) => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
 
-    // Start stopwatch
+  const toggleAllCommittees = () => {
+    const allSel = examCommittees.length > 0 && examCommittees.every((c) => selectedCommitteeIds.has(c.id));
+    setSelectedCommitteeIds(allSel ? new Set() : new Set(examCommittees.map((c) => c.id)));
+  };
+
+  const allCommitteesSel =
+    examCommittees.length > 0 && examCommittees.every((c) => selectedCommitteeIds.has(c.id));
+
+  const switchBulkPrintMode = (mode) => {
+    setBulkPrintMode(mode);
+    if (mode === 'committees' && examCommittees.length) {
+      setSelectedCommitteeIds((prev) =>
+        prev.size > 0 ? prev : new Set(examCommittees.map((c) => c.id))
+      );
+    }
+  };
+
+  const handleCommitteeBulkPrint = async () => {
+    if (!selectedBulkExam || selectedCommitteeIds.size === 0) return;
+
+    const selectedList = examCommittees.filter((c) => selectedCommitteeIds.has(c.id));
+    if (!selectedList.length) return;
+
+    setIsGenerating(true);
+    setPrintProgress({ done: 0, total: 0, currentName: '' });
+    setPrintTotalTime(null);
+    setCommitteeBulkProgress({
+      committeeIndex: 0,
+      committeeTotal: selectedList.length,
+      committeeLabel: '',
+    });
+
     printStartRef.current = Date.now();
     setPrintElapsed(0);
     timerRef.current = setInterval(() => {
       setPrintElapsed(Math.floor((Date.now() - printStartRef.current) / 1000));
     }, 1000);
 
-    const target = stageStudents.filter(s => selectedStudentIds.has(s.id));
+    const grades = examGrades(selectedBulkExam);
+    const skipped = [];
+    let filesOk = 0;
 
-    // Determine the effective template config for custom templates
-    let effectiveCustomConfig = { ...customConfig };
-    if (String(selectedTemplate).startsWith(CUSTOM_TEMPLATE_PREFIX)) {
-      const id = getCustomTemplateIdFromValue(selectedTemplate);
-      const tpl = customTemplates.find(t => t.id === id);
-      if (tpl && tpl.config) effectiveCustomConfig = { ...defaultCustomConfig, ...tpl.config };
+    try {
+      for (let ci = 0; ci < selectedList.length; ci++) {
+        const committee = selectedList[ci];
+        const commNum = committeeNumberOnly(committee);
+        setCommitteeBulkProgress({
+          committeeIndex: ci + 1,
+          committeeTotal: selectedList.length,
+          committeeLabel: commNum,
+        });
+
+        let roster = getStudentsInCommittee(committee, students);
+        if (grades.length) {
+          roster = roster.filter((s) =>
+            grades.some(
+              (g) => isLevelMatch(s.grade, g) || isLevelMatch(s.classroom, g) || isLevelMatch(s.stage, g)
+            )
+          );
+        }
+        const targets = roster.filter((s) => getStudentQRNationalId(s));
+        const missingCount = roster.length - targets.length;
+
+        if (targets.length === 0) {
+          skipped.push({
+            committee,
+            reason: missingCount > 0 ? 'لا طلاب برقم هوية' : 'لا طلاب في اللجنة',
+          });
+          continue;
+        }
+
+        const { url, body } = buildExamPrintPayload(selectedBulkExam, targets, {
+          templateValue: selectedTemplate,
+          headerClass: (printHeaderClass || '').trim(),
+          headerSubject: (printHeaderSubject || '').trim(),
+          dateStr: examDate,
+          dayStr: examDay,
+          committeeNumber: commNum,
+        });
+
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        if (!res.ok) throw new Error(`HTTP ${res.status} — لجنة ${commNum}`);
+
+        const pdfB64 = await streamOmrPdfBase64(res, (evt) => {
+          setPrintProgress({ done: evt.done, total: evt.total, currentName: evt.name || '' });
+        });
+
+        if (!pdfB64) {
+          skipped.push({ committee, reason: 'لم يُستلم PDF' });
+          continue;
+        }
+
+        downloadPdfBase64(
+          pdfB64,
+          safeCommitteeOmrPdfFilename(selectedBulkExam, committee, {
+            subjectOverride: (printHeaderSubject || '').trim(),
+            gradeOverride: (printHeaderClass || '').trim(),
+          })
+        );
+        if (filesOk === 0 && selectedBulkExam?.id) {
+          const nextExam = {
+            ...selectedBulkExam,
+            template: selectedTemplate,
+            template_config: isTemplateCustom(selectedTemplate) ? JSON.parse(body).template_config : null,
+            customConfig: null,
+            qCount: isWataniaTemplate(selectedTemplate) ? 30 : selectedBulkExam.qCount,
+            updatedAt: new Date().toISOString(),
+          };
+          await saveOmrExam(nextExam);
+          setExams((prev) => prev.map((exam) => exam.id === nextExam.id ? nextExam : exam));
+          setSelectedBulkExam(nextExam);
+        }
+        filesOk += 1;
+        if (missingCount > 0) {
+          skipped.push({ committee, reason: `تخطّي ${missingCount} بدون هوية` });
+        }
+        await new Promise((r) => setTimeout(r, 450));
+      }
+
+      const finalSec = Math.floor((Date.now() - printStartRef.current) / 1000);
+      setPrintTotalTime(finalSec);
+
+      if (filesOk === 0) {
+        toast.error('لم يُنشأ أي ملف. تحقق من اللجان وأرقام الهوية.', 'طباعة باللجان');
+      } else {
+        toast.success(`تم تنزيل ${filesOk} ملف PDF — ملف منفصل لكل لجنة.`, 'طباعة باللجان');
+      }
+      if (skipped.length) {
+        const lines = skipped
+          .slice(0, 6)
+          .map(
+            (s) =>
+              `${committeeNumberOnly(s.committee) || s.committee?.name || '—'}: ${s.reason}`
+          )
+          .join('\n');
+        toast.info(
+          skipped.length > 6 ? `${lines}\n…` : lines,
+          skipped.length === 1 ? 'تنبيه' : `تنبيه (${skipped.length})`
+        );
+      }
+    } catch (err) {
+      alert(`فشل توليد الملفات: ${err.message || ''}`);
+    } finally {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+      setIsGenerating(false);
+      setPrintProgress({ done: 0, total: 0, currentName: '' });
+      setPrintElapsed(0);
+      setCommitteeBulkProgress({ committeeIndex: 0, committeeTotal: 0, committeeLabel: '' });
+    }
+  };
+
+  const handleBulkPrint = async () => {
+    if (!selectedBulkExam) return;
+    const watania = isWataniaTemplate(selectedTemplate);
+    if (!watania && selectedStudentIds.size === 0) return;
+
+    const copies = Math.max(1, Math.min(500, parseInt(wataniaBlankCopies, 10) || 30));
+    const selectedList = stageStudents.filter((s) => selectedStudentIds.has(s.id));
+    const target = watania
+      ? (selectedList.length
+          ? selectedList
+          : Array.from({ length: copies }, (_, i) => ({ id: `blank-${i + 1}`, name: `ورقة ${i + 1}` })))
+      : selectedList;
+
+    if (!target.length) return;
+
+    setIsGenerating(true);
+    setPrintProgress({ done: 0, total: target.length, currentName: '' });
+    setPrintTotalTime(null);
+
+    printStartRef.current = Date.now();
+    setPrintElapsed(0);
+    timerRef.current = setInterval(() => {
+      setPrintElapsed(Math.floor((Date.now() - printStartRef.current) / 1000));
+    }, 1000);
+
+    if (!watania) {
+      const missingNational = target.filter((s) => !getStudentQRNationalId(s));
+      if (missingNational.length > 0) {
+        const sample = missingNational.slice(0, 5).map((s) => s.name || s.id).join('، ');
+        toast.error(
+          `لا يمكن الطباعة: ${missingNational.length} طالب بدون رقم هوية في السجل (مثلاً: ${sample}${missingNational.length > 5 ? '…' : ''}). أضف رقم الهوية لكل طالب ثم أعد المحاولة.`,
+          'رقم الهوية مطلوب'
+        );
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+        setIsGenerating(false);
+        setPrintProgress({ done: 0, total: 0, currentName: '' });
+        setPrintElapsed(0);
+        return;
+      }
     }
 
     try {
-      let url, body;
-      // Use seatNumber as the QR id so the scanner can match back to the student.
-      // Fall back to nationalId then internal DB id if seatNumber is missing.
-      const getStudentQRId = (s) =>
-        (s.seatNumber || s.seat_number || s.nationalId || s.national_id || s.id || '').toString().trim();
-
-      if (isTemplateCustom(selectedTemplate)) {
-        url  = `${OMR_API_BASE}/generate-custom-batch-stream`;
-        body = JSON.stringify({
-          subject: selectedBulkExam.subject,
-          template_config: effectiveCustomConfig,
-          num_questions: selectedBulkExam.qCount || 30,
-          students: target.map(s => ({
-            id: getStudentQRId(s),
-            name: s.name,
-            class_name: (s.grade || s.classroom || selectedBulkExam.grade || ''),
-            subject: selectedBulkExam.subject || '',
-            date: examDate,
-            day: examDay
-          }))
-        });
-      } else {
-        url  = `${OMR_API_BASE}/generate-batch-stream`;
-        body = JSON.stringify({
-          subject: selectedBulkExam.subject,
-          template: selectedTemplate,
-          num_questions: selectedBulkExam.qCount || 30,
-          students: target.map(s => ({
-            id: getStudentQRId(s),
-            name: s.name,
-            class_name: (s.grade || s.classroom || selectedBulkExam.grade || ''),
-            subject: selectedBulkExam.subject || '',
-            date: examDate,
-            day: examDay
-          }))
-        });
-      }
+      const { url, body } = buildExamPrintPayload(selectedBulkExam, target, {
+        templateValue: selectedTemplate,
+        headerClass: (printHeaderClass || '').trim(),
+        headerSubject: (printHeaderSubject || '').trim(),
+        dateStr: examDate,
+        dayStr: examDay,
+      });
 
       const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-      // Read NDJSON stream line by line
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let pdfB64 = null;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const evt = JSON.parse(line);
-            if (evt.type === 'progress') {
-              setPrintProgress({ done: evt.done, total: evt.total, currentName: evt.name || '' });
-            } else if (evt.type === 'done') {
-              pdfB64 = evt.pdf;
-            } else if (evt.type === 'error') {
-              throw new Error(evt.msg);
-            }
-          } catch { /* ignore JSON parse errors on partial lines */ }
-        }
-      }
+      const pdfB64 = await streamOmrPdfBase64(res, (evt) => {
+        setPrintProgress({ done: evt.done, total: evt.total, currentName: evt.name || '' });
+      });
 
       if (pdfB64) {
-        const nextExam = {
-          ...selectedBulkExam,
-          template: selectedTemplate,
-          template_config: isTemplateCustom(selectedTemplate) ? effectiveCustomConfig : null,
-          customConfig: null,
-          updatedAt: new Date().toISOString(),
-        };
-        await saveOmrExam(nextExam);
-        setExams((prev) => prev.map((exam) => exam.id === nextExam.id ? nextExam : exam));
-        setSelectedBulkExam(nextExam);
-        const byteChars = atob(pdfB64);
-        const byteArr = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
-        const blob = new Blob([byteArr], { type: 'application/pdf' });
-        const a_el = document.createElement('a');
-        a_el.href = URL.createObjectURL(blob);
-        a_el.download = `OMR_${selectedBulkExam.title}.pdf`;
-        a_el.click();
-        // Record final elapsed time before clearing
+        if (selectedBulkExam?.id) {
+          const nextExam = {
+            ...selectedBulkExam,
+            template: selectedTemplate,
+            ...(isTemplateCustom(selectedTemplate) ? { template_config: JSON.parse(body).template_config } : { template_config: null, customConfig: null }),
+            qCount: isWataniaTemplate(selectedTemplate) ? 30 : selectedBulkExam.qCount,
+            updatedAt: new Date().toISOString(),
+          };
+          await saveOmrExam(nextExam);
+          setExams((prev) => prev.map((e) => (e.id === nextExam.id ? nextExam : e)));
+          setSelectedBulkExam(nextExam);
+        }
+        downloadPdfBase64(
+          pdfB64,
+          safeOmrPdfFilename(selectedBulkExam, {
+            subjectOverride: (printHeaderSubject || '').trim(),
+            gradeOverride: (printHeaderClass || '').trim(),
+          })
+        );
         const finalSec = Math.floor((Date.now() - printStartRef.current) / 1000);
         setPrintTotalTime(finalSec);
+        if (printCoverWithBulk && !watania) {
+          const ex = selectedBulkExam;
+          const cls = selectedClass;
+          const dLine = `${examDay} — ${examDate}`;
+          setTimeout(() => {
+            printExamCoverSheet(ex, {
+              selectedClassroom: cls,
+              examDateLine: dLine,
+              subjectOverride: (printHeaderSubject || '').trim() || undefined,
+              gradeLabelOverride: (printHeaderClass || '').trim() || undefined,
+            });
+          }, 500);
+        }
       } else {
         throw new Error('لم يتم استلام ملف PDF');
       }
@@ -1220,6 +2165,224 @@ const OMRExams = () => {
       setIsGenerating(false);
       setPrintProgress({ done: 0, total: 0, currentName: '' });
       setPrintElapsed(0);
+    }
+  };
+
+  const handleMultiExamPrint = async () => {
+    const examsToPrint = selectedExamsForMultiPrint;
+    if (!examsToPrint.length) return;
+
+    setIsGenerating(true);
+    setPrintProgress({ done: 0, total: 0, currentName: '' });
+    setPrintTotalTime(null);
+    setCommitteeBulkProgress({ committeeIndex: 0, committeeTotal: 0, committeeLabel: '' });
+    printStartRef.current = Date.now();
+    setPrintElapsed(0);
+    timerRef.current = setInterval(() => {
+      setPrintElapsed(Math.floor((Date.now() - printStartRef.current) / 1000));
+    }, 1000);
+
+    const skipped = [];
+    let filesOk = 0;
+    const byCommittee = multiPrintMode === 'committee';
+
+    const printOneBatch = async (exam, targets, committee) => {
+      const timing = resolveExamPrintTiming(exam, dateType);
+      if (!timing.hasDate) {
+        skipped.push({ exam, committee, reason: 'لا تاريخ مسجّل للاختبار — عدّله من «تعديل البيانات»' });
+        return false;
+      }
+
+      const cfg = resolveEffectiveCustomConfig(multiPrintTemplate);
+      const headerClass =
+        (isTemplateCustom(multiPrintTemplate)
+          ? String(cfg.header_class_text ?? '').trim()
+          : '') || derivePrintHeaderClassFromExam(exam);
+      const headerSubject =
+        (isTemplateCustom(multiPrintTemplate)
+          ? String(cfg.header_subject_text ?? '').trim()
+          : '') || derivePrintHeaderSubjectFromExam(exam);
+
+      const commNum = committee ? committeeNumberOnly(committee) : '';
+
+      const { url, body } = buildExamPrintPayload(exam, targets, {
+        templateValue: multiPrintTemplate,
+        headerClass,
+        headerSubject,
+        dateStr: timing.dateStr,
+        dayStr: timing.dayStr,
+        committeeNumber: commNum || undefined,
+      });
+
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      if (!res.ok) {
+        throw new Error(
+          `HTTP ${res.status} — ${exam.title || exam.id}${committee ? ` / لجنة ${commNum}` : ''}`
+        );
+      }
+
+      const pdfB64 = await streamOmrPdfBase64(res, (evt) => {
+        setMultiPrintProgress((prev) => ({
+          ...prev,
+          done: evt.done,
+          total: evt.total,
+          currentName: evt.name || '',
+        }));
+        setPrintProgress({ done: evt.done, total: evt.total, currentName: evt.name || '' });
+      });
+
+      if (!pdfB64) {
+        skipped.push({
+          exam,
+          committee,
+          reason: 'لم يُستلم PDF',
+        });
+        return false;
+      }
+
+      const filename = committee
+        ? safeCommitteeOmrPdfFilename(exam, committee, {
+            subjectOverride: headerSubject,
+            gradeOverride: headerClass,
+          })
+        : safeOmrPdfFilename(exam, {
+            subjectOverride: headerSubject,
+            gradeOverride: headerClass,
+          });
+      downloadPdfBase64(pdfB64, filename);
+      if (exam?.id && (exam.template !== multiPrintTemplate || isTemplateCustom(multiPrintTemplate))) {
+        const nextExam = {
+          ...exam,
+          template: multiPrintTemplate,
+          ...(isTemplateCustom(multiPrintTemplate) ? { template_config: JSON.parse(body).template_config } : { template_config: null, customConfig: null }),
+          qCount: isWataniaTemplate(multiPrintTemplate) ? 30 : exam.qCount,
+          updatedAt: new Date().toISOString(),
+        };
+        await saveOmrExam(nextExam);
+        setExams((prev) => prev.map((e) => (e.id === nextExam.id ? nextExam : e)));
+      }
+      return true;
+    };
+
+    try {
+      for (let ei = 0; ei < examsToPrint.length; ei++) {
+        const exam = examsToPrint[ei];
+        setMultiPrintProgress({
+          examIndex: ei + 1,
+          examTotal: examsToPrint.length,
+          examTitle: exam.title || exam.subject || '',
+          done: 0,
+          total: 0,
+          currentName: '',
+        });
+
+        if (byCommittee) {
+          const examCommitteesList = resolveExamCommittees(exam);
+          if (!examCommitteesList.length) {
+            skipped.push({ exam, reason: 'لا لجان مطابقة أو بدون طلاب قابلين للطباعة' });
+            continue;
+          }
+
+          for (let ci = 0; ci < examCommitteesList.length; ci++) {
+            const committee = examCommitteesList[ci];
+            const commNum = committeeNumberOnly(committee);
+            setCommitteeBulkProgress({
+              committeeIndex: ci + 1,
+              committeeTotal: examCommitteesList.length,
+              committeeLabel: commNum,
+            });
+
+            const grades = examGrades(exam);
+            let roster = getStudentsInCommittee(committee, students);
+            if (grades.length) {
+              roster = roster.filter((s) =>
+                grades.some(
+                  (g) => isLevelMatch(s.grade, g) || isLevelMatch(s.classroom, g) || isLevelMatch(s.stage, g)
+                )
+              );
+            }
+            const targets = roster.filter((s) => getStudentQRNationalId(s));
+            const missingCount = roster.length - targets.length;
+
+            if (targets.length === 0) {
+              skipped.push({
+                exam,
+                committee,
+                reason: missingCount > 0 ? 'لا طلاب برقم هوية' : 'لا طلاب في اللجنة',
+              });
+              continue;
+            }
+
+            const ok = await printOneBatch(exam, targets, committee);
+            if (ok) {
+              filesOk += 1;
+              if (missingCount > 0) {
+                skipped.push({ exam, committee, reason: `تخطّي ${missingCount} بدون هوية` });
+              }
+            }
+            await new Promise((r) => setTimeout(r, 450));
+          }
+          continue;
+        }
+
+        let targets = studentsMatchingExam(exam, students).filter((s) => getStudentQRNationalId(s));
+        const allMatching = studentsMatchingExam(exam, students);
+        const missingCount = allMatching.length - targets.length;
+
+        if (targets.length === 0) {
+          skipped.push({
+            exam,
+            reason: missingCount > 0 ? 'لا طلاب برقم هوية' : 'لا طلاب مطابقين للصف',
+          });
+          continue;
+        }
+
+        const ok = await printOneBatch(exam, targets, null);
+        if (ok) {
+          filesOk += 1;
+          if (missingCount > 0) {
+            skipped.push({ exam, reason: `تخطّي ${missingCount} بدون هوية` });
+          }
+        }
+        await new Promise((r) => setTimeout(r, 450));
+      }
+
+      const finalSec = Math.floor((Date.now() - printStartRef.current) / 1000);
+      setPrintTotalTime(finalSec);
+
+      if (filesOk === 0) {
+        toast.error('لم يُنشأ أي ملف. تحقق من الطلاب وأرقام الهوية.', 'طباعة متعددة');
+      } else {
+        toast.success(
+          byCommittee
+            ? `تم تنزيل ${filesOk} ملف PDF — ملف منفصل لكل لجنة في كل اختبار.`
+            : `تم تنزيل ${filesOk} ملف PDF — ملف منفصل لكل اختبار.`,
+          'طباعة متعددة'
+        );
+      }
+      if (skipped.length) {
+        const detail = skipped
+          .slice(0, 4)
+          .map((s) => {
+            const title = s.exam.title || s.exam.subject;
+            const comm = s.committee ? ` / لجنة ${committeeNumberOnly(s.committee) || '—'}` : '';
+            return `${title}${comm}: ${s.reason}`;
+          })
+          .join(' · ');
+        toast.warning(
+          skipped.length > 4 ? `${detail} …` : detail,
+          'ملاحظات'
+        );
+      }
+    } catch (err) {
+      toast.error(`فشل التوليد: ${err.message || ''}`, 'خطأ');
+    } finally {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+      setIsGenerating(false);
+      setPrintProgress({ done: 0, total: 0, currentName: '' });
+      setPrintElapsed(0);
+      setCommitteeBulkProgress({ committeeIndex: 0, committeeTotal: 0, committeeLabel: '' });
     }
   };
 
@@ -1247,6 +2410,17 @@ const OMRExams = () => {
             </button>
           </div>
           {activeTab === 'exams' && (
+            <>
+            <button
+              type="button"
+              disabled={backfillingPortal}
+              onClick={handleBackfillPortalNationalIds}
+              title="نسخ رقم الهوية إلى nationalId في النتائج المعتمدة لظهورها كلها في بوابة الطالب"
+              className="flex items-center gap-2 px-5 py-3 rounded-2xl border-2 border-dashed border-sky-200 bg-sky-50/90 text-sky-900 font-black text-sm hover:bg-sky-100/90 transition-all disabled:opacity-50"
+            >
+              {backfillingPortal ? <Loader2 size={18} className="animate-spin" /> : <ShieldCheck size={18} />}
+              مزامنة هويات البوابة
+            </button>
             <div className="flex p-1 bg-amber-50/90 rounded-2xl border border-amber-100/80 shadow-inner ring-1 ring-amber-100/50 w-full sm:w-auto min-w-0">
               <button
                 type="button"
@@ -1263,7 +2437,11 @@ const OMRExams = () => {
                 <Archive size={18} /> أرشيف
               </button>
             </div>
+            </>
           )}
+          <button onClick={() => { setActiveTab('exams'); setIsBulkAdding(true); }} className="flex items-center gap-3 px-6 py-4 bg-emerald-600 text-white rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-2xl shadow-emerald-100 active:scale-95">
+            <Layers size={20} /> اختبارات الصف دفعة واحدة
+          </button>
           <button onClick={() => { setActiveTab('exams'); setIsAdding(true); }} className="flex items-center gap-3 px-8 py-4 bg-slate-900 text-white rounded-2xl font-black hover:bg-slate-800 transition-all shadow-2xl shadow-slate-200 active:scale-95">
             <Plus size={20} className="text-indigo-400" /> اختبار جديد
           </button>
@@ -1307,6 +2485,57 @@ const OMRExams = () => {
               ))}
             </div>
             </div>
+            {visibleExams.length > 0 && (
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={toggleSelectAllVisibleExams}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 font-black text-xs transition-all"
+                >
+                  {allVisibleExamsSelected ? <CheckSquare size={16} className="text-indigo-600" /> : <Square size={16} />}
+                  {allVisibleExamsSelected ? 'إلغاء تحديد الكل' : 'تحديد كل الاختبارات المعروضة'}
+                  <span className="text-slate-400 font-bold">({visibleExams.length})</span>
+                </button>
+                <div className="flex flex-wrap items-center gap-2 justify-end">
+                  {selectedExamIds.size > 0 && (
+                    <span className="text-xs font-black text-indigo-600 bg-indigo-50 px-3 py-2 rounded-xl">
+                      محدّد: {selectedExamIds.size}
+                    </span>
+                  )}
+                  <div className="flex items-center gap-1 bg-purple-50 rounded-xl p-1 border border-purple-100">
+                    <select
+                      value={bulkTemplateValue}
+                      onChange={(e) => setBulkTemplateValue(e.target.value)}
+                      disabled={selectedExamIds.size === 0 || applyingTemplate}
+                      className="px-3 py-1.5 bg-white rounded-lg font-black text-xs text-slate-700 outline-none disabled:opacity-40 max-w-[220px]"
+                    >
+                      <option value="">اختر قالباً للمحدد...</option>
+                      {templateOptionsByStage('', customTemplates)
+                        .filter((o) => !isWataniaTemplate(o.value))
+                        .map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    <button
+                      type="button"
+                      disabled={selectedExamIds.size === 0 || !bulkTemplateValue || applyingTemplate}
+                      onClick={applyTemplateToSelected}
+                      className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-purple-600 text-white font-black text-xs hover:bg-purple-700 transition-all disabled:opacity-40"
+                    >
+                      {applyingTemplate ? <Loader2 size={14} className="animate-spin" /> : <Layout size={14} />}
+                      تطبيق القالب
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={selectedExamIds.size === 0 || isGenerating}
+                    onClick={openMultiPrintModal}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 text-white font-black text-xs hover:bg-indigo-700 transition-all disabled:opacity-40 shadow-lg shadow-indigo-100"
+                  >
+                    <Printer size={16} />
+                    طباعة المحدد
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ── Exam Grid ── */}
@@ -1324,19 +2553,34 @@ const OMRExams = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-6">
               {visibleExams.map(exam => (
                 <div key={exam.id} className="group relative">
+                  <button
+                    type="button"
+                    onClick={() => toggleExamSelection(exam.id)}
+                    className={`absolute top-4 left-4 z-20 w-9 h-9 rounded-xl flex items-center justify-center border-2 transition-all shadow-sm ${
+                      selectedExamIds.has(exam.id)
+                        ? 'bg-indigo-600 border-indigo-600 text-white'
+                        : 'bg-white border-slate-300 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 hover:bg-indigo-50'
+                    }`}
+                    title={selectedExamIds.has(exam.id) ? 'إلغاء التحديد' : 'تحديد للطباعة المتعددة'}
+                  >
+                    {selectedExamIds.has(exam.id) ? <Check size={18} strokeWidth={3} /> : <Square size={16} />}
+                  </button>
                   <div className="absolute inset-0 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-[2rem] blur-2xl opacity-0 group-hover:opacity-10 transition-opacity duration-500"></div>
                   <div className="luxury-card h-full bg-white border-2 border-transparent group-hover:border-indigo-100 rounded-[2rem] shadow-xl hover:shadow-2xl transition-all duration-500 overflow-hidden flex flex-col relative z-10 text-right">
                     <div className="p-6 pb-4">
                       <div className="flex justify-between items-start mb-6">
-                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transform group-hover:scale-110 group-hover:rotate-12 transition-all duration-500 ${exam.template === 'nafs' ? 'bg-indigo-600 text-white shadow-indigo-100' : 'bg-purple-600 text-white shadow-purple-100'}`}>
+                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transform group-hover:scale-110 group-hover:rotate-12 transition-all duration-500 ${exam.template === 'watania' ? 'bg-emerald-600 text-white shadow-emerald-100' : exam.template === 'nafs' ? 'bg-indigo-600 text-white shadow-indigo-100' : 'bg-purple-600 text-white shadow-purple-100'}`}>
                           {getSubjectIcon(exam.subject, 24)}
                         </div>
                         <div className="flex gap-1.5">
-                          <button onClick={() => openEditModal(exam)} className="p-2.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="تعديل البيانات">
-                            <Settings size={18} />
+                          <button type="button" onClick={() => openEditModal(exam)} className="p-2.5 rounded-xl border border-slate-200 bg-white text-slate-700 shadow-sm hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-200 transition-all active:scale-90" title="تعديل البيانات">
+                            <Settings size={18} strokeWidth={2.25} />
                           </button>
-                          <button onClick={() => openArchiveFolderModal(exam)} className="p-2.5 text-slate-300 hover:text-amber-600 hover:bg-amber-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="أرشفة">
-                            <Archive size={18} />
+                          <button type="button" onClick={() => openArchiveFolderModal(exam)} className="p-2.5 rounded-xl border border-slate-200 bg-white text-slate-700 shadow-sm hover:text-amber-700 hover:bg-amber-50 hover:border-amber-200 transition-all active:scale-90" title="أرشفة">
+                            <Archive size={18} strokeWidth={2.25} />
+                          </button>
+                          <button type="button" onClick={() => handlePermanentDelete(exam)} className="p-2.5 rounded-xl border border-slate-200 bg-white text-slate-700 shadow-sm hover:text-rose-600 hover:bg-rose-50 hover:border-rose-200 transition-all active:scale-90" title="حذف الاختبار">
+                            <Trash2 size={18} strokeWidth={2.25} />
                           </button>
                         </div>
                       </div>
@@ -1361,6 +2605,20 @@ const OMRExams = () => {
                       </div>
                       <button
                         type="button"
+                        disabled={regradingExamId === exam.id}
+                        onClick={() => handleRegradeApproved(exam)}
+                        title="تحديث درجات النتائج المعتمدة سابقاً وفق مفتاح الإجابة الحالي"
+                        className="w-full py-2.5 rounded-xl border-2 border-dashed border-emerald-200/90 bg-emerald-50/60 text-emerald-900 hover:bg-emerald-100/80 transition-all flex items-center justify-center gap-2 font-black text-[9px] disabled:opacity-50"
+                      >
+                        {regradingExamId === exam.id ? (
+                          <Loader2 size={14} className="animate-spin shrink-0" />
+                        ) : (
+                          <RefreshCw size={14} className="shrink-0" />
+                        )}
+                        إعادة تصحيح المعتمدة (سابقة)
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => printExamAnswerKeySheet(exam)}
                         title="طباعة نموذج الإجابات الصحيحة للمراقب/المصحّح"
                         className="w-full py-2.5 rounded-xl border-2 border-dashed border-purple-200/90 bg-purple-50/60 text-purple-900 hover:bg-purple-100/80 transition-all flex items-center justify-center gap-2 font-black text-[9px]"
@@ -1376,6 +2634,15 @@ const OMRExams = () => {
                       >
                         <Tag size={14} className="shrink-0 text-amber-700/90" />
                         ملصق مادة وصف (أوراق قديمة)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => printExamCoverSheet(exam)}
+                        title="ورقة A4 للمادة واسم الفصل — ضعها مع حزمة الأوراق"
+                        className="w-full py-2.5 rounded-xl border-2 border-dashed border-indigo-200/90 bg-indigo-50/50 text-indigo-900 hover:bg-indigo-100/80 transition-all flex items-center justify-center gap-2 font-black text-[9px]"
+                      >
+                        <ScrollText size={14} className="shrink-0 text-indigo-600" />
+                        ورقة تعريف (مادة + فصل)
                       </button>
                     </div>
                   </div>
@@ -1411,19 +2678,31 @@ const OMRExams = () => {
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-6">
                       {folderExams.map(exam => (
                         <div key={exam.id} className="group relative">
+                          <button
+                            type="button"
+                            onClick={() => toggleExamSelection(exam.id)}
+                            className={`absolute top-4 left-4 z-20 w-9 h-9 rounded-xl flex items-center justify-center border-2 transition-all shadow-sm ${
+                              selectedExamIds.has(exam.id)
+                                ? 'bg-indigo-600 border-indigo-600 text-white'
+                                : 'bg-white border-slate-300 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 hover:bg-indigo-50'
+                            }`}
+                            title={selectedExamIds.has(exam.id) ? 'إلغاء التحديد' : 'تحديد للطباعة المتعددة'}
+                          >
+                            {selectedExamIds.has(exam.id) ? <Check size={18} strokeWidth={3} /> : <Square size={16} />}
+                          </button>
                           <div className="absolute inset-0 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-[2rem] blur-2xl opacity-0 group-hover:opacity-10 transition-opacity duration-500"></div>
                           <div className="luxury-card h-full bg-white border-2 border-amber-100/80 opacity-95 rounded-[2rem] shadow-xl hover:shadow-2xl transition-all duration-500 overflow-hidden flex flex-col relative z-10 text-right">
                             <div className="p-6 pb-4">
                               <div className="flex justify-between items-start mb-6">
-                                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transform group-hover:scale-110 group-hover:rotate-12 transition-all duration-500 ${exam.template === 'nafs' ? 'bg-indigo-600 text-white shadow-indigo-100' : 'bg-purple-600 text-white shadow-purple-100'}`}>
+                                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transform group-hover:scale-110 group-hover:rotate-12 transition-all duration-500 ${exam.template === 'watania' ? 'bg-emerald-600 text-white shadow-emerald-100' : exam.template === 'nafs' ? 'bg-indigo-600 text-white shadow-indigo-100' : 'bg-purple-600 text-white shadow-purple-100'}`}>
                                   {getSubjectIcon(exam.subject, 24)}
                                 </div>
                                 <div className="flex gap-1.5">
-                                  <button onClick={() => handleRestoreExam(exam)} className="p-2.5 text-slate-300 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="استعادة">
-                                    <ArchiveRestore size={18} />
+                                  <button type="button" onClick={() => handleRestoreExam(exam)} className="p-2.5 rounded-xl border border-slate-200 bg-white text-slate-700 shadow-sm hover:text-emerald-700 hover:bg-emerald-50 hover:border-emerald-200 transition-all active:scale-90" title="استعادة">
+                                    <ArchiveRestore size={18} strokeWidth={2.25} />
                                   </button>
-                                  <button onClick={() => handlePermanentDelete(exam.id)} className="p-2.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all active:scale-90" title="حذف نهائي">
-                                    <Trash2 size={18} />
+                                  <button type="button" onClick={() => handlePermanentDelete(exam)} className="p-2.5 rounded-xl border border-slate-200 bg-white text-slate-700 shadow-sm hover:text-rose-600 hover:bg-rose-50 hover:border-rose-200 transition-all active:scale-90" title="حذف الاختبار">
+                                    <Trash2 size={18} strokeWidth={2.25} />
                                   </button>
                                 </div>
                               </div>
@@ -1469,15 +2748,15 @@ const OMRExams = () => {
                               </div>
                               <button type="button" onClick={() => handleRestoreExam(exam)} className="w-full py-3.5 bg-emerald-600 text-white rounded-xl font-black text-[9px] hover:bg-emerald-700 transition-all flex flex-col items-center justify-center gap-1.5 shadow-lg shadow-emerald-100"><ArchiveRestore size={16} /> استعادة للنشطة</button>
                               <button
-                        type="button"
-                        onClick={() => printExamAnswerKeySheet(exam)}
-                        title="طباعة نموذج الإجابات الصحيحة للمراقب/المصحّح"
-                        className="w-full py-2.5 rounded-xl border-2 border-dashed border-purple-200/90 bg-purple-50/60 text-purple-900 hover:bg-purple-100/80 transition-all flex items-center justify-center gap-2 font-black text-[9px]"
-                      >
-                        <KeyRound size={14} className="shrink-0 text-purple-600" />
-                        نموذج الإجابات الصحيحة
-                      </button>
-                      <button
+                                type="button"
+                                onClick={() => printExamAnswerKeySheet(exam)}
+                                title="طباعة نموذج الإجابات الصحيحة"
+                                className="w-full py-2.5 rounded-xl border-2 border-dashed border-purple-200 bg-purple-50/60 text-purple-900 hover:bg-purple-100/90 transition-all flex items-center justify-center gap-2 font-black text-[9px]"
+                              >
+                                <KeyRound size={14} className="shrink-0 text-purple-600" />
+                                نموذج الإجابات الصحيحة
+                              </button>
+                              <button
                                 type="button"
                                 onClick={() => printExamStickers(exam)}
                                 title="طباعة ملصقات مادة وصف للأوراق المطبوعة سابقاً"
@@ -1485,6 +2764,15 @@ const OMRExams = () => {
                               >
                                 <Tag size={14} className="shrink-0" />
                                 ملصق مادة وصف
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => printExamCoverSheet(exam)}
+                                title="ورقة تعريف بالمادة واسم الفصل"
+                                className="w-full py-2.5 rounded-xl border-2 border-dashed border-indigo-200 bg-white text-indigo-900 hover:bg-indigo-50 transition-all flex items-center justify-center gap-2 font-black text-[9px]"
+                              >
+                                <ScrollText size={14} className="shrink-0 text-indigo-600" />
+                                ورقة تعريف (مادة + فصل)
                               </button>
                             </div>
                           </div>
@@ -1532,6 +2820,176 @@ const OMRExams = () => {
             </div>
           )}
 
+          {showMultiPrintModal && (
+            <div className="fixed inset-0 z-[105] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in">
+              <div className="bg-white w-full max-w-2xl rounded-[2.5rem] shadow-2xl flex flex-col max-h-[90vh] border-none overflow-hidden">
+                <div className="p-8 pb-6 flex justify-between items-center shrink-0 border-b border-slate-50">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 bg-violet-50 rounded-2xl flex items-center justify-center text-violet-600">
+                      <FileStack size={24} />
+                    </div>
+                    <div className="text-right">
+                      <h3 className="text-xl font-black text-slate-900 font-header">طباعة عدة اختبارات</h3>
+                      <p className="text-xs font-bold text-slate-400 mt-1">
+                        {selectedExamsForMultiPrint.length} اختبار
+                        {multiPrintMode === 'committee'
+                          ? ` — ${multiPrintEstimatedFiles} ملف (لجنة لكل اختبار)`
+                          : ` — ${multiPrintEstimatedFiles} ملف (اختبار لكل ملف)`}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => !isGenerating && setShowMultiPrintModal(false)}
+                    className="p-3 bg-slate-50 text-slate-400 hover:bg-rose-50 hover:text-rose-500 rounded-xl"
+                  >
+                    <X size={22} />
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-8 space-y-6 custom-scrollbar">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">
+                      طريقة التقسيم
+                    </label>
+                    <div className="flex bg-slate-50 p-1 rounded-xl border border-slate-100 w-full sm:w-auto">
+                      <button
+                        type="button"
+                        disabled={isGenerating}
+                        onClick={() => setMultiPrintMode('exam')}
+                        className={`flex-1 sm:flex-none px-4 py-2 rounded-lg text-xs font-black transition-all ${
+                          multiPrintMode === 'exam'
+                            ? 'bg-indigo-600 text-white shadow-md'
+                            : 'text-slate-400 hover:bg-white'
+                        }`}
+                      >
+                        ملف لكل اختبار
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isGenerating}
+                        onClick={() => setMultiPrintMode('committee')}
+                        className={`flex-1 sm:flex-none px-4 py-2 rounded-lg text-xs font-black transition-all flex items-center justify-center gap-1.5 ${
+                          multiPrintMode === 'committee'
+                            ? 'bg-indigo-600 text-white shadow-md'
+                            : 'text-slate-400 hover:bg-white'
+                        }`}
+                      >
+                        <Layers size={13} />
+                        ملف لكل لجنة
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">
+                      القالب المستخدم (لجميع الاختبارات)
+                    </label>
+                    <select
+                      value={multiPrintTemplate}
+                      onChange={(e) => setMultiPrintTemplate(e.target.value)}
+                      disabled={isGenerating}
+                      className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none focus:ring-4 focus:ring-indigo-50 font-black text-slate-700 text-right"
+                    >
+                      {templateOptionsByStage(
+                        selectedExamsForMultiPrint[0]?.stage,
+                        customTemplates
+                      ).map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] font-bold text-slate-400 leading-relaxed px-1">
+                      {isWataniaTemplate(multiPrintTemplate)
+                        ? 'نموذج الوزارة مطابق للأصل وبدون أي بيانات خارجية. عدد الأوراق = عدد الطلاب المختارين.'
+                        : multiPrintMode === 'committee'
+                        ? 'لكل اختبار محدّد: ملف PDF منفصل لكل لجنة، مع رقم اللجنة ورقم الجلوس على الورقة. التاريخ والصف والمادة من بيانات كل اختبار.'
+                        : 'يُطبَع تلقائياً كل طلاب الصف/المرحلة المطابقين لكل اختبار في ملف واحد. التاريخ والصف والمادة من بيانات كل اختبار.'}
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-100 bg-slate-50/80 p-4 max-h-64 overflow-y-auto custom-scrollbar">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">الاختبارات المحددة</p>
+                    <ul className="space-y-2">
+                      {selectedExamsForMultiPrint.map((ex) => {
+                        const timing = resolveExamPrintTiming(ex, dateType);
+                        const commCount = resolveExamCommittees(ex).length;
+                        return (
+                          <li
+                            key={ex.id}
+                            className="flex items-center justify-between gap-3 text-right bg-white rounded-xl px-4 py-3 border border-slate-100"
+                          >
+                            <div className="flex flex-col items-end gap-1 shrink-0">
+                              <span className="text-[10px] font-bold text-slate-400">
+                                {multiPrintMode === 'committee'
+                                  ? `${commCount} لجنة`
+                                  : `${studentsMatchingExam(ex, students).filter((s) => getStudentQRNationalId(s)).length} طالب`}
+                              </span>
+                              <span className={`text-[10px] font-black ${timing.hasDate ? 'text-emerald-700' : 'text-amber-700'}`}>
+                                {timing.label}
+                              </span>
+                            </div>
+                            <span className="font-black text-sm text-slate-800 truncate">{ex.title || ex.subject}</span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+
+                  {isGenerating && (
+                    <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-100 space-y-2">
+                      <p className="text-sm font-black text-indigo-900 text-right">
+                        اختبار {multiPrintProgress.examIndex} / {multiPrintProgress.examTotal}
+                        {multiPrintProgress.examTitle ? ` — ${multiPrintProgress.examTitle}` : ''}
+                      </p>
+                      {multiPrintMode === 'committee' && committeeBulkProgress.committeeTotal > 0 && (
+                        <p className="text-xs font-black text-violet-700 text-right">
+                          لجنة {committeeBulkProgress.committeeIndex} / {committeeBulkProgress.committeeTotal}
+                          {committeeBulkProgress.committeeLabel
+                            ? ` — ${committeeBulkProgress.committeeLabel}`
+                            : ''}
+                        </p>
+                      )}
+                      {multiPrintProgress.total > 0 && (
+                        <p className="text-xs font-bold text-indigo-600 text-right">
+                          {multiPrintProgress.done} / {multiPrintProgress.total} ورقة
+                          {multiPrintProgress.currentName ? ` — ${multiPrintProgress.currentName}` : ''}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {printTotalTime !== null && !isGenerating && (
+                    <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100 text-emerald-800 font-black text-sm text-right">
+                      اكتمل التنزيل — {fmtTime(printTotalTime)}
+                    </div>
+                  )}
+                </div>
+
+                <div className="p-6 border-t border-slate-50 bg-slate-50/50 flex gap-3">
+                  <button
+                    type="button"
+                    disabled={isGenerating}
+                    onClick={() => setShowMultiPrintModal(false)}
+                    className="px-8 py-4 bg-white text-slate-500 rounded-2xl font-black border border-slate-100 disabled:opacity-50"
+                  >
+                    إغلاق
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isGenerating || selectedExamsForMultiPrint.length === 0}
+                    onClick={handleMultiExamPrint}
+                    className="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-black hover:bg-indigo-700 flex items-center justify-center gap-2 disabled:opacity-40"
+                  >
+                    {isGenerating ? <Loader2 size={20} className="animate-spin" /> : <Printer size={20} />}
+                    {isGenerating ? 'جاري التوليد...' : `تنزيل ${multiPrintEstimatedFiles} ملف PDF`}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {showBulkModal && (
             <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in">
               <div className="bg-white w-full max-w-5xl rounded-[3rem] shadow-2xl flex flex-col max-h-[92vh] animate-in zoom-in-95 border-none overflow-hidden relative">
@@ -1546,7 +3004,8 @@ const OMRExams = () => {
                   <button onClick={() => setShowBulkModal(false)} className="p-4 bg-slate-50 text-slate-300 hover:bg-rose-50 hover:text-rose-500 rounded-2.5xl transition-all shadow-sm"><X size={24} /></button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-10 pt-0 space-y-8 custom-scrollbar">
-                   <div className="luxury-card p-8 bg-slate-50 border-none shadow-sm flex flex-col md:flex-row gap-8 items-center">
+                   <div className="luxury-card p-8 bg-slate-50 border-none shadow-sm flex flex-col gap-8">
+                      <div className="flex flex-col md:flex-row gap-8 items-center w-full">
                       <div className="flex-1 w-full space-y-3">
                          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">القالب المستخدم</label>
                          <div className="flex items-center gap-4">
@@ -1557,6 +3016,23 @@ const OMRExams = () => {
                               <button onClick={openCustomEditorForCurrentTemplate} className="p-5 bg-white text-indigo-600 border border-indigo-100 rounded-[2rem] hover:bg-indigo-50 transition-all shadow-sm"><Edit2 size={24} /></button>
                             )}
                          </div>
+                         {isWataniaTemplate(selectedTemplate) && (
+                           <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-right space-y-3">
+                             <p className="text-xs font-black text-emerald-800">ورقة الوزارة الرسمية — بلا أي بيانات مطبوعة</p>
+                             <p className="text-[11px] font-bold text-emerald-700/80 leading-relaxed">
+                               لا تحتاج سجل طلاب. حدّد عدد الأوراق الفارغة، والطلاب يكتبون الاسم ورقم السجل المدني يدوياً.
+                             </p>
+                             <label className="block text-[11px] font-black text-emerald-800">عدد الأوراق</label>
+                             <input
+                               type="number"
+                               min="1"
+                               max="500"
+                               value={wataniaBlankCopies}
+                               onChange={(e) => setWataniaBlankCopies(e.target.value)}
+                               className="w-full px-5 py-3 bg-white border border-emerald-100 rounded-2xl outline-none focus:ring-4 focus:ring-emerald-50 font-black text-slate-800 text-right"
+                             />
+                           </div>
+                         )}
                       </div>
                       
                       <div className="flex-1 w-full space-y-3">
@@ -1578,6 +3054,38 @@ const OMRExams = () => {
                               ))}
                            </select>
                          </div>
+                      </div>
+                      </div>
+
+                      <div className={`w-full space-y-4 pt-2 border-t border-slate-200/90 ${isWataniaTemplate(selectedTemplate) ? 'hidden' : ''}`}>
+                        <div>
+                          <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest px-1">حقول الرأس على الورقة المطبوعة</p>
+                          <p className="text-xs font-bold text-slate-400 mt-2 px-1 leading-relaxed">حدّد النص الذي يظهر في «الصف» و«المادة» على كل ورقة. اتركه فارغاً لاستخدام بيانات كل طالب ومادة الاختبار.</p>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">الصف (على الورقة)</label>
+                            <input
+                              type="text"
+                              dir="rtl"
+                              value={printHeaderClass}
+                              onChange={(e) => setPrintHeaderClass(e.target.value)}
+                              placeholder="مثلاً: الثاني المتوسط — أو اتركه لبيانات الطالب"
+                              className="w-full px-6 py-4 bg-white border-2 border-transparent rounded-[1.75rem] outline-none focus:border-indigo-100 focus:ring-4 focus:ring-indigo-50 font-bold text-slate-800 text-right shadow-sm transition-all text-sm"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">اسم المادة (على الورقة)</label>
+                            <input
+                              type="text"
+                              dir="rtl"
+                              value={printHeaderSubject}
+                              onChange={(e) => setPrintHeaderSubject(e.target.value)}
+                              placeholder="يُحمّل من الاختبار — يمكنك تعديله هنا للطباعة"
+                              className="w-full px-6 py-4 bg-white border-2 border-transparent rounded-[1.75rem] outline-none focus:border-indigo-100 focus:ring-4 focus:ring-indigo-50 font-bold text-slate-800 text-right shadow-sm transition-all text-sm"
+                            />
+                          </div>
+                        </div>
                       </div>
                    </div>
 
@@ -1619,7 +3127,142 @@ const OMRExams = () => {
                          </div>
                       </div>
                    </div>
+
+                   <div className="luxury-card p-6 md:p-8 bg-gradient-to-l from-indigo-50/90 to-white border border-indigo-100/80 shadow-sm">
+                     <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
+                       <label className="flex items-start gap-3 cursor-pointer text-right flex-1 min-w-0">
+                         <input
+                           type="checkbox"
+                           checked={printCoverWithBulk}
+                           onChange={(e) => setPrintCoverWithBulk(e.target.checked)}
+                           className="mt-1 w-5 h-5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 shrink-0"
+                         />
+                         <span>
+                           <span className="font-black text-slate-800 text-sm block">طباعة ورقة تعريف بعد تنزيل ملف الأوراق</span>
+                           <span className="text-[11px] font-bold text-slate-500 leading-relaxed mt-1 block">
+                             ورقة A4 فيها المادة واسم الفصل (من بيانات الاختبار، أو من فلتر «فصل» أعلاه). تُفتح الطباعة تلقائياً بعد اكتمال التحميل.
+                           </span>
+                         </span>
+                       </label>
+                       <button
+                         type="button"
+                         onClick={() =>
+                           selectedBulkExam &&
+                           printExamCoverSheet(selectedBulkExam, {
+                             selectedClassroom: selectedClass,
+                             examDateLine: `${examDay} — ${examDate}`,
+                             subjectOverride: (printHeaderSubject || '').trim() || undefined,
+                             gradeLabelOverride: (printHeaderClass || '').trim() || undefined,
+                           })
+                         }
+                         className="shrink-0 px-5 py-3.5 rounded-2xl border-2 border-indigo-200 bg-white text-indigo-700 font-black text-[10px] hover:bg-indigo-50 transition-all flex items-center justify-center gap-2 whitespace-nowrap"
+                       >
+                         <ScrollText size={17} />
+                         طباعة ورقة التعريف الآن (منفصلة)
+                       </button>
+                     </div>
+                   </div>
+
                    <div className="space-y-6">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-2">
+                        <h4 className="text-xl font-black text-slate-800">من تُطبَع الأوراق؟</h4>
+                        <div className="flex bg-white p-1 rounded-xl shadow-sm border border-slate-100 w-full sm:w-auto">
+                          <button
+                            type="button"
+                            onClick={() => switchBulkPrintMode('students')}
+                            className={`flex-1 sm:flex-none px-5 py-2.5 rounded-lg text-xs font-black transition-all ${
+                              bulkPrintMode === 'students'
+                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100'
+                                : 'text-slate-400 hover:bg-slate-50'
+                            }`}
+                          >
+                            حسب الطلاب
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => switchBulkPrintMode('committees')}
+                            className={`flex-1 sm:flex-none px-5 py-2.5 rounded-lg text-xs font-black transition-all flex items-center justify-center gap-2 ${
+                              bulkPrintMode === 'committees'
+                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100'
+                                : 'text-slate-400 hover:bg-slate-50'
+                            }`}
+                          >
+                            <Layers size={14} />
+                            حسب اللجنة
+                          </button>
+                        </div>
+                      </div>
+
+                      {bulkPrintMode === 'committees' ? (
+                        <div className="space-y-4">
+                          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-2">
+                            <div className="text-right">
+                              <h4 className="text-lg font-black text-slate-800">
+                                اختيار اللجان ({selectedCommitteeIds.size})
+                              </h4>
+                              <p className="text-xs font-bold text-slate-400 mt-1 leading-relaxed">
+                                يُنزَّل ملف PDF منفصل لكل لجنة مع رقم اللجنة ورقم الجلوس على الورقة.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={toggleAllCommittees}
+                              disabled={examCommittees.length === 0}
+                              className="px-6 py-2 bg-slate-100 text-slate-500 rounded-xl text-xs font-black hover:bg-slate-200 transition-all w-full sm:w-auto disabled:opacity-40"
+                            >
+                              {allCommitteesSel ? 'إلغاء الكل' : 'تحديد كل اللجان'}
+                            </button>
+                          </div>
+                          {examCommittees.length === 0 ? (
+                            <div className="p-8 bg-amber-50 border border-amber-100 rounded-2xl text-right">
+                              <p className="font-black text-amber-800 text-sm">لا توجد لجان مطابقة لهذا الاختبار.</p>
+                              <p className="text-xs font-bold text-amber-600 mt-2 leading-relaxed">
+                                تأكد من توزيع الطلاب على اللجان وأرقام الهوية في سجل الطلاب.
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                              {examCommittees.map((c) => (
+                                <div
+                                  key={c.id}
+                                  onClick={() => toggleCommittee(c.id)}
+                                  className={`p-6 rounded-[2.5rem] border-2 cursor-pointer transition-all flex items-center justify-between group ${
+                                    selectedCommitteeIds.has(c.id)
+                                      ? 'bg-indigo-50 border-indigo-300 shadow-lg scale-[1.02]'
+                                      : 'bg-white border-slate-50 hover:border-slate-100'
+                                  }`}
+                                >
+                                  <div className="text-right min-w-0">
+                                    <span className="font-black text-slate-800 group-hover:text-indigo-700 transition-colors block">
+                                      لجنة {committeeNumberOnly(c)}
+                                    </span>
+                                    <span className="text-[10px] text-slate-400 font-bold block mt-1 truncate">
+                                      {committeeLabelWithStage(c)}
+                                    </span>
+                                    <span className="text-[10px] text-indigo-500 font-black block mt-1">
+                                      {committeePrintableCount(c)} طالب
+                                    </span>
+                                  </div>
+                                  <div
+                                    className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all shrink-0 ${
+                                      selectedCommitteeIds.has(c.id)
+                                        ? 'bg-indigo-600 text-white'
+                                        : 'bg-slate-50 text-slate-200'
+                                    }`}
+                                  >
+                                    {selectedCommitteeIds.has(c.id) ? (
+                                      <Check size={20} strokeWidth={4} />
+                                    ) : (
+                                      <div className="w-2 h-2 rounded-full bg-slate-200" />
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                      <>
                       <div className="flex flex-col gap-4 px-2">
                         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                           <h4 className="text-xl font-black text-slate-800">اختيار الطلاب ({selectedStudentIds.size})</h4>
@@ -1675,6 +3318,8 @@ const OMRExams = () => {
                           </div>
                         ))}
                       </div>
+                      </>
+                      )}
                    </div>
                 </div>
                  <div className="p-8 border-t border-slate-50 bg-slate-50/50 flex flex-col gap-4">
@@ -1687,7 +3332,11 @@ const OMRExams = () => {
                           </div>
                           <div>
                             <p className="font-black text-emerald-700 text-sm">{'\u062a\u0645\u062a \u0627\u0644\u0637\u0628\u0627\u0639\u0629 \u0628\u0646\u062c\u0627\u062d \u2714'}</p>
-                            <p className="text-[10px] text-emerald-500 font-bold">{printProgress.total || selectedStudentIds.size} {'\u0648\u0631\u0642\u0629'}</p>
+                            <p className="text-[10px] text-emerald-500 font-bold">
+                              {bulkPrintMode === 'committees'
+                                ? `${committeeBulkProgress.committeeTotal || selectedCommitteeIds.size} \u0644\u062c\u0646\u0629`
+                                : `${printProgress.total || selectedStudentIds.size} \u0648\u0631\u0642\u0629`}
+                            </p>
                           </div>
                         </div>
                         <div className="text-right">
@@ -1698,6 +3347,14 @@ const OMRExams = () => {
                     )}
                     {isGenerating ? (
                       <div className="flex flex-col gap-4 w-full animate-in fade-in duration-300">
+                        {bulkPrintMode === 'committees' && committeeBulkProgress.committeeTotal > 0 && (
+                          <p className="text-sm font-black text-indigo-900 text-right px-1">
+                            لجنة {committeeBulkProgress.committeeIndex} / {committeeBulkProgress.committeeTotal}
+                            {committeeBulkProgress.committeeLabel
+                              ? ` — ${committeeBulkProgress.committeeLabel}`
+                              : ''}
+                          </p>
+                        )}
                         {/* Top row: spinner + label + timer */}
                         <div className="flex items-center justify-between px-1">
                           <div className="flex items-center gap-3">
@@ -1740,9 +3397,27 @@ const OMRExams = () => {
                     ) : (
                       <div className="flex gap-4">
                         <button onClick={() => setShowBulkModal(false)} className="px-10 py-5 bg-white text-slate-400 rounded-2xl font-black hover:bg-slate-50 transition-all border border-slate-100">{'\u0625\u0644\u063a\u0627\u0621'}</button>
-                        <button onClick={handleBulkPrint} disabled={selectedStudentIds.size === 0} className="flex-1 py-5 bg-indigo-600 text-white rounded-2xl font-black hover:bg-indigo-700 shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-40 disabled:cursor-not-allowed">
-                          <Printer size={22} /> {'\u0628\u062f\u0621 \u0627\u0644\u0637\u0628\u0627\u0639\u0629'} ({selectedStudentIds.size})
+                        {bulkPrintMode === 'committees' ? (
+                          <button
+                            onClick={handleCommitteeBulkPrint}
+                            disabled={selectedCommitteeIds.size === 0}
+                            className="flex-1 py-5 bg-indigo-600 text-white rounded-2xl font-black hover:bg-indigo-700 shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <Printer size={22} /> {'\u062a\u0646\u0632\u064a\u0644'} ({selectedCommitteeIds.size} {'\u0644\u062c\u0646\u0629'})
+                          </button>
+                        ) : (
+                        <button
+                          onClick={handleBulkPrint}
+                          disabled={isWataniaTemplate(selectedTemplate) ? !(parseInt(wataniaBlankCopies, 10) >= 1 || selectedStudentIds.size > 0) : selectedStudentIds.size === 0}
+                          className="flex-1 py-5 bg-indigo-600 text-white rounded-2xl font-black hover:bg-indigo-700 shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <Printer size={22} /> {'\u0628\u062f\u0621 \u0627\u0644\u0637\u0628\u0627\u0639\u0629'} ({
+                            isWataniaTemplate(selectedTemplate) && selectedStudentIds.size === 0
+                              ? (parseInt(wataniaBlankCopies, 10) || 0)
+                              : selectedStudentIds.size
+                          })
                         </button>
+                        )}
                       </div>
                     )}
                  </div>
@@ -1819,6 +3494,32 @@ const OMRExams = () => {
                          </div>
                       </div>
 
+                      <div className="space-y-3">
+                        <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">قالب ورقة الإجابة</label>
+                        <select
+                          value={newExam.template}
+                          onChange={(e) => {
+                            const tpl = e.target.value;
+                            setNewExam({
+                              ...newExam,
+                              template: tpl,
+                              qCount: isWataniaTemplate(tpl) ? 30 : newExam.qCount,
+                              subject: isWataniaTemplate(tpl) ? '' : newExam.subject,
+                            });
+                          }}
+                          className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] outline-none focus:bg-white focus:ring-4 focus:ring-indigo-100 transition-all font-black text-slate-700 text-right shadow-sm"
+                        >
+                          {templateOptionsByStage(newExam.stage, customTemplates).map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                        {isWataniaTemplate(newExam.template) && (
+                          <p className="text-[11px] font-bold text-emerald-700 px-1 leading-relaxed">
+                            الورقة مطابقة لنموذج الوزارة: بدون مادة، بدون QR، وبدون أي بيانات مطبوعة. الطالب يعبّئ الاسم ورقم السجل المدني يدوياً.
+                          </p>
+                        )}
+                      </div>
+
                       <div className="grid grid-cols-2 gap-8">
                          <div className="space-y-3">
                             <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">الفصل (Class / Room)</label>
@@ -1841,6 +3542,7 @@ const OMRExams = () => {
                          </div>
                       </div>
 
+                      {!isWataniaTemplate(newExam.template) && (
                       <div className="grid grid-cols-2 gap-8">
                         <div className="space-y-3">
                            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">المادة الدراسية</label>
@@ -1861,6 +3563,7 @@ const OMRExams = () => {
                            />
                         </div>
                       </div>
+                      )}
                     </div>
                 </div>
                 <div className="p-10 pt-6 border-t border-slate-50 flex gap-4 bg-slate-50/50">
@@ -1870,6 +3573,18 @@ const OMRExams = () => {
               </div>
             </div>
           )}
+
+          <BulkGradeExamsModal
+            open={isBulkAdding}
+            onClose={() => setIsBulkAdding(false)}
+            stages={STAGES}
+            subjects={subjects}
+            templateOptions={templateOptionsByStage('', customTemplates).filter((o) => !isWataniaTemplate(o.value))}
+            isLevelMatch={isLevelMatch}
+            hasExistingExam={hasExistingExam}
+            examSchedule={examSchedule}
+            onSave={handleBulkAddExams}
+          />
 
           {editingExam && (
             <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in">
@@ -1914,6 +3629,22 @@ const OMRExams = () => {
                        <RefreshCw size={16} /> توحيد الدرجات (1)
                     </button>
                     <div className="flex-1"></div>
+                    <button
+                      type="button"
+                      onClick={() => printExamAnswerKeySheet(editingExam)}
+                      className="px-6 py-4 bg-purple-100 text-purple-800 rounded-2xl font-black border border-purple-200 shadow-sm transition-all hover:bg-purple-200 flex items-center gap-2"
+                    >
+                      <Printer size={16} /> طباعة النموذج
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!editingExam || regradingExamId === editingExam.id}
+                      onClick={() => handleRegradeApproved(editingExam)}
+                      className="px-6 py-4 bg-emerald-600 text-white rounded-2xl font-black hover:bg-emerald-700 shadow-lg transition-all flex items-center gap-2 disabled:opacity-50"
+                    >
+                      {regradingExamId === editingExam?.id ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                      إعادة تصحيح المعتمدة
+                    </button>
                     <button onClick={() => setEditingExam(null)} className="px-8 py-4 bg-white text-slate-400 rounded-2xl font-black border border-slate-100 shadow-sm transition-all hover:bg-slate-50">تجاهل</button>
                     <button onClick={saveKeys} className="px-10 py-4 bg-purple-600 text-white rounded-2xl font-black hover:bg-purple-700 shadow-xl transition-all">حفظ مفتاح الإجابة</button>
                   </div>
@@ -1924,10 +3655,44 @@ const OMRExams = () => {
           {showCustomEditor && (
             <div className="fixed inset-0 z-[140] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in">
                <div className="bg-white w-full max-w-3xl rounded-[3.5rem] shadow-2xl flex flex-col max-h-[92vh] animate-in zoom-in-95 border-none text-right overflow-hidden">
-                  <div className="p-10 pb-8 bg-indigo-600 text-white flex justify-between items-center"><div className="flex items-center gap-6"><div className="w-16 h-16 bg-white/20 rounded-2.5xl flex items-center justify-center backdrop-blur-sm border border-white/30"><Layout size={32} /></div><div><h3 className="text-3xl font-black font-header tracking-tight">تخصيص قالب الورقة</h3><p className="text-indigo-100 text-sm font-bold mt-1">تعديل النصوص والشعار والمظهر العام</p></div></div><button onClick={() => setShowCustomEditor(false)} className="p-4 bg-white/20 text-white hover:bg-white/40 rounded-2.5xl transition-all"><X size={24} /></button></div>
+                  <div className="p-10 pb-8 bg-indigo-600 text-white flex justify-between items-center"><div className="flex items-center gap-6"><div className="w-16 h-16 bg-white/20 rounded-2.5xl flex items-center justify-center backdrop-blur-sm border border-white/30"><Layout size={32} /></div><div><h3 className="text-3xl font-black font-header tracking-tight">تخصيص قالب الورقة</h3><p className="text-indigo-100 text-sm font-bold mt-1">تعديل النصوص والشعار والحقول الظاهرة</p></div></div><button onClick={() => setShowCustomEditor(false)} className="p-4 bg-white/20 text-white hover:bg-white/40 rounded-2.5xl transition-all"><X size={24} /></button></div>
                   <div className="flex-1 overflow-y-auto p-12 custom-scrollbar space-y-8">
                      <div className="space-y-6"><label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-2">شعار المدرسة</label><div className="flex items-center gap-8 bg-slate-50 p-8 rounded-[2.5rem] border border-slate-100"><div className="w-32 h-32 bg-white rounded-3xl shadow-sm border border-slate-100 flex items-center justify-center overflow-hidden relative group">{customConfig.logoDataUrl ? <img src={customConfig.logoDataUrl} className="w-full h-full object-contain p-2" /> : <ImageIcon className="text-slate-200" size={48} />}<input type="file" onChange={e => handleCustomLogoChange(e.target.files[0])} className="absolute inset-0 opacity-0 cursor-pointer" /></div><div className="flex-1 space-y-4"><p className="text-sm font-bold text-slate-500">اضغط لرفع شعار بصيغة PNG أو JPG</p>{customConfig.logoDataUrl && <button onClick={() => setCustomConfig({...customConfig, logoDataUrl: ''})} className="text-rose-500 font-black text-xs hover:underline">إزالة الشعار</button>}</div></div></div>
                      <div className="grid grid-cols-1 gap-6">{[{ key: 'school_name', label: 'اسم المدرسة / الإدارة' }, { key: 'exam_name', label: 'عنوان الاختبار أو المجمع' }, { key: 'year', label: 'العام الدراسي والترم' }, { key: 'principal', label: 'اسم المدير أو المراقب' }, { key: 'footer', label: 'تذييل الورقة (Footer)' }].map(f => (<div key={f.key} className="space-y-3"><label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-2">{f.label}</label><input type="text" value={customConfig[f.key]} onChange={e => setCustomConfig({...customConfig, [f.key]: e.target.value})} className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] font-black text-slate-700 text-right outline-none focus:bg-white transition-all shadow-sm" /></div>))}</div>
+                     <div className="space-y-4 pt-6 mt-6 border-t border-slate-100">
+                       <div className="px-2">
+                         <label className="text-[11px] font-black text-slate-500 uppercase tracking-widest block">الحقول الظاهرة على ورقة الإجابة</label>
+                         <p className="text-[11px] font-bold text-slate-400 leading-relaxed mt-1">حدّد ما يُطبع في رأس الورقة. الحقول المخفية تُحذف بالكامل (مثل رقم الجلوس أو رقم اللجنة).</p>
+                       </div>
+                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                         {CUSTOM_HEADER_FIELD_TOGGLES.map((field) => {
+                           const on = customConfig[field.key] !== false;
+                           return (
+                             <button
+                               key={field.key}
+                               type="button"
+                               onClick={() => setCustomConfig({ ...customConfig, [field.key]: !on })}
+                               className={`flex items-center justify-between gap-3 px-5 py-4 rounded-[1.5rem] border transition-all text-right ${
+                                 on
+                                   ? 'bg-indigo-50 border-indigo-100 text-indigo-800'
+                                   : 'bg-slate-50 border-slate-100 text-slate-400'
+                               }`}
+                             >
+                               <span className="font-black text-sm">{field.label}</span>
+                               {on ? <CheckSquare size={18} className="shrink-0" /> : <Square size={18} className="shrink-0" />}
+                             </button>
+                           );
+                         })}
+                       </div>
+                     </div>
+                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6 mt-2 border-t border-slate-100">
+                       <div className="space-y-2 md:col-span-2 px-2">
+                         <label className="text-[11px] font-black text-slate-500 uppercase tracking-widest block">نص الصف والمادة على الورقة</label>
+                         <p className="text-[11px] font-bold text-slate-400 leading-relaxed">يُستخدم إن كانت خانة الصف أو المادة مفعّلة أعلاه. يُحفظ مع القالب ويمكن تعديله عند كل طباعة.</p>
+                       </div>
+                       <div className="space-y-3"><label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-2">الصف (في خانة الصف على الورقة)</label><input type="text" dir="rtl" placeholder="اختياري — فاضٍ للاعتماد على تقدير كل طالب" value={customConfig.header_class_text ?? ''} onChange={(e) => setCustomConfig({ ...customConfig, header_class_text: e.target.value })} disabled={customConfig.show_class_row === false} className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] font-black text-slate-700 text-right outline-none focus:bg-white transition-all shadow-sm disabled:opacity-40" /></div>
+                       <div className="space-y-3"><label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-2">اسم المادة (في خانة المادة على الورقة)</label><input type="text" dir="rtl" placeholder="اختياري — فاضٍ للاعتماد على اسم مادة الاختبار" value={customConfig.header_subject_text ?? ''} onChange={(e) => setCustomConfig({ ...customConfig, header_subject_text: e.target.value })} disabled={customConfig.show_subject_row === false} className="w-full px-8 py-5 bg-slate-50 border-none rounded-[2rem] font-black text-slate-700 text-right outline-none focus:bg-white transition-all shadow-sm disabled:opacity-40" /></div>
+                     </div>
                   </div>
                   <div className="p-10 border-t border-slate-50 bg-slate-50/50 space-y-4">
                     <div className="flex items-center gap-4">

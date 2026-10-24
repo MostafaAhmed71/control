@@ -5,7 +5,25 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  globalIgnores([
+    'scripts/write-omr-grading.cjs',
+    'dist',
+    'dist-electron',
+    'out',
+    'release',
+    'node_modules',
+    'omr_engine',
+    'wppconnect-master',
+    'student-portal-standalone/dist',
+    'debug_scans',
+    'RENAME/**',
+  ]),
+  {
+    files: ['src/main/**/*.js', 'scripts/**/*.cjs', 'pm2-vite-server.js', 'ecosystem.config.cjs'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
   {
     files: ['**/*.{js,jsx}'],
     extends: [

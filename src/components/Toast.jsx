@@ -27,7 +27,7 @@ const ToastItem = ({ toast, onRemove }) => {
       className={`flex items-start gap-4 p-4 pr-5 rounded-2xl border shadow-xl shadow-black/5 backdrop-blur-sm
         ${config.bg} ${config.border}
         animate-in slide-in-from-right-10 fade-in duration-300`}
-      style={{ minWidth: 300, maxWidth: 420 }}
+      style={{ minWidth: 0, width: 'min(100vw - 2rem, 420px)' }}
     >
       {/* Left color bar */}
       <div className={`absolute left-0 top-0 bottom-0 w-1 rounded-r-full ${config.bar}`} style={{ position: 'absolute' }} />

@@ -43,6 +43,7 @@ omr_engine/test_output.pdf
 *.pdf
 *.jpg
 *.jpeg
+!omr_engine/templates/moe_logo.png
 builder.log
 builder-final.log
 vite-build.log

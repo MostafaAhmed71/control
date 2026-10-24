@@ -7,6 +7,12 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 from omr_constants import *
 from font_utils import truetype, has_raqm
+from sheet_helpers import (
+    option_labels_for_subject,
+    draw_student_info_rows,
+    draw_footer_with_manual_name,
+    fit_question_row_spacing,
+)
 
 def ar(text):
     if not text: return ""
@@ -133,63 +139,9 @@ def draw_header(img, draw, student_info):
         img.paste(llogo, (lx, ly), llogo)
     except: pass
 
-    # ── Student info rows (below header box) ──────────────────────────────────
-    start_y = HEADER_START_Y
-    row_h   = HEADER_ROW_H
-    w       = HEADER_WIDTH
-    x       = MARGIN
-    P       = 40
-
-    def rt(label, box_right, y_top, font=FONT_LABEL):
-        t  = ar(label)
-        tw = _tl(draw, t, font=font)
-        ty = y_top + (row_h - 60) // 2
-        _dt(draw, (box_right - tw - P, ty), t, fill=BLACK, font=font)
-        return box_right - tw - P * 2     # left edge for value
-
-    mid_x = x + w // 2
-
-    # Row 1: name
-    draw.rectangle([x, start_y, x + w, start_y + row_h], outline=BLACK, width=3)
-    ll = rt(S_NAME_LBL, x + w, start_y)
-    nv = ar(student_info.get("name", ""))
-    _dt(draw, (ll - _tl(draw, nv, font=FONT_LG) - P,
-               start_y + (row_h - 65) // 2), nv, fill=BLACK, font=FONT_LG)
-
-    # Row 2: class | subject (matches HEADER_ROW_H × 4 layout in omr_constants)
-    draw.rectangle([mid_x, start_y + row_h, x + w, start_y + 2 * row_h], outline=BLACK, width=3)
-    ll2 = rt(S_CLASS_LBL, x + w, start_y + row_h, font=FONT_SM)
-    cv  = ar(student_info.get("class", ""))
-    _dt(draw, (ll2 - _tl(draw, cv, font=FONT_SM) - P,
-               start_y + row_h + (row_h - 45) // 2), cv, fill=BLACK, font=FONT_SM)
-
-    draw.rectangle([x, start_y + row_h, mid_x, start_y + 2 * row_h], outline=BLACK, width=3)
-    ll3 = rt(S_SUBJ_LBL, mid_x, start_y + row_h, font=FONT_SM)
-    sv  = ar(student_info.get("subject", ""))
-    _dt(draw, (ll3 - _tl(draw, sv, font=FONT_SM) - P,
-               start_y + row_h + (row_h - 45) // 2), sv, fill=BLACK, font=FONT_SM)
-
-    # Row 3: date
-    draw.rectangle([x, start_y + 2 * row_h, x + w, start_y + 3 * row_h], outline=BLACK, width=3)
-    lld = rt("التاريخ:", x + w, start_y + 2 * row_h)
-
-    day, month, year = fmt_date_parts(student_info.get("date", ""))
-    if year:
-        date_str_full = f"{day} - {month} - {year}"
-        dv = ar(date_str_full)
-        _dt(draw, (lld - _tl(draw, dv, font=FONT_LG) - P,
-                   start_y + 2 * row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
-    else:
-        dv = ar(day)
-        _dt(draw, (lld - _tl(draw, dv, font=FONT_LG) - P,
-                   start_y + 2 * row_h + (row_h - 65) // 2), dv, fill=BLACK, font=FONT_LG)
-
-    # Row 4: day
-    draw.rectangle([x, start_y + 3 * row_h, x + w, start_y + 4 * row_h], outline=BLACK, width=3)
-    lly = rt("اليوم:", x + w, start_y + 3 * row_h)
-    dy_val  = ar(student_info.get("day", ""))
-    _dt(draw, (lly - _tl(draw, dy_val, font=FONT_LG) - P,
-               start_y + 3 * row_h + (row_h - 65) // 2), dy_val, fill=BLACK, font=FONT_LG)
+    draw_student_info_rows(
+        draw, student_info, fmt_date_parts, ar, _tl, _dt, FONT_LG, FONT_SM
+    )
 
 
 def build_qr_payload(student_info, num_questions=30, template="nafs"):
@@ -198,6 +150,9 @@ def build_qr_payload(student_info, num_questions=30, template="nafs"):
         "nq": int(num_questions),
         "tpl": str(template),
     }
+    exam_id = str(student_info.get("exam_id") or "").strip()
+    if exam_id:
+        payload["ex"] = exam_id
     import json
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -207,11 +162,11 @@ def draw_qr_code(img, qr_payload):
     qr.add_data(qr_payload)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    qr_img = qr_img.resize((QR_SIZE, QR_SIZE))
+    qr_img = qr_img.resize((QR_SIZE, QR_SIZE), Image.NEAREST)
     img.paste(qr_img, (QR_X, QR_Y))
 
 
-def draw_questions_section(draw, start_y, num_questions=30):
+def draw_questions_section(draw, start_y, num_questions=30, subject=""):
     """RTL layout: first half on the RIGHT column, second half on the LEFT column.
     Within each column, question number is rightmost; bubbles أبجد go left.
     num_questions controls how many rows are drawn (e.g. 20 or 30)."""
@@ -224,7 +179,8 @@ def draw_questions_section(draw, start_y, num_questions=30):
     # LEFT column (Q11-20): starts at MARGIN
     l_col_x   = MARGIN
 
-    opt_labels_ar = [ar(o) for o in OPT_LABELS]
+    opt_labels = option_labels_for_subject(subject)
+    opt_labels_ar = [o if o in "ABCD" else ar(o) for o in opt_labels]
     header_y      = start_y - 100
     NUM_AREA      = 120    # pixels reserved for question number
     BUB_SPAN      = 4 * QS_OPT_SPACING   # total bubble row width
@@ -238,6 +194,7 @@ def draw_questions_section(draw, start_y, num_questions=30):
             tw = int(_tl(draw, t, font=FONT_SM))
             _dt(draw, (int(ox) - tw // 2, header_y), t, fill=BLACK, font=FONT_SM)
 
+    row_spacing = fit_question_row_spacing(num_questions, start_y, QS_ROW_SPACING)
     per_col = (num_questions + 1) // 2   # questions per column (ceiling division)
     for q in range(num_questions):
         if q < per_col:
@@ -249,7 +206,7 @@ def draw_questions_section(draw, start_y, num_questions=30):
             row   = q - per_col
             q_num = q + 1
 
-        y         = start_y + row * QS_ROW_SPACING
+        y         = start_y + row * row_spacing
         num_right = col_x + col_w - 10
         bub_right = num_right - NUM_AREA
 
@@ -274,18 +231,16 @@ def generate_personalized_sheet(student_info, filename=None):
     num_q = student_info.get("num_questions", 30)
     qr_payload = build_qr_payload(student_info, num_questions=num_q, template="nafs")
     draw_qr_code(img, qr_payload)
-    draw_questions_section(draw, QS_START_Y, num_questions=student_info.get("num_questions", 30))
+    draw_questions_section(
+        draw,
+        QS_START_Y,
+        num_questions=student_info.get("num_questions", 30),
+        subject=student_info.get("subject", ""),
+    )
 
-    # ── Footer ────────────────────────────────────────────────────────────────
-    fy_top = HEIGHT - MARGIN - 160
-    fy_bot = HEIGHT - MARGIN - 40
-
-    pt  = ar(S_PRINCIPAL)
-    _dt(draw, (MARGIN + 40, fy_top), pt, fill=BLACK, font=FONT_MD)
-
-    st  = ar(S_FOOTER)
-    stw = _tl(draw, st, font=FONT_MD)
-    _dt(draw, ((WIDTH - stw) // 2, fy_bot), st, fill=BLACK, font=FONT_MD)
+    draw_footer_with_manual_name(
+        draw, S_PRINCIPAL, S_FOOTER, ar, _tl, _dt, FONT_MD
+    )
 
     if filename:
         img.save(filename)
