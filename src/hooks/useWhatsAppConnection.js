@@ -31,6 +31,7 @@ export function useWhatsAppConnection() {
             const data = await res.json();
             setStatus(data);
             setLastUpdated(new Date());
+            return true;
         } catch {
             clearTimeout(timeoutId);
             setStatus((prev) =>
@@ -38,14 +39,28 @@ export function useWhatsAppConnection() {
                     ? prev
                     : { status: 'server_down', qr: '', pairingCode: '', connected: false }
             );
+            return false;
         }
     }, [apiBase]);
 
     useEffect(() => {
         if (!apiBase) return;
-        checkStatus();
-        const interval = setInterval(checkStatus, 5000);
-        return () => clearInterval(interval);
+        let cancelled = false;
+        let timer = null;
+        let delay = 5000;
+
+        const tick = async () => {
+            const ok = await checkStatus();
+            if (cancelled) return;
+            delay = ok ? 5000 : Math.min(delay * 2, 60000);
+            timer = setTimeout(tick, delay);
+        };
+
+        tick();
+        return () => {
+            cancelled = true;
+            if (timer) clearTimeout(timer);
+        };
     }, [apiBase, checkStatus]);
 
     const disconnectWhatsApp = async (endpoint = '/logout') => {

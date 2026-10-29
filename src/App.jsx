@@ -175,7 +175,7 @@ const Dashboard = ({ activeSystem }) => {
           </div>
           <div>
             <p className="font-black text-rose-800 font-header">تعذّر الاتصال بقاعدة البيانات</p>
-            <p className="text-rose-600 text-sm font-bold mt-1">تأكد من اتصالك بالإنترنت وأن خدمة Supabase تعمل بشكل صحيح.</p>
+            <p className="text-rose-600 text-sm font-bold mt-1">إذا كنت تستخدم القاعدة المحلية فشغّل محرك OMR على المنفذ 8000. للسحابة تأكد أن Supabase لم تتجاوز حصتها.</p>
           </div>
         </div>
       )}
@@ -363,6 +363,14 @@ function App() {
           <Routes>
             <Route path="/portal/*" element={<StudentPortal />} />
             <Route path="/teacher-lookup" element={<TeacherSeatLookup />} />
+            <Route
+              path="/certificates"
+              element={
+                <div className="min-h-screen bg-slate-50 p-3 sm:p-6 lg:p-8" dir="rtl">
+                  <StudentNotifier standalone />
+                </div>
+              }
+            />
             <Route path="/*" element={
               <AdminLayout
                 activeSystem={activeSystem}

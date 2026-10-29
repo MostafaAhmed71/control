@@ -13,5 +13,9 @@ export async function exportUsingGradeTemplate(results, absent, { grade, subject
   if (matches.length !== 1) throw new Error('يوجد أكثر من قالب مطابق للمادة والصف.');
   const response = await fetch(matches[0].url);
   if (!response.ok) throw new Error('تعذر تحميل قالب المادة.');
-  return fillGradeTemplate(await response.arrayBuffer(), results, absent);
+  try {
+    return await fillGradeTemplate(await response.arrayBuffer(), results, absent);
+  } catch (error) {
+    throw new Error(`المادة: ${subject}\nالصف: ${grade}\n${error.message}`);
+  }
 }

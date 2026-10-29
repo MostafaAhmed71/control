@@ -8,6 +8,7 @@ import generator_elite
 import generator_nafs
 import generator_custom
 import generator_watania
+import local_api
 import os
 import json
 import subprocess
@@ -54,6 +55,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(local_api.router)
 
 class Student(BaseModel):
     id: str
@@ -709,7 +711,8 @@ Write-Output ($count.ToString() + "|" + ($names -join ","))
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("OMR_PORT", "8000"))
+    uvicorn.run("main:app", host="127.0.0.1", port=port, reload=True)
 
 # trigger reload
 

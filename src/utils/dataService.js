@@ -51,13 +51,148 @@ export const WHATSAPP_API_BASE = (import.meta.env.VITE_WHATSAPP_API_BASE || defa
     ''
 );
 
+const DATA_BACKEND_KEY = 'elite_data_backend';
+
+/** hybrid = مكتب محلي + سحابة خفيفة للبوابة والمعلمين. local = جهاز فقط. supabase = سحابة كاملة */
+export const getDataBackend = () => {
+    try {
+        const stored = localStorage.getItem(DATA_BACKEND_KEY);
+        if (stored === 'local' || stored === 'supabase' || stored === 'hybrid') return stored;
+    } catch { /* ignore */ }
+    const env = String(import.meta.env.VITE_DATA_BACKEND || 'hybrid').toLowerCase();
+    if (env === 'local' || env === 'supabase') return env;
+    return 'hybrid';
+};
+
+export const setDataBackend = (mode) => {
+    const next = mode === 'supabase' || mode === 'local' ? mode : 'hybrid';
+    try { localStorage.setItem(DATA_BACKEND_KEY, next); } catch { /* ignore */ }
+    return next;
+};
+
+const usesLocalStore = () => {
+    const b = getDataBackend();
+    return b === 'local' || b === 'hybrid';
+};
+
+const usesCloudSync = () => {
+    const b = getDataBackend();
+    return b === 'hybrid' || b === 'supabase';
+};
+
+const localApi = (path) => `${OMR_API_BASE}${path}`;
+
+const localRequest = async (path, opts = {}) => {
+    const res = await fetch(localApi(path), opts);
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        const msg = err.detail || err.message || res.statusText;
+        _setConnected(false);
+        throw new SupabaseError('local', opts.method || 'GET', String(msg));
+    }
+    _setConnected(true);
+    if (res.status === 204) return null;
+    const ct = res.headers.get('content-type') || '';
+    return ct.includes('json') ? res.json() : res;
+};
+
+const hydrateLocalRow = (row) => {
+    if (!row || typeof row !== 'object') return row;
+    if (row.hasSheetImage && !String(row.systemViewImage || '').startsWith('data:')) {
+        return {
+            ...row,
+            systemViewImage: `${OMR_API_BASE}/store/sheets/${encodeURIComponent(row.id)}`,
+        };
+    }
+    return row;
+};
+
+export const getLocalStoreStatus = () => localRequest('/store/status');
+
+export const importLocalDump = async (file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return localRequest('/store/import', { method: 'POST', body: fd });
+};
+
+const CLOUD_IMAGE_KEYS = [
+    'reviewRois',
+    'systemViewImage',
+    'systemViewImageThumb',
+    'sheetImage',
+    'scanImage',
+    'originalImage',
+    'hasSheetImage',
+    'systemViewImagePath',
+];
+
+const slimForCloud = (tableName, item) => {
+    const payload = toJsonbPayload(item);
+    if (tableName === 'omr_results') {
+        for (const key of CLOUD_IMAGE_KEYS) delete payload[key];
+    }
+    return payload;
+};
+
+const upsertCloudRow = async (tableName, item) => {
+    if (!supabase) throw new SupabaseError(tableName, 'cloud-sync', 'مفاتيح السحابة غير موجودة');
+    const rowId = String(item.id);
+    const { error } = await supabase
+        .from(tableName)
+        .upsert({ id: rowId, data: slimForCloud(tableName, item) });
+    if (error) throw new SupabaseError(tableName, 'cloud-sync', error.message);
+};
+
+const syncLocalSaveToCloud = async (tableName, item) => {
+    if (getDataBackend() !== 'hybrid' || !supabase) return;
+    try {
+        await upsertCloudRow(tableName, item);
+    } catch (e) {
+        console.warn(`[hybrid] تعذّر نشر ${tableName}/${item?.id} للسحابة:`, e?.message || e);
+    }
+};
+
+const syncLocalListToCloud = async (tableName, items, onProgress) => {
+    if (getDataBackend() !== 'hybrid' || !supabase) return;
+    const list = Array.isArray(items) ? items : [];
+    const CHUNK = 80;
+    for (let i = 0; i < list.length; i += CHUNK) {
+        const chunk = list.slice(i, i + CHUNK);
+        const rows = chunk.map((item) => ({
+            id: String(item.id),
+            data: slimForCloud(tableName, item),
+        }));
+        const { error } = await supabase.from(tableName).upsert(rows);
+        if (error) {
+            console.warn(`[hybrid] تعذّر نشر دفعة ${tableName}:`, error.message);
+        }
+        if (onProgress) {
+            await onProgress({
+                current: Math.min(i + chunk.length, list.length),
+                total: list.length,
+            });
+        }
+    }
+};
+
+const BROKEN_WHATSAPP_BASES = new Set([
+    'https://wpp.northelite0.com',
+    'http://wpp.northelite0.com',
+]);
+
+const normalizeWhatsAppApiBase = (value) => {
+    const wa = String(value || '').trim().replace(/\/$/, '');
+    if (!wa || BROKEN_WHATSAPP_BASES.has(wa)) return '';
+    return wa;
+};
+
 /** عنوان WhatsApp الفعلي: إعدادات التطبيق ← متغير البناء ← افتراضي محلي/بروكسي */
 export function resolveWhatsAppApiBase(appConfig) {
-    const fromSettings = appConfig?.whatsappApiBase?.trim();
-    if (fromSettings) return fromSettings.replace(/\/$/, '');
-    const fromEnv = import.meta.env.VITE_WHATSAPP_API_BASE?.trim();
-    if (fromEnv) return fromEnv.replace(/\/$/, '');
-    return WHATSAPP_API_BASE;
+    const fromSettings = normalizeWhatsAppApiBase(appConfig?.whatsappApiBase);
+    if (fromSettings) return fromSettings;
+    const fromEnv = normalizeWhatsAppApiBase(import.meta.env.VITE_WHATSAPP_API_BASE);
+    if (fromEnv) return fromEnv;
+    return normalizeWhatsAppApiBase(WHATSAPP_API_BASE) || defaultWaBase;
 }
 
 export async function getWhatsAppApiBase() {
@@ -74,10 +209,12 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseAnonKey) {
-    console.error('❌ Supabase credentials are missing! Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file.');
+    console.warn('مفاتيح Supabase غير موجودة. سيتم استخدام القاعدة المحلية.');
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = (supabaseUrl && supabaseAnonKey)
+    ? createClient(supabaseUrl, supabaseAnonKey)
+    : null;
 
 // --- Connection state (subscribable) ---
 let _connectionListeners = [];
@@ -139,6 +276,10 @@ const mapDataRow = (row) => ({
 const collectionSelect = (tableName) => (tableName === 'omr_results' ? 'id, data' : '*');
 
 const fetchCollection = async (tableName) => {
+    if (usesLocalStore()) {
+        const rows = await localRequest(`/store/${tableName}`);
+        return (rows || []).map(hydrateLocalRow);
+    }
     const { data, error } = await supabase
         .from(tableName)
         .select(collectionSelect(tableName))
@@ -240,6 +381,11 @@ const mapPagedRow = (row, tableName, opts) => {
  * @param {{ pageSize?: number, maxRows?: number }} [opts]
  */
 const fetchCollectionPaged = async (tableName, opts = {}) => {
+    if (usesLocalStore()) {
+        const rows = await localRequest(`/store/${tableName}`);
+        const mapped = (rows || []).map((row) => mapPagedRow({ id: row.id, data: row }, tableName, opts));
+        return mapped.map(hydrateLocalRow);
+    }
     if (tableName === 'omr_results') {
         try {
             const rows = await fetchOmrResultPages(supabase, {
@@ -336,7 +482,17 @@ const saveDocument = async (tableName, item) => {
             : docData;
 
     const rowId = String(persisted.id);
-    const payload = { id: rowId, data: toJsonbPayload(persisted) };
+    if (usesLocalStore()) {
+        const saved = await localRequest(`/store/${tableName}/${encodeURIComponent(rowId)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(toJsonbPayload(persisted)),
+        });
+        const merged = hydrateLocalRow({ ...persisted, ...(saved || {}), id: rowId });
+        await syncLocalSaveToCloud(tableName, merged);
+        return merged;
+    }
+    const payload = { id: rowId, data: slimForCloud(tableName, persisted) };
     let error = null;
     for (let attempt = 0; attempt < 4; attempt++) {
         try {
@@ -358,6 +514,13 @@ const saveDocument = async (tableName, item) => {
 };
 
 const deleteDocument = async (tableName, id) => {
+    if (usesLocalStore()) {
+        await localRequest(`/store/${tableName}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (getDataBackend() === 'hybrid' && supabase) {
+            await supabase.from(tableName).delete().eq('id', String(id));
+        }
+        return;
+    }
     const { error } = await supabase
         .from(tableName)
         .delete()
@@ -396,6 +559,19 @@ export const syncOmrResultsForStudentNationalIdChange = async ({
     const oldNat = normalizeStudentId(previousNationalId);
     const newNat = normalizeStudentId(nextNationalId);
     if (!newNat) return { updated: 0, scanned: 0 };
+
+    if (usesLocalStore()) {
+        const rows = await localRequest('/store/omr_results');
+        let updated = 0;
+        for (const row of rows || []) {
+            const nat = normalizeStudentId(row.nationalId || row.studentId || '');
+            const seat = normalizeStudentId(row.seatNumber || '');
+            if (nat !== oldNat && seat !== normalizeStudentId(seatNumber)) continue;
+            await saveDocument('omr_results', { ...row, nationalId: nextNationalId, studentId: nextNationalId });
+            updated += 1;
+        }
+        return { updated, scanned: (rows || []).length };
+    }
 
     const seatNorm = normalizeStudentId(seatNumber);
     const norms = [...new Set([oldNat, seatNorm].filter(Boolean))];
@@ -491,6 +667,14 @@ export const deleteStudent   = (id) => deleteDocument('students', id);
 /** حذف مجموعة طلاب بالمعرّف دون المساس ببقية السجل */
 export const deleteStudentsByIds = async (ids) => {
     const list = [...new Set((ids || []).map(String).filter(Boolean))];
+    if (usesLocalStore()) {
+        await localRequest('/store/students/delete-ids', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: list }),
+        });
+        return list.length;
+    }
     const CHUNK = 150;
     for (let i = 0; i < list.length; i += CHUNK) {
         const { error } = await supabase.from('students').delete().in('id', list.slice(i, i + CHUNK));
@@ -504,11 +688,20 @@ export const deleteStudentsByIds = async (ids) => {
 };
 
 /** تحديث/إضافة مجموعة طلاب دون حذف من ليسوا في القائمة */
-export const upsertStudents = async (studentList) => {
+export const upsertStudents = async (studentList, onProgress) => {
     const list = (studentList || []).map((s) => ({
         ...s,
         id: String(s.id || `${Date.now()}${Math.floor(Math.random() * 100000)}`),
     }));
+    if (usesLocalStore()) {
+        await localRequest('/store/students/bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: list, replace: false }),
+        });
+        await syncLocalListToCloud('students', list, onProgress);
+        return list.length;
+    }
     const CHUNK = 100;
     for (let i = 0; i < list.length; i += CHUNK) {
         const rows = list.slice(i, i + CHUNK).map((s) => ({ id: s.id, data: toJsonbPayload(s) }));
@@ -517,17 +710,27 @@ export const upsertStudents = async (studentList) => {
             _setConnected(false);
             throw new SupabaseError('students', 'bulk-upsert', error.message);
         }
+        if (onProgress) await onProgress({ current: Math.min(i + CHUNK, list.length), total: list.length });
     }
     _setConnected(true);
     return list.length;
 };
 
-export const saveStudentsBulk = async (studentList) => {
+export const saveStudentsBulk = async (studentList, onProgress) => {
     const list = Array.isArray(studentList) ? studentList : [];
     const normalized = list.map((s) => ({
         ...s,
         id: String(s.id || `${Date.now()}${Math.floor(Math.random() * 10000)}`),
     }));
+    if (usesLocalStore()) {
+        await localRequest('/store/students/bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: normalized, replace: true }),
+        });
+        await syncLocalListToCloud('students', normalized, onProgress);
+        return normalized;
+    }
     const newIds = new Set(normalized.map((s) => String(s.id)));
 
     const { data: existingRows, error: fetchErr } = await supabase
@@ -566,6 +769,9 @@ export const saveStudentsBulk = async (studentList) => {
             _setConnected(false);
             throw new SupabaseError('students', 'bulk-save', error.message);
         }
+        if (onProgress) {
+            await onProgress({ current: Math.min(i + batch.length, normalized.length), total: normalized.length });
+        }
     }
     _setConnected(true);
     return normalized;
@@ -574,7 +780,32 @@ export const saveStudentsBulk = async (studentList) => {
 import { normalizeAssignments } from './observerAssignments';
 
 // --- Assignments ---
+const localGetSetting = async (id) => {
+    const rows = await localRequest('/store/settings');
+    return (rows || []).find((r) => String(r.id) === String(id)) || null;
+};
+
+const localSaveSetting = async (id, data) => {
+    const payload = { id, ...(data && typeof data === 'object' ? data : { value: data }) };
+    const saved = await localRequest(`/store/settings/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    await syncLocalSaveToCloud('settings', { id, ...payload });
+    return saved;
+};
+
 export const getAssignments = async () => {
+    if (usesLocalStore()) {
+        const row = await localGetSetting('assignments');
+        if (!row) {
+            await localSaveSetting('assignments', {});
+            return normalizeAssignments({});
+        }
+        const { id: _id, ...rest } = row;
+        return normalizeAssignments(rest);
+    }
     const { data, error } = await supabase
         .from('settings')
         .select('data')
@@ -595,6 +826,10 @@ export const getAssignments = async () => {
 };
 
 export const saveAssignments = async (assignments) => {
+    if (usesLocalStore()) {
+        await localSaveSetting('assignments', assignments || {});
+        return assignments;
+    }
     const { error } = await supabase
         .from('settings')
         .upsert({ id: 'assignments', data: assignments });
@@ -697,8 +932,8 @@ const DEFAULT_APP_SETTINGS = {
     },
     covers: {},
     observerSheets: {},
-    /** إنتاج: خادم WPP على VPS */
-    whatsappApiBase: 'https://wpp.northelite0.com',
+    /** فارغ = بروكسي محلي /api/whatsapp أو 127.0.0.1:3001 في Electron */
+    whatsappApiBase: '',
     /** رمز المدرسة في نموذج الاختبارات الوطنية (وزارة التعليم) */
     moeSchoolCode: '',
     messages: {
@@ -709,12 +944,25 @@ const DEFAULT_APP_SETTINGS = {
 
 function normalizeAppSettings(config = {}) {
     const next = { ...DEFAULT_APP_SETTINGS, ...config };
-    const wa = String(next.whatsappApiBase ?? DEFAULT_APP_SETTINGS.whatsappApiBase ?? '').trim();
-    next.whatsappApiBase = wa ? wa.replace(/\/$/, '') : '';
+    next.whatsappApiBase = normalizeWhatsAppApiBase(next.whatsappApiBase);
     return next;
 }
 
 export const getAppSettings = async () => {
+    if (usesLocalStore()) {
+        const row = await localGetSetting('app_config');
+        if (!row) {
+            const initial = normalizeObserverSheetsConfig(
+                normalizeCoverConfig(normalizeAppSettings(DEFAULT_APP_SETTINGS))
+            );
+            await localSaveSetting('app_config', initial);
+            return initial;
+        }
+        const { id: _id, ...rest } = row;
+        return normalizeObserverSheetsConfig(
+            normalizeCoverConfig(normalizeAppSettings({ ...DEFAULT_APP_SETTINGS, ...rest }))
+        );
+    }
     const { data, error } = await supabase
         .from('settings')
         .select('data')
@@ -741,6 +989,10 @@ export const getAppSettings = async () => {
 
 export const saveAppSettings = async (config) => {
     const data = normalizeObserverSheetsConfig(normalizeCoverConfig(normalizeAppSettings(config)));
+    if (usesLocalStore()) {
+        await localSaveSetting('app_config', data);
+        return data;
+    }
     const { error } = await supabase
         .from('settings')
         .upsert({ id: 'app_config', data });
@@ -768,6 +1020,14 @@ const DEFAULT_SUBJECTS = [
 ];
 
 export const getOmrSubjects = async () => {
+    if (usesLocalStore()) {
+        const row = await localGetSetting('omr_subjects');
+        if (!row) {
+            await localSaveSetting('omr_subjects', { subjects: DEFAULT_SUBJECTS });
+            return DEFAULT_SUBJECTS;
+        }
+        return Array.isArray(row.subjects) ? row.subjects : (Array.isArray(row.data) ? row.data : DEFAULT_SUBJECTS);
+    }
     const { data, error } = await supabase
         .from('settings')
         .select('data')
@@ -788,6 +1048,10 @@ export const getOmrSubjects = async () => {
 };
 
 export const saveOmrSubjects = async (subjects) => {
+    if (usesLocalStore()) {
+        await localSaveSetting('omr_subjects', { subjects });
+        return subjects;
+    }
     const { error } = await supabase
         .from('settings')
         .upsert({ id: 'omr_subjects', data: subjects });
@@ -811,7 +1075,9 @@ const examIsArchived = (e) => {
 export const getOmrExams = async (opts = {}) => {
     const { includeArchived = false } = opts;
     let rows;
-    if (opts.summary) {
+    if (usesLocalStore()) {
+        rows = await fetchCollection('omr_exams');
+    } else if (opts.summary) {
         const fields = ['title', 'grade', 'grades', 'stage', 'subject', 'date', 'createdAt', 'archived', 'qCount'];
         const all = [];
         for (let from = 0; ; from += 500) {
@@ -843,6 +1109,13 @@ const RESULT_LIST_FIELDS = ['examId', 'examTitle', 'subject', 'studentId', 'nati
     'updatedAt', 'createdAt', 'manualEntry', 'detectedStudentId', 'normalizedDetectedStudentId'];
 export const getOmrResultList = async (examId) => {
     if (!examId) return [];
+    if (usesLocalStore()) {
+        const rows = await localRequest('/store/omr_results');
+        const prefix = `omr_${examId}_`;
+        return (rows || [])
+            .filter((row) => String(row.examId) === String(examId) || String(row.id || '').startsWith(prefix))
+            .map((row) => ({ ...hydrateLocalRow(row), _listOnly: true }));
+    }
     // Filtering a toasted JSON document scans/decompresses every sheet and times out.
     // Read only the indexed IDs first, then fetch this exam's scalar fields by PK.
     const ids = [];
@@ -948,6 +1221,12 @@ export const getOmrResultsForGrading = async (opts = {}) => {
         if (cached) return cached;
     }
 
+    if (usesLocalStore()) {
+        const rows = (await localRequest('/store/omr_results') || []).map((row) => slimOmrResultForGrading(hydrateLocalRow(row)));
+        writeGradingCache(rows);
+        return rows;
+    }
+
     let rows = await fetchOmrResultsGradingViaRpc({
         pageSize: 80,
         maxRows: 25000,
@@ -973,6 +1252,18 @@ export const getOmrResultsForGrading = async (opts = {}) => {
 export const saveOmrResult = async (r) => {
     let payload = r;
     if (r._listOnly) {
+        if (usesLocalStore()) {
+            const full = await localRequest(`/store/omr_results/${encodeURIComponent(r.id)}`);
+            payload = { ...full, ...r };
+            delete payload._listOnly;
+            if (r.manualEntry) {
+                delete payload.details;
+                delete payload.answers;
+            }
+            const out = await saveDocument('omr_results', payload);
+            invalidateOmrGradingCache();
+            return out;
+        }
         const { data, error } = await supabase.from('omr_results').select('id,data').eq('id', String(r.id)).single();
         if (error) throw new SupabaseError('omr_results', 'fetch', error.message);
         payload = { ...mapDataRow(data), ...r };
@@ -992,9 +1283,73 @@ export const deleteOmrResult = async (id) => {
     invalidateOmrGradingCache();
 };
 
-// --- Clear All Data (Supabase) ---
+/** ينشر الجداول المحلية إلى السحابة بدون صور — للبوابة ورصد المعلمين */
+export const publishLocalToCloud = async (onProgress) => {
+    if (!supabase) throw new SupabaseError('cloud', 'publish', 'ضع VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY للمشروع السحابي');
+    const tables = ['students', 'omr_exams', 'omr_results', 'committees', 'observers', 'locations', 'settings', 'retake_requests'];
+    const stats = {};
+    for (const table of tables) {
+        const rows = await localRequest(`/store/${table}`);
+        const list = rows || [];
+        for (let i = 0; i < list.length; i += 80) {
+            const chunk = list.slice(i, i + 80).map((r) => ({
+                id: String(r.id),
+                data: slimForCloud(table, r),
+            }));
+            const { error } = await supabase.from(table).upsert(chunk);
+            if (error) throw new SupabaseError(table, 'publish', error.message);
+            if (onProgress) onProgress({ table, done: Math.min(i + chunk.length, list.length), total: list.length });
+        }
+        stats[table] = list.length;
+    }
+    return stats;
+};
+
+/** يسحب درجات رصد المعلمين من السحابة إلى المكتب دون مسح صور الأوراق المحلية */
+export const pullCloudResultsToLocal = async () => {
+    if (!supabase) throw new SupabaseError('cloud', 'pull', 'السحابة غير متصلة');
+    let cursor = null;
+    let merged = 0;
+    for (;;) {
+        let query = supabase
+            .from('omr_results')
+            .select(['id', ...RESULT_LIST_FIELDS.map((key) => `${key}:data->${key}`)].join(','))
+            .order('id')
+            .limit(200);
+        if (cursor != null) query = query.gt('id', cursor);
+        const { data, error } = await query;
+        if (error) throw new SupabaseError('omr_results', 'pull', error.message);
+        if (!data?.length) break;
+        for (const row of data) {
+            let local = null;
+            try {
+                local = await localRequest(`/store/omr_results/${encodeURIComponent(row.id)}`);
+            } catch { local = null; }
+            const next = { ...(local || {}), ...row, id: row.id };
+            delete next._listOnly;
+            await localRequest(`/store/omr_results/${encodeURIComponent(row.id)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(next),
+            });
+            merged += 1;
+        }
+        cursor = data.at(-1).id;
+        if (data.length < 200) break;
+    }
+    invalidateOmrGradingCache();
+    return { merged };
+};
+
+// --- Clear All Data ---
 export const clearAllData = async () => {
-    if (!window.confirm('هل أنت متأكد من رغبتك في حذف جميع البيانات من قاعدة البيانات السحابية؟ لا يمكن التراجع عن هذا الإجراء.')) return;
+    if (!window.confirm('هل أنت متأكد من رغبتك في حذف جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء.')) return;
+
+    if (usesLocalStore()) {
+        await localRequest('/store/clear', { method: 'POST' });
+        invalidateOmrGradingCache();
+        return;
+    }
 
     const tables = ['students', 'committees', 'observers', 'locations', 'omr_exams', 'omr_results'];
     const errors = [];

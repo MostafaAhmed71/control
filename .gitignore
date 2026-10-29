@@ -23,6 +23,9 @@ dist-ssr
 *.sln
 *.sw?
 
+# Local SQLite store + extracted sheet images
+local_data/
+
 # Secrets / local env
 .env
 .env.*
@@ -49,3 +52,11 @@ builder-final.log
 vite-build.log
 *.log
 !student-portal-standalone/package-lock.json
+
+# Private student notice images and recipient reports
+/notifications-ready/
+# added 2026-10-29 (F: drive -> GitHub sync)
+omr_engine/venv*/
+.pdf-check-profile/
+teacher-grades-standalone/
+*.rar

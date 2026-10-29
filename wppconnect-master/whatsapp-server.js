@@ -428,6 +428,12 @@ app.post('/send-result', async (req, res) => {
 
   } catch (err) {
     console.error('❌ خطأ في الإرسال:', err.message);
+    if (/prepRawMedia|MediaPrep/i.test(err.message || '')) {
+      return res.status(503).json({
+        error: 'مكتبة واتساب الحالية غير متوافقة مع تجهيز الصور. حدّث حزم wppconnect-master ثم أعد تشغيل خادم واتساب. لم تتم إعادة محاولة إرسال الصورة.',
+        code: 'WA_MEDIA_INCOMPATIBLE',
+      });
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -486,6 +492,12 @@ app.post('/send-image', async (req, res) => {
     res.json({ success: true, message: `تم إرسال الصورة لـ ${phone}` });
   } catch (err) {
     console.error('❌ خطأ في الإرسال:', err.message);
+    if (/prepRawMedia|MediaPrep/i.test(err.message || '')) {
+      return res.status(503).json({
+        error: 'مكتبة واتساب الحالية غير متوافقة مع تجهيز الصور. حدّث حزم wppconnect-master ثم أعد تشغيل خادم واتساب. لم تتم إعادة محاولة إرسال الصورة.',
+        code: 'WA_MEDIA_INCOMPATIBLE',
+      });
+    }
     res.status(500).json({ error: err.message });
   }
 });

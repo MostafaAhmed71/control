@@ -44,4 +44,10 @@ for (const file of files) {
 }
 assert.equal(subjectTemplateKey('لغة إنجليزية'), subjectTemplateKey('اللغة الانجليزية'));
 assert.equal(subjectTemplateKey('دراسات إسلامية'), subjectTemplateKey('القرآن الكريم والدراسات الإسلامية'));
+for (const [exam, template] of [
+  ['أحياء', 'الأحياء'], ['فيزياء', 'الفيزياء'], ['كيمياء', 'الكيمياء'],
+  ['كفايات لغوية', 'الكفايات اللغوية'], ['تقنية رقمية', 'التقنية الرقمية'],
+  ['علم أرض', 'علوم الأرض والفضاء'], ['تفسير', 'القرآن الكريم والتفسير'],
+]) assert.equal(subjectTemplateKey(exam), subjectTemplateKey(template), exam);
+assert.notEqual(subjectTemplateKey('علوم الأرض والفضاء'), subjectTemplateKey('العلوم'));
 console.log(`PASS: ${files.length} templates; scores, absence, latest result, identity conflicts, untouched workbook parts and subject aliases.`);

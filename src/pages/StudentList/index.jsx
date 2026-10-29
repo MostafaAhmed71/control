@@ -24,21 +24,42 @@ const StudentList = () => {
     const [searchOm, setSearchOm] = useState('');
     const [selectedIds, setSelectedIds] = useState(() => new Set());
     const [approvedSync, setApprovedSync] = useState(null);
+    const [importProgress, setImportProgress] = useState(null);
+
+    const reportImportProgress = (next) => {
+        setImportProgress(next);
+        return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    };
 
     const handleApprovedFile = async (e) => {
         const file = e.target.files?.[0];
         e.target.value = '';
         if (!file) return;
         try {
+            await reportImportProgress({
+                label: 'جاري قراءة ملف الأسماء…',
+                pct: 15,
+                current: 0,
+                total: 0,
+            });
             const approved = await parseApprovedFile(file);
             if (!approved.length) {
+                setImportProgress(null);
                 alert('لم يتم العثور على أسماء في الملف. تأكد من وجود عمود "اسم الطالب" أو أن الأسماء في العمود الأول.');
                 return;
             }
+            await reportImportProgress({
+                label: `تم قراءة ${approved.length} اسم — جاري تجهيز المطابقة…`,
+                pct: 90,
+                current: approved.length,
+                total: approved.length,
+            });
             setApprovedSync({ fileName: file.name, approved });
         } catch (err) {
             console.error(err);
             alert('خطأ في قراءة الملف: ' + err.message);
+        } finally {
+            setImportProgress(null);
         }
     };
 
@@ -306,13 +327,26 @@ const StudentList = () => {
 
     const handleImport = (e) => {
         const file = e.target.files[0];
+        e.target.value = '';
         if (!file) return;
 
         const reader = new FileReader();
         const fileExtension = file.name.split('.').pop().toLowerCase();
+        setImportProgress({
+            label: `جاري قراءة الملف: ${file.name}`,
+            pct: 8,
+            current: 0,
+            total: 0,
+        });
 
         reader.onload = async (event) => {
             try {
+                await reportImportProgress({
+                    label: 'جاري استخراج الأسماء من الملف…',
+                    pct: 25,
+                    current: 0,
+                    total: 0,
+                });
                 let importedData = [];
                 let foundKeysInfo = 'بيانات الأعمدة غير متوفرة';
 
@@ -367,9 +401,21 @@ const StudentList = () => {
                 }
 
                 if (Array.isArray(importedData) && importedData.length > 0) {
+                    await reportImportProgress({
+                        label: `تم قراءة ${importedData.length} طالب — في انتظار التأكيد…`,
+                        pct: 40,
+                        current: 0,
+                        total: importedData.length,
+                    });
                     const wantToMerge = window.confirm(`تم قراءة ${importedData.length} طالب من الملف.\n\nهل ترغب في "تحديث" الطلاب الحاليين (لإضافة رقم الهوية والبيانات الناقصة) بدلاً من مسح القائمة بالكامل؟\n\n- اضغط "موافق/OK" للتحديث والدمج.\n- اضغط "إلغاء/Cancel" لمسح القائمة السابقة واستبدالها بالكامل.`);
                     
                     if (wantToMerge) {
+                        await reportImportProgress({
+                            label: 'جاري دمج الأسماء مع السجل الحالي…',
+                            pct: 50,
+                            current: 0,
+                            total: importedData.length,
+                        });
                         // Merge logic: match by seatNumber or name
                         let updatedCount = 0;
                         const mergedStudents = students.map(existing => {
@@ -410,15 +456,29 @@ const StudentList = () => {
                         });
                         
                         const finalList = [...mergedStudents, ...newStudents];
-                        await saveStudentsBulk(finalList);
-                        fetchStudents();
+                        await saveStudentsBulk(finalList, ({ current, total }) =>
+                            reportImportProgress({
+                                label: `جاري حفظ الطلاب… ${current} من ${total}`,
+                                pct: 55 + Math.round((current / Math.max(total, 1)) * 40),
+                                current,
+                                total,
+                            })
+                        );
+                        await fetchStudents();
                         
                         alert(`تم التحديث بنجاح!\nتم تحديث بيانات ${updatedCount} طالب موجود، وإضافة ${newStudents.length} طالب جديد.\n(الأعمدة المقروءة: ${foundKeysInfo})`);
                         
                     } else {
                         if (window.confirm(`تحذير نهائي: سيتم حذف جميع الطلاب الحاليين واستبدالهم بالقائمة الجديدة. هل أنت متأكد؟`)) {
-                            await saveStudentsBulk(importedData);
-                            fetchStudents();
+                            await saveStudentsBulk(importedData, ({ current, total }) =>
+                                reportImportProgress({
+                                    label: `جاري حفظ الطلاب… ${current} من ${total}`,
+                                    pct: 55 + Math.round((current / Math.max(total, 1)) * 40),
+                                    current,
+                                    total,
+                                })
+                            );
+                            await fetchStudents();
                             alert('تم استبدال البيانات بنجاح!\n(الأعمدة المقروءة من الملف: ' + foundKeysInfo + ')');
                         }
                     }
@@ -428,6 +488,8 @@ const StudentList = () => {
             } catch (err) {
                 console.error(err);
                 alert('خطأ في معالجة الملف: ' + err.message);
+            } finally {
+                setImportProgress(null);
             }
         };
 
@@ -1070,6 +1132,24 @@ const StudentList = () => {
                     onClose={() => setApprovedSync(null)}
                     onDone={fetchStudents}
                 />
+            )}
+            {importProgress && (
+                <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/45 p-4" dir="rtl">
+                    <div className="w-full max-w-md rounded-3xl bg-white p-8 shadow-2xl">
+                        <p className="text-sm font-black text-slate-800">{importProgress.label}</p>
+                        <div className="mt-5 h-3 overflow-hidden rounded-full bg-slate-100">
+                            <div
+                                className="h-full rounded-full bg-indigo-600 transition-all duration-300"
+                                style={{ width: `${Math.max(6, Math.min(100, importProgress.pct || 0))}%` }}
+                            />
+                        </div>
+                        {importProgress.total > 0 && (
+                            <p className="mt-3 text-center text-xs font-bold text-slate-500">
+                                {importProgress.current} / {importProgress.total}
+                            </p>
+                        )}
+                    </div>
+                </div>
             )}
         </div>
     );

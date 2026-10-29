@@ -20,6 +20,7 @@ export default defineConfig({
     watch: {
       ignored: [
         '**/omr_engine/**',
+        '**/local_data/**',
         '**/wppconnect-master/**',
         '**/release/**',
         '**/dist/**',
@@ -35,9 +36,19 @@ export default defineConfig({
     },
     proxy: {
       '/api/omr': {
-        target: 'http://localhost:8000',
+        target: process.env.OMR_PROXY_TARGET || 'http://127.0.0.1:8000',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/omr/, '')
+        rewrite: (path) => path.replace(/^\/api\/omr/, ''),
+        configure: (proxy) => {
+          proxy.on('error', (err, _req, res) => {
+            if (!res || res.headersSent) return
+            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({
+              detail: 'محرك OMR غير شغّال. شغّل omr_engine ثم أعد تحميل الصفحة.',
+              error: String(err?.code || err?.message || 'proxy_error'),
+            }))
+          })
+        },
       },
       '/api/whatsapp': {
         target: 'http://localhost:3001',

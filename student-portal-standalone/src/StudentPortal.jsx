@@ -109,6 +109,15 @@ const normalizeNationalId = (value) => {
   return latin.replace(/[^a-zA-Z0-9]/g, '').replace(/^0+/, '').trim();
 };
 
+/** هوية سعودية 10 أرقام. لو انكتب 12 خانة نجرّب أول 10 أيضاً */
+const expandNationalLookupNorms = (norm) => {
+  const n = String(norm || '').trim();
+  if (!n) return [];
+  const out = [n];
+  if (/^[12]\d{11}$/.test(n)) out.push(n.slice(0, 10));
+  return [...new Set(out)];
+};
+
 /** حقول الهوية المحتملة على سجل طالب (بعض الاستيرادات تضعها في id أو studentId) */
 const studentNationalIdNorms = (s) =>
   [s?.nationalId, s?.national_id, s?.id, s?.studentId, s?.student_id]
@@ -686,13 +695,14 @@ export default function StudentPortal() {
         'الاستعلام يستخدم فهرس الهوية أو دالة portal_fetch على الخادم — دون تحميل كل الجدول.',
     });
 
-    const inputNorm = normalizeNationalId(studentId);
-    if (!inputNorm) {
+    const lookupNorms = expandNationalLookupNorms(normalizeNationalId(studentId));
+    if (!lookupNorms.length) {
       setError('يرجى إدخال رقم هوية صالح.');
       setLoading(false);
       setSearchProgress(null);
       return;
     }
+    let inputNorm = lookupNorms[0];
 
     try {
       const reportScanProgress = (p) => {
@@ -718,14 +728,18 @@ export default function StudentPortal() {
       let matchSource;
       let studentEarly = null;
       try {
-        studentEarly = await findStudentByNormalizedNationalId(inputNorm);
-        const pack = await fetchOmrResultsForPortalLookup(
-          inputNorm,
-          studentEarly,
-          reportScanProgress
-        );
-        rawResults = pack.rows;
-        matchSource = pack.source;
+        for (const candidate of lookupNorms) {
+          studentEarly = await findStudentByNormalizedNationalId(candidate);
+          const pack = await fetchOmrResultsForPortalLookup(
+            candidate,
+            studentEarly,
+            reportScanProgress
+          );
+          rawResults = pack.rows;
+          matchSource = pack.source;
+          inputNorm = candidate;
+          if ((pack.rows && pack.rows.length > 0) || studentEarly) break;
+        }
       } catch (inner) {
         if (inner && inner.code === 'PORTAL_FAST_PATH_FAILED') {
           setError(inner.message);

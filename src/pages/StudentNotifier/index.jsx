@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { getStudents, getAppSettings, getWhatsAppApiBase } from '../../utils/dataService';
+import { PUBLIC_PATHS, buildPublicUrl } from '../../utils/publicRoutes';
 import {
     renderNotifyCardToCanvas,
     getNotifyCardPixelSize,
@@ -32,11 +33,14 @@ import {
     CheckSquare,
     Square,
     Clock,
+    Copy,
 } from 'lucide-react';
 import { WhatsAppBadge, WhatsAppSetupPanel } from '../../components/WhatsAppStatus';
+import StudentSearchSelect from '../../components/StudentSearchSelect';
 import { useWhatsAppConnection } from '../../hooks/useWhatsAppConnection';
 import { COMMITTEE_STAGES } from '../../utils/committeeUtils';
 import { compareStudentsBySeatNumber } from '../../utils/seatNumberGenerator';
+import { matchNoticeFile } from '../../utils/noticeMatching';
 
 /** تأخير الإرسال الجماعي — يقلّل خطر حظر واتساب */
 const WA_BULK_CONFIG = {
@@ -116,9 +120,10 @@ function buildSeatCardCaption(template, student) {
         .replace(/\{grade\}/g, student.grade || '');
 }
 
-const StudentNotifier = ({ activeSystem = 'control' }) => {
+const StudentNotifier = ({ activeSystem = 'control', standalone = false }) => {
     const isGrading = activeSystem === 'grading';
-    const [activeTab, setActiveTab] = useState(isGrading ? 'results' : 'committees');
+    const [activeTab, setActiveTab] = useState(standalone || isGrading ? 'results' : 'committees');
+    const [linkCopied, setLinkCopied] = useState(false);
     const [students, setStudents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [sendingId, setSendingId] = useState(null);
@@ -132,6 +137,7 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
     const [selectedStudentIds, setSelectedStudentIds] = useState(() => new Set());
 
     const [resultFiles, setResultFiles] = useState([]);
+    const [resultMessage, setResultMessage] = useState(null);
     const [bulkSending, setBulkSending] = useState(false);
     const [bulkProgress, setBulkProgress] = useState(null);
     const [previewImage, setPreviewImage] = useState(null);
@@ -162,7 +168,7 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
         const withCommittee = students.filter((s) => s.committee).length;
         const withSeat = students.filter((s) => s.seatNumber).length;
         const sentOk = Object.values(statusMap).filter((s) => s.status === 'success').length;
-        const resultsReady = resultFiles.filter((f) => f.matchedStudentId && f.status !== 'success').length;
+        const resultsReady = resultFiles.filter((f) => f.matchedStudentId && f.status !== 'success' && students.some((s) => s.id === f.matchedStudentId && s.phone)).length;
         const resultsDone = resultFiles.filter((f) => f.status === 'success').length;
         return { withPhone, withCommittee, withSeat, sentOk, resultsReady, resultsDone };
     }, [students, statusMap, resultFiles]);
@@ -296,17 +302,14 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
     const clearExportCommittees = () => setExportSelectedCommittees(new Set());
 
     const handleFilesUpload = async (e) => {
-        const files = Array.from(e.target.files);
+        const files = Array.from(e.target.files).filter((file) => /\.(jpe?g|png|webp)$/i.test(file.name));
         if (!files.length) return;
 
         const newResultFiles = [];
         for (const file of files) {
             const fileName = file.name.replace(/\.[^/.]+$/, '');
-            let bestMatchId = null;
-            const matchedStudent = students.find(
-                (s) => s.name === fileName || fileName.includes(s.name) || s.name.includes(fileName)
-            );
-            if (matchedStudent) bestMatchId = matchedStudent.id;
+            const matchedStudent = matchNoticeFile(file.name, students);
+            const bestMatchId = matchedStudent?.id || null;
 
             const preview = URL.createObjectURL(file);
             newResultFiles.push({
@@ -316,7 +319,7 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                 preview,
                 matchedStudentId: bestMatchId,
                 status: 'pending',
-                msg: '',
+                msg: bestMatchId ? 'تمت المطابقة — راجع الصورة والطالب قبل الإرسال' : 'لم تتم المطابقة — اختر الطالب يدويًا',
             });
         }
         setResultFiles((prev) => [...prev, ...newResultFiles]);
@@ -324,16 +327,23 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
     };
 
     const handleMatchChange = (fileId, studentId) => {
-        setResultFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, matchedStudentId: studentId } : f)));
+        if (bulkSending) return;
+        setResultFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, matchedStudentId: studentId, status: 'pending', msg: 'تم تعديل الطالب — راجع الصورة قبل الإرسال' } : f)));
     };
 
     const removeFile = (fileId) => {
+        if (bulkSending) return;
         setResultFiles((prev) => prev.filter((f) => f.id !== fileId));
     };
 
     const sendBulkResults = async () => {
-        const readyFiles = resultFiles.filter((f) => f.matchedStudentId && f.status !== 'success');
+        const readyFiles = resultFiles.filter((f) => f.matchedStudentId && f.status !== 'success' && students.some((s) => s.id === f.matchedStudentId && s.phone));
         if (readyFiles.length === 0) return;
+        const ids = readyFiles.map((f) => f.matchedStudentId);
+        if (new Set(ids).size !== ids.length) {
+            alert('يوجد أكثر من إشعار لنفس الطالب. راجع الملفات واحذف النسخة المكررة قبل الإرسال.');
+            return;
+        }
         if (!window.confirm(bulkSendConfirmMessage(readyFiles.length, 'نتيجة'))) return;
 
         setBulkSending(true);
@@ -362,10 +372,8 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                     reader.readAsDataURL(rf.file);
                 });
 
-                const caption = (appConfig?.messages?.result || 'درجات الطالب: *{name}*').replace(
-                    '{name}',
-                    student.name
-                );
+                const caption = (resultMessage ?? appConfig?.messages?.result ?? 'درجات الطالب: *{name}*')
+                    .replace(/\{name\}/g, student.name || '');
 
                 const waBase = await getWhatsAppApiBase();
                 const res = await fetch(`${waBase}/send-image`, {
@@ -375,7 +383,7 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                 });
 
                 const data = await res.json();
-                if (!res.ok) throw new Error(data.error || 'ERROR');
+                if (!res.ok) throw Object.assign(new Error(data.error || 'ERROR'), { code: data.code });
 
                 setResultFiles((prev) =>
                     prev.map((f) => (f.id === rf.id ? { ...f, status: 'success', msg: 'تم الإرسال ✓' } : f))
@@ -384,6 +392,7 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                 setResultFiles((prev) =>
                     prev.map((f) => (f.id === rf.id ? { ...f, status: 'error', msg: error.message } : f))
                 );
+                if (error.code === 'WA_MEDIA_INCOMPATIBLE' || /prepRawMedia|MediaPrep/i.test(error.message || '')) break;
             }
             await waitBulkSendGap(i, readyFiles.length, setBulkProgress);
         }
@@ -599,13 +608,19 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                         </div>
                         <div>
                             <h1 className="text-2xl md:text-3xl font-black text-slate-900 font-header tracking-tight">
-                                مركز الإشعارات
+                                {standalone ? 'إرسال الشهادات عبر واتساب' : 'مركز الإشعارات'}
                             </h1>
                             <p className="text-slate-500 text-sm font-medium mt-0.5">
-                                القالب: <span className="text-indigo-600 font-bold">w.jpeg</span>
-                                {isGrading
-                                    ? ' — نتائج وبطاقات الجلوس'
-                                    : ' — بطاقات الجلوس للأهالي'}
+                                {standalone
+                                    ? 'ارفع صور الشهادات ثم أرسلها لأولياء الأمور — يُطابق اسم الملف رقم الهوية أو اسم الطالب'
+                                    : (
+                                        <>
+                                            القالب: <span className="text-indigo-600 font-bold">w.jpeg</span>
+                                            {isGrading
+                                                ? ' — نتائج وبطاقات الجلوس'
+                                                : ' — بطاقات الجلوس للأهالي'}
+                                        </>
+                                    )}
                             </p>
                         </div>
                     </div>
@@ -614,12 +629,31 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                     <WhatsAppBadge wa={wa} />
                     <button
                         type="button"
+                        onClick={async () => {
+                            const url = buildPublicUrl(PUBLIC_PATHS.certificates);
+                            try {
+                                await navigator.clipboard.writeText(url);
+                                setLinkCopied(true);
+                                setTimeout(() => setLinkCopied(false), 2000);
+                            } catch {
+                                window.prompt('انسخ الرابط:', url);
+                            }
+                        }}
+                        className="px-6 py-3.5 bg-emerald-50 text-emerald-800 rounded-2xl font-black text-sm hover:bg-emerald-100 transition-all border border-emerald-100 flex items-center gap-2"
+                    >
+                        <Copy size={18} />
+                        {linkCopied ? 'تم نسخ الرابط' : 'نسخ رابط الإرسال'}
+                    </button>
+                    {!standalone && (
+                    <button
+                        type="button"
                         onClick={() => setLayoutEditorOpen(true)}
                         className="px-6 py-3.5 bg-amber-50 text-amber-800 rounded-2xl font-black text-sm hover:bg-amber-100 transition-all border border-amber-100 flex items-center gap-2"
                     >
                         <Move size={18} />
                         ضبط مواضع القالب
                     </button>
+                    )}
                 </div>
             </div>
 
@@ -648,6 +682,7 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
             </div>
 
             {/* Tabs */}
+            {!standalone && (
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="inline-flex p-1.5 bg-slate-100 rounded-2xl border border-slate-200/80 w-full max-w-full overflow-x-auto custom-scrollbar sm:w-auto">
                     <button
@@ -739,6 +774,7 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                     </div>
                 )}
             </div>
+            )}
 
             {/* WhatsApp send tab */}
             {activeTab === 'committees' && (
@@ -1202,6 +1238,20 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
             {/* Results tab */}
             {activeTab === 'results' && (
                 <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                    <div className="luxury-card p-6 space-y-3">
+                        <label htmlFor="result-message" className="block font-black text-slate-900">النص الموحّد مع كل إشعار</label>
+                        <textarea
+                            id="result-message"
+                            dir="rtl"
+                            rows={5}
+                            disabled={bulkSending}
+                            value={resultMessage ?? appConfig?.messages?.result ?? 'درجات الطالب: *{name}*'}
+                            onChange={(event) => setResultMessage(event.target.value)}
+                            placeholder="اكتب الرسالة التي تريد إرفاقها مع كل صورة..."
+                            className="w-full border border-slate-200 rounded-2xl p-4 text-sm leading-relaxed focus:ring-2 focus:ring-emerald-200 outline-none disabled:opacity-50"
+                        />
+                        <p className="text-xs text-slate-500">يُرسل هذا النص مع كل صورة. يمكنك كتابة {'{name}'} لإضافة اسم الطالب تلقائيًا، أو حذف النص لإرسال الصورة فقط. يُطبّق على الإرسال القادم في هذه الصفحة.</p>
+                    </div>
                     <label className="luxury-card block p-10 md:p-14 border-2 border-dashed border-emerald-200/80 bg-gradient-to-b from-emerald-50/40 to-white cursor-pointer group hover:border-emerald-300 transition-colors">
                         <input
                             type="file"
@@ -1219,7 +1269,7 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                                     رفع صور النتائج والشهادات
                                 </h2>
                                 <p className="text-slate-500 text-sm font-bold leading-relaxed">
-                                    اسم الملف يُطابق اسم الطالب تلقائياً. بعد الربط يمكنك الإرسال الجماعي عبر واتساب.
+                                    يُطابق اسم الملف رقم هوية الطالب أو اسمه الكامل. راجع الصورة والطالب ورقم الجوال قبل الإرسال؛ الملفات غير المطابقة لا تُرسل.
                                 </p>
                             </div>
                             <span className="inline-flex items-center gap-2 px-8 py-4 bg-emerald-600 text-white rounded-2xl font-black text-sm shadow-xl shadow-emerald-100 group-hover:bg-emerald-700 transition-colors">
@@ -1229,8 +1279,14 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                         </div>
                     </label>
 
+                    <label className="luxury-card block p-5 border border-emerald-200 cursor-pointer">
+                        <input type="file" multiple webkitdirectory="" directory="" accept="image/*" onChange={handleFilesUpload} disabled={bulkSending || loading} className="hidden" />
+                        <span className="font-black text-emerald-700">اختيار مجلد الإشعارات المجهّزة بالهوية</span>
+                        <p className="text-sm text-slate-500 mt-2">اختر مجلد notifications-ready بعد تجهيزه. يُربط كل إشعار بصاحب الهوية المسجّلة في اسم الصورة.</p>
+                    </label>
+
                     {resultFiles.length > 0 && (
-                        <div className="luxury-card p-0 overflow-hidden border-slate-100">
+                        <div className="luxury-card p-0 border-slate-100 overflow-visible">
                             <div className="p-5 md:p-6 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                                 <div className="flex items-center gap-3">
                                     <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
@@ -1295,26 +1351,13 @@ const StudentNotifier = ({ activeSystem = 'control' }) => {
                                             >
                                                 {rf.fileName}
                                             </p>
-                                            <select
+                                            <StudentSearchSelect
+                                                students={students}
                                                 value={rf.matchedStudentId || ''}
-                                                onChange={(e) => handleMatchChange(rf.id, e.target.value)}
-                                                className={`w-full max-w-md px-4 py-2.5 rounded-xl text-xs font-black border outline-none focus:ring-4
-                                                  ${
-                                                      rf.matchedStudentId
-                                                          ? 'bg-emerald-50 text-emerald-800 border-emerald-100 focus:ring-emerald-100'
-                                                          : 'bg-rose-50 text-rose-800 border-rose-100 focus:ring-rose-100'
-                                                  }`}
-                                            >
-                                                <option value="" disabled>
-                                                    — اختر الطالب —
-                                                </option>
-                                                {students.map((s) => (
-                                                    <option key={s.id} value={s.id}>
-                                                        {s.name}
-                                                        {s.phone ? ` · ${s.phone}` : ' · بدون جوال'}
-                                                    </option>
-                                                ))}
-                                            </select>
+                                                disabled={bulkSending || rf.status === 'success'}
+                                                placeholder="ابحث واختر الطالب…"
+                                                onChange={(studentId) => handleMatchChange(rf.id, studentId)}
+                                            />
                                         </div>
 
                                         <div className="flex items-center gap-3 shrink-0">

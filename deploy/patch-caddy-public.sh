@@ -29,6 +29,7 @@ echo "نسخة احتياطية: $BACKUP"
 PUBLIC_BLOCK='	@public {
 		path /teacher-lookup /teacher-lookup/*
 		path /portal /portal/*
+		path /certificates /certificates/*
 		path /assets/* /vite.svg /favicon.ico
 		path /*.jpeg /*.jpg /*.png /*.ico /*.webp /*.svg
 	}

@@ -22,7 +22,7 @@ import {
     Link2,
     Copy,
 } from 'lucide-react';
-import { getAppSettings, saveAppSettings, clearAllData, getStudents, getCommittees, getObservers, getOmrExams, getOmrResults, saveStudentsBulk, saveOmrExam, saveOmrResult, supabase } from '../../utils/dataService';
+import { getAppSettings, saveAppSettings, clearAllData, getStudents, getCommittees, getObservers, getOmrExams, getOmrResults, saveStudentsBulk, saveOmrExam, saveOmrResult, getDataBackend, setDataBackend, getLocalStoreStatus, importLocalDump, publishLocalToCloud, pullCloudResultsToLocal } from '../../utils/dataService';
 import { PUBLIC_PATHS, buildPublicUrl } from '../../utils/publicRoutes';
 
 const TEACHER_GRADES_DEFAULT_URL = 'https://grades.northelite0.com';
@@ -33,9 +33,17 @@ const Settings = () => {
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [status, setStatus] = useState({ type: '', msg: '' });
+    const [dataBackend, setDataBackendState] = useState(() => getDataBackend());
+    const [localStatus, setLocalStatus] = useState(null);
+    const [importingDump, setImportingDump] = useState(false);
+    const [publishing, setPublishing] = useState(false);
+    const [pulling, setPulling] = useState(false);
 
     useEffect(() => {
         loadSettings();
+        if (getDataBackend() !== 'supabase') {
+            getLocalStoreStatus().then(setLocalStatus).catch(() => setLocalStatus({ ok: false }));
+        }
     }, []);
 
     const loadSettings = async () => {
@@ -110,7 +118,7 @@ const Settings = () => {
                 if (data.omr_results?.length)   data.omr_results.forEach(r  => ops.push(saveOmrResult(r)));
                 if (data.app_config)            ops.push(saveAppSettings(data.app_config));
                 await Promise.all(ops);
-                alert('✅ تم استيراد البيانات إلى Supabase بنجاح! سيتم إعادة تحميل الصفحة.');
+                alert('✅ تم استيراد النسخة الاحتياطية بنجاح! سيتم إعادة تحميل الصفحة.');
                 window.location.reload();
             } catch (err) {
                 alert('خطأ في تنسيق الملف: ' + err.message);
@@ -315,6 +323,23 @@ const Settings = () => {
                                                     موقع منفصل عن المنصة (مشروع teacher-grades-standalone) — يدخل المعلم اسمه والرمز، ويُسجَّل اسمه مع كل درجة. الدرجات المصححة آلياً تظهر له مقفلة. احفظ التغييرات بعد تعديل الرمز — بعد تغييره يُطلب الرمز الجديد من كل معلم عند فتح الرابط مرة أخرى.
                                                 </p>
                                             </div>
+                                            <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-5 bg-emerald-50/60 border border-emerald-100 rounded-2xl">
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-sm font-black text-emerald-900 mb-1">إرسال الشهادات عبر واتساب — مركز الإشعارات</p>
+                                                    <p className="text-xs font-bold text-emerald-700/80 truncate" dir="ltr">{buildPublicUrl(PUBLIC_PATHS.certificates)}</p>
+                                                    <p className="text-[11px] font-bold text-emerald-700/60 mt-2">
+                                                        صفحة مستقلة: ارفع صور الشهادات وأرسلها عبر واتساب. تحتاج خادم واتساب شغّال، واستثناء المسار في Caddy بدون كلمة مرور.
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => copyPublicLink(PUBLIC_PATHS.certificates, 'إرسال الشهادات')}
+                                                    className="shrink-0 flex items-center justify-center gap-2 px-5 py-3 bg-emerald-600 text-white rounded-xl font-black text-sm hover:bg-emerald-700 transition-colors"
+                                                >
+                                                    <Copy size={16} />
+                                                    نسخ الرابط
+                                                </button>
+                                            </div>
                                             <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-5 bg-blue-50/60 border border-blue-100 rounded-2xl">
                                                 <div className="flex-1 min-w-0">
                                                     <p className="text-sm font-black text-blue-900 mb-1">بوابة الطالب — الاستعلام عن النتائج</p>
@@ -458,13 +483,15 @@ const Settings = () => {
                                             onChange={(e) =>
                                                 setConfig({ ...config, whatsappApiBase: e.target.value })
                                             }
-                                            placeholder="https://wpp.northelite0.com"
+                                            placeholder="/api/whatsapp"
                                             className="w-full px-5 py-4 bg-slate-50 border border-slate-100 rounded-2xl font-bold text-slate-800 focus:ring-4 focus:ring-emerald-50 outline-none"
                                         />
                                         <p className="text-[10px] font-bold text-slate-500">
-                                            إنتاج VPS: <span className="text-emerald-700">https://wpp.northelite0.com</span>
-                                            — اتركه فارغاً لاستخدام البروكسي المحلي{' '}
+                                            اتركه فارغاً لاستخدام البروكسي المحلي{' '}
                                             <code className="text-[9px]">/api/whatsapp</code>
+                                            {' '}→ المنفذ 3001. لا تستخدم{' '}
+                                            <span className="text-rose-600">wpp.northelite0.com</span>
+                                            {' '}(شهادة SSL غير مطابقة).
                                         </p>
                                     </div>
 
@@ -519,21 +546,132 @@ const Settings = () => {
                                         </div>
                                     </div>
 
-                                    {/* ── Supabase Status ── */}
-                                    <div className="p-10 bg-indigo-50 rounded-[3rem] border border-indigo-100 border-dashed mb-6">
-                                        <div className="flex items-center gap-4 mb-4">
+                                    {/* ── Data backend ── */}
+                                    <div className="p-10 bg-indigo-50 rounded-[3rem] border border-indigo-100 border-dashed mb-6 space-y-6">
+                                        <div className="flex items-center gap-4">
                                             <div className="w-10 h-10 bg-indigo-600 text-white rounded-xl flex items-center justify-center shadow-lg shadow-indigo-200">
                                                 <Cloud size={20} />
                                             </div>
                                             <div>
-                                                <h3 className="text-xl font-black text-indigo-900 font-header">حالة قاعدة البيانات</h3>
-                                                <p className="text-indigo-500 font-bold text-[10px] uppercase tracking-widest mt-0.5">Supabase Cloud — التخزين الرئيسي</p>
+                                                <h3 className="text-xl font-black text-indigo-900 font-header">مكان حفظ البيانات</h3>
+                                                <p className="text-indigo-500 font-bold text-[10px] uppercase tracking-widest mt-0.5">بديل عن حصص Supabase السحابية</p>
                                             </div>
                                         </div>
-                                        <div className="flex items-center gap-3 bg-emerald-50 p-4 rounded-2xl border border-emerald-100">
-                                            <div className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse"></div>
-                                            <p className="text-emerald-700 text-sm font-black">جميع البيانات تُحفظ مباشرةً في Supabase — لا يوجد تخزين محلي.</p>
+                                        <div className="flex flex-wrap p-1 bg-white rounded-2xl border border-indigo-100 w-fit">
+                                            {[
+                                                { id: 'hybrid', label: 'مكتب + بوابة (موصى به)' },
+                                                { id: 'local', label: 'مكتب فقط' },
+                                                { id: 'supabase', label: 'سحابة فقط' },
+                                            ].map((opt) => (
+                                                <button
+                                                    key={opt.id}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setDataBackend(opt.id);
+                                                        setDataBackendState(opt.id);
+                                                        if (opt.id !== 'supabase') {
+                                                            getLocalStoreStatus().then(setLocalStatus).catch(() => setLocalStatus({ ok: false }));
+                                                        }
+                                                    }}
+                                                    className={`px-4 py-2 rounded-xl text-sm font-black ${dataBackend === opt.id ? 'bg-indigo-600 text-white' : 'text-slate-500'}`}
+                                                >
+                                                    {opt.label}
+                                                </button>
+                                            ))}
                                         </div>
+                                        <p className="text-sm font-bold text-indigo-800 leading-relaxed">
+                                            الطلاب والمعلمون يبقون على السحابة. المكتب يحفظ الصور هنا على الجهاز، والسحابة تستقبل الدرجات والطلاب فقط بدون صور حتى لا تمتلئ الحصة.
+                                        </p>
+                                        {dataBackend !== 'supabase' && (
+                                            <div className="space-y-4">
+                                                <div className={`p-4 rounded-2xl border ${localStatus?.ok === false ? 'bg-rose-50 border-rose-100 text-rose-700' : 'bg-emerald-50 border-emerald-100 text-emerald-800'}`}>
+                                                    <p className="text-sm font-black">
+                                                        {localStatus?.ok === false
+                                                            ? 'المحرك المحلي غير متصل. شغّل omr_engine ثم حدّث الصفحة.'
+                                                            : 'المكتب يحفظ على هذا الجهاز. صور الأوراق في مجلد منفصل.'}
+                                                    </p>
+                                                    {localStatus?.ok && (
+                                                        <p className="text-xs font-bold mt-2 opacity-80">
+                                                            طلاب {localStatus.counts?.students ?? 0} · اختبارات {localStatus.counts?.omr_exams ?? 0} · نتائج {localStatus.counts?.omr_results ?? 0} · صور {localStatus.sheetCount ?? 0}
+                                                            {' '}· حجم القاعدة {localStatus.dbMb ?? 0} MB · الصور {localStatus.sheetsMb ?? 0} MB
+                                                            <br />المسار: {localStatus.root}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                                <label className="flex items-center justify-center gap-3 py-4 px-6 bg-white text-indigo-700 border border-indigo-200 rounded-2xl font-black text-sm cursor-pointer hover:bg-indigo-50">
+                                                    {importingDump ? <RefreshCcw size={18} className="animate-spin" /> : <Upload size={18} />}
+                                                    {importingDump ? 'جاري استيراد النسخة المسحوبة…' : 'استيراد الجداول المسحوبة (JSON أو SQL) إلى المكتب'}
+                                                    <input
+                                                        type="file"
+                                                        accept=".json,.sql,.txt"
+                                                        className="hidden"
+                                                        disabled={importingDump}
+                                                        onChange={async (e) => {
+                                                            const file = e.target.files?.[0];
+                                                            e.target.value = '';
+                                                            if (!file) return;
+                                                            setImportingDump(true);
+                                                            try {
+                                                                const out = await importLocalDump(file);
+                                                                setLocalStatus(out.status || await getLocalStoreStatus());
+                                                                const parts = Object.entries(out.imported || {}).map(([k, n]) => `${k}: ${n}`).join(' · ');
+                                                                alert(`تم الاستيراد إلى المكتب.\n${parts || 'لا صفوف جديدة'}`);
+                                                            } catch (err) {
+                                                                alert('تعذّر الاستيراد: ' + (err?.message || err) + '\nتأكد أن محرك OMR يعمل على المنفذ 8000.');
+                                                            } finally {
+                                                                setImportingDump(false);
+                                                            }
+                                                        }}
+                                                    />
+                                                </label>
+                                                {dataBackend === 'hybrid' && (
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                        <button
+                                                            type="button"
+                                                            disabled={publishing}
+                                                            onClick={async () => {
+                                                                if (!window.confirm('سيتم رفع الطلاب والاختبارات والدرجات إلى السحابة بدون صور الأوراق، حتى تعمل بوابة الطلاب ورصد المعلمين.')) return;
+                                                                setPublishing(true);
+                                                                try {
+                                                                    const stats = await publishLocalToCloud();
+                                                                    alert('تم النشر للسحابة:\n' + Object.entries(stats).map(([k, n]) => `${k}: ${n}`).join('\n'));
+                                                                } catch (err) {
+                                                                    alert('فشل النشر. إذا المشروع القديم ممتلئ، أنشئ مشروع Supabase جديد وضع مفاتيحه في ملف .env ثم أعد المحاولة.\n' + (err?.message || err));
+                                                                } finally {
+                                                                    setPublishing(false);
+                                                                }
+                                                            }}
+                                                            className="py-4 px-5 bg-indigo-600 text-white rounded-2xl font-black text-sm hover:bg-indigo-700 disabled:opacity-50"
+                                                        >
+                                                            {publishing ? 'جاري النشر…' : 'نشر الدرجات للبوابة والمعلمين'}
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            disabled={pulling}
+                                                            onClick={async () => {
+                                                                setPulling(true);
+                                                                try {
+                                                                    const out = await pullCloudResultsToLocal();
+                                                                    alert(`تم سحب ${out.merged} نتيجة من رصد المعلمين إلى المكتب.`);
+                                                                } catch (err) {
+                                                                    alert('تعذّر السحب من السحابة: ' + (err?.message || err));
+                                                                } finally {
+                                                                    setPulling(false);
+                                                                }
+                                                            }}
+                                                            className="py-4 px-5 bg-emerald-600 text-white rounded-2xl font-black text-sm hover:bg-emerald-700 disabled:opacity-50"
+                                                        >
+                                                            {pulling ? 'جاري السحب…' : 'سحب رصد المعلمين إلى المكتب'}
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                        {dataBackend === 'supabase' && (
+                                            <div className="p-4 rounded-2xl bg-amber-50 border border-amber-100 text-amber-800 text-sm font-bold">
+                                                وضع السحابة فقط يعيد المشكلة إذا رُفعت صور الأوراق. استخدم «مكتب + بوابة».
+                                            </div>
+                                        )}
                                     </div>
 
                                     <div className="p-10 bg-rose-50 rounded-[3rem] border border-rose-100 border-dashed">

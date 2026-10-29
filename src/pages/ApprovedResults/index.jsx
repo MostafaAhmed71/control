@@ -388,6 +388,7 @@ const ApprovedResults = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
   const [bulkExportProgress, setBulkExportProgress] = useState(null);
+  const [exportSelection, setExportSelection] = useState(null);
   const [bulkExportError, setBulkExportError] = useState('');
   const [gradeFilter, setGradeFilter] = useState('all');
   const [identityFilter, setIdentityFilter] = useState('all'); // all | unknown | known
@@ -903,14 +904,23 @@ const ApprovedResults = () => {
     }
   };
 
-  const exportGradeSubjects = async (format = 'xlsx') => {
+  const gradeExportExams = useMemo(() => exams.filter((exam) => {
+    const grades = Array.isArray(exam.grades) && exam.grades.length ? exam.grades : [exam.grade];
+    return classFilter !== 'all' && grades.some((value) => isLevelMatch(value, classFilter))
+      && (stageFilter === 'all' || exam.stage === stageFilter);
+  }), [exams, classFilter, stageFilter]);
+
+  const openSubjectSelection = (format) => {
+    const subjects = [...new Set(gradeExportExams.map((exam) => resolveResultSubject(null, exam)))];
+    setExportSelection({ format, grade: classFilter, stage: stageFilter, subjects, selected: subjects });
+  };
+
+  const exportGradeSubjects = async (format = 'xlsx', subjects = []) => {
     if (classFilter === 'all' || bulkExportProgress !== null) return;
+    if (!subjects.length) return;
     const grade = classFilter;
-    const gradeExams = exams.filter((exam) => {
-      const grades = Array.isArray(exam.grades) && exam.grades.length ? exam.grades : [exam.grade];
-      return grades.some((value) => isLevelMatch(value, grade))
-        && (stageFilter === 'all' || exam.stage === stageFilter);
-    });
+    const gradeExams = gradeExportExams.filter((exam) => subjects.includes(resolveResultSubject(null, exam)));
+    setExportSelection(null);
     setBulkExportError('');
     setBulkExportProgress({ done: 0, total: gradeExams.length });
     try {
@@ -1248,7 +1258,7 @@ const ApprovedResults = () => {
           </button>
           <button
             type="button"
-            onClick={() => exportGradeSubjects('xlsx')}
+            onClick={() => openSubjectSelection('xlsx')}
             disabled={classFilter === 'all' || bulkExportProgress !== null}
             title={classFilter === 'all' ? 'اختر الصف أولًا' : 'تصدير جميع مواد الصف، بصرف النظر عن الاختبار والمادة وفلاتر النتائج الحالية'}
             className="flex items-center gap-2 px-5 py-3 bg-emerald-600 text-white rounded-2xl font-bold text-sm hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1258,7 +1268,7 @@ const ApprovedResults = () => {
           </button>
           <button
             type="button"
-            onClick={() => exportGradeSubjects('pdf')}
+            onClick={() => openSubjectSelection('pdf')}
             disabled={classFilter === 'all' || bulkExportProgress !== null}
             title={classFilter === 'all' ? 'اختر الصف أولًا' : 'ملف PDF مستقل لكل مادة داخل ZIP'}
             className="flex items-center gap-2 px-5 py-3 bg-rose-600 text-white rounded-2xl font-bold text-sm hover:bg-rose-700 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1421,7 +1431,7 @@ const ApprovedResults = () => {
       <p className="text-xs text-slate-500 font-bold">
         Excel يستخدم قالب المادة والصف عند توفره ويحافظ على ترتيب طلابه. عند تعدد اختبارات المادة تُستخدم أحدث درجة للطالب؛ والطلاب غير المشمولين بالتصدير تبقى درجاتهم فارغة. المواد دون قالب تستخدم التنسيق المعتاد.
       </p>
-      {bulkExportError && <div role="alert" className="p-4 rounded-2xl bg-red-50 text-red-700 font-bold">{bulkExportError}</div>}
+      {bulkExportError && <div role="alert" className="p-4 rounded-2xl bg-red-50 text-red-700 font-bold whitespace-pre-wrap break-words">{bulkExportError}</div>}
       {/* ── Stats Row ── */}
       {totalApproved > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
@@ -2099,6 +2109,43 @@ const ApprovedResults = () => {
                    </button>
                 </div>
              </div>
+          </div>
+        </div>
+      )}
+      {exportSelection && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/50 flex items-center justify-center p-4" onClick={() => setExportSelection(null)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="export-subjects-title" dir="rtl"
+            className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-6 space-y-5" onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => { if (event.key === 'Escape') setExportSelection(null); }}>
+            <div className="flex justify-between items-center gap-3">
+              <h2 id="export-subjects-title" className="text-xl font-black">اختيار المواد للتصدير</h2>
+              <button type="button" aria-label="إغلاق" onClick={() => setExportSelection(null)}><X size={22} /></button>
+            </div>
+            <p className="text-sm text-slate-500">{exportSelection.grade} — {exportSelection.format === 'pdf' ? 'PDF' : 'Excel'} — ملف مستقل لكل مادة داخل ZIP</p>
+            <div className="flex gap-4 text-sm font-bold text-indigo-600">
+              <button type="button" autoFocus onClick={() => setExportSelection((prev) => ({ ...prev, selected: [...prev.subjects] }))}>تحديد الكل</button>
+              <button type="button" onClick={() => setExportSelection((prev) => ({ ...prev, selected: [] }))}>إلغاء التحديد</button>
+            </div>
+            <div className="max-h-80 overflow-y-auto space-y-2">
+              {!exportSelection.subjects.length && <p className="text-slate-500">لا توجد مواد لها اختبارات في الصف المحدد.</p>}
+              {exportSelection.subjects.map((subject) => (
+                <label key={subject} className="flex gap-3 items-center p-3 border rounded-xl cursor-pointer">
+                  <input type="checkbox" className="w-4 h-4" checked={exportSelection.selected.includes(subject)}
+                    onChange={(event) => { const checked = event.target.checked; setExportSelection((prev) => ({ ...prev,
+                      selected: checked ? [...prev.selected, subject] : prev.selected.filter((item) => item !== subject),
+                    })); }} />
+                  <span className="font-bold text-sm">{subject}</span>
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setExportSelection(null)} className="px-5 py-3 border rounded-xl font-bold">إلغاء</button>
+              <button type="button" disabled={!exportSelection.selected.length || exportSelection.grade !== classFilter || exportSelection.stage !== stageFilter}
+                onClick={() => exportGradeSubjects(exportSelection.format, exportSelection.selected)}
+                className="flex-1 px-5 py-3 rounded-xl bg-indigo-600 text-white font-bold disabled:opacity-40">
+                تصدير المواد المحددة ({exportSelection.selected.length})
+              </button>
+            </div>
           </div>
         </div>
       )}

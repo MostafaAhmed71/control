@@ -9,11 +9,32 @@ export function subjectTemplateKey(value) {
   if (/انجليزي|english/.test(key)) return 'english';
   if (/عربي|لغتي/.test(key)) return 'arabic';
   if (/رياضيات/.test(key)) return 'math';
+  if (/كفايات(?:ال)?لغوي/.test(key)) return 'language-competencies';
+  if (/تقنيه(?:ال)?رقمي/.test(key)) return 'digital-technology';
+  if (/احياء/.test(key)) return 'biology';
+  if (/فيزياء/.test(key)) return 'physics';
+  if (/كيمياء/.test(key)) return 'chemistry';
+  if (/ارض|فضاء/.test(key)) return 'earth-space';
   if (/علوم/.test(key)) return 'science';
   return key;
 }
 
 const xmlText = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+export function describeExportResult(result) {
+  const details = [
+    ['الطالب', result.studentName || 'غير معرّف'],
+    ['الاختبار', result.examTitle || result.examId],
+    ['الهوية', result.nationalId || result.national_id],
+    ['معرّف الطالب', result.studentId],
+    ['رقم الجلوس', result.seatNumber],
+    ['الرقم المقروء من الورقة', result.detectedStudentId || result.normalizedDetectedStudentId],
+    ['رقم سجل النتيجة', result.id],
+    ['الدرجة', result.score == null ? null : `${result.score} / ${result.total ?? 'غير محدد'}`],
+  ];
+  return details.filter(([, value]) => value != null && String(value).trim() !== '')
+    .map(([label, value]) => `${label}: ${value}`).join('\n');
+}
 
 // Patch only grade cells inside the original ZIP. Styles, print setup, identities,
 // student order and all other workbook parts remain byte-for-byte unchanged.
@@ -54,9 +75,9 @@ export async function fillGradeTemplate(bytes, results, absent) {
   const time = (r) => Date.parse(r.updatedAt || r.approvedAt || r.timestamp || r.createdAt || '') || 0;
   for (const result of results) {
     const student = match(result);
-    if (!student) throw new Error(`الطالب «${result.studentName || result.studentId}» غير مطابق لقائمة القالب. راجع الهوية أو حدّث القالب.`);
+    if (!student) throw new Error(`الطالب غير مطابق لقائمة القالب.\n${describeExportResult(result)}\nافتح كشف المعتمدين للاختبار المذكور، وابحث بالمعرّف الموضح أو اختر «غير معروف»، ثم اربط النتيجة بالطالب الصحيح وأعد التصدير.`);
     const score = result.score == null || result.score === '' ? NaN : Number(result.score);
-    if (!Number.isFinite(score) || score < 0 || score > 20) throw new Error(`درجة «${result.studentName}» يجب أن تكون بين 0 و20.`);
+    if (!Number.isFinite(score) || score < 0 || score > 20) throw new Error(`الدرجة يجب أن تكون بين 0 و20.\n${describeExportResult(result)}`);
     const previous = matched.get(student.row);
     if (previous && time(previous) === time(result) && Number(previous.score) !== score) throw new Error('توجد درجتان مختلفتان للطالب بنفس التاريخ. اختر اختبارًا واحدًا للتصدير.');
     if (!previous || time(result) > time(previous)) matched.set(student.row, result);

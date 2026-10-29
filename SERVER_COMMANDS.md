@@ -149,6 +149,7 @@ sudo bash /opt/control/deploy/patch-caddy-public.sh
 @public {
     path /teacher-lookup /teacher-lookup/*
     path /portal /portal/*
+    path /certificates /certificates/*
     path /assets/* /vite.svg /favicon.ico
     path /*.jpeg /*.jpg /*.png /*.ico /*.webp /*.svg
 }
@@ -196,6 +197,7 @@ curl -sS -o /dev/null -w "home: %{http_code}\n" https://control0.northelite0.com
 |--------|-------------|
 | `/teacher-lookup` | **لا** |
 | `/portal` | **لا** |
+| `/certificates` | **لا** |
 | `/` وباقي الصفحات | **نعم** |
 
 **ملاحظة:** ملفات `/assets/` يجب أن تبقى عامة حتى تُحمَّل صفحة المعلمين. لوحة التحكم نفسها ما زالت محمية عند الدخول المباشر إلى `/`.
@@ -214,6 +216,7 @@ sudo cat /etc/caddy/Caddyfile
 	@public {
 		path /teacher-lookup /teacher-lookup/*
 		path /portal /portal/*
+		path /certificates /certificates/*
 		path /assets/* /vite.svg /favicon.ico
 		path /*.jpeg /*.jpg /*.png /*.ico /*.webp /*.svg
 	}

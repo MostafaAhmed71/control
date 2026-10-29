@@ -161,6 +161,7 @@ export default function ApprovedNamesSync({ fileName, approved, students, onClos
   const [scopeGrade, setScopeGrade] = useState('');
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState('');
+  const [saveProgress, setSaveProgress] = useState(null);
   const [updatesSaved, setUpdatesSaved] = useState(false);
   const [addedSaved, setAddedSaved] = useState(false);
 
@@ -207,18 +208,29 @@ export default function ApprovedNamesSync({ fileName, approved, students, onClos
 
   const run = async (label, fn) => {
     setBusy(label);
+    setSaveProgress({ current: 0, total: 0, pct: 8 });
     try {
       await fn();
     } catch (e) {
       alert('حدث خطأ: ' + (e?.message || e));
     } finally {
       setBusy('');
+      setSaveProgress(null);
     }
+  };
+
+  const reportSave = ({ current, total }) => {
+    setSaveProgress({
+      current,
+      total,
+      pct: total ? Math.round((current / total) * 100) : 12,
+    });
+    return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
   };
 
   const handleSaveUpdates = () =>
     run('update', async () => {
-      await upsertStudents(changed.map((m) => applyApproved(m.student, m.approved)));
+      await upsertStudents(changed.map((m) => applyApproved(m.student, m.approved)), reportSave);
       setUpdatesSaved(true);
       await onDone?.();
     });
@@ -226,7 +238,7 @@ export default function ApprovedNamesSync({ fileName, approved, students, onClos
   const handleAddNew = () =>
     run('add', async () => {
       if (!window.confirm(`سيتم إضافة ${notFound.length} طالب جديد إلى السجل. متابعة؟`)) return;
-      await upsertStudents(notFound.map((a, i) => ({ id: `${Date.now()}${i}`, committee: '', ...a })));
+      await upsertStudents(notFound.map((a, i) => ({ id: `${Date.now()}${i}`, committee: '', ...a })), reportSave);
       setAddedSaved(true);
       await onDone?.();
     });
@@ -263,6 +275,22 @@ export default function ApprovedNamesSync({ fileName, approved, students, onClos
         </div>
 
         <div className="overflow-y-auto p-6 space-y-5">
+          {saveProgress && (
+            <div className="rounded-2xl border border-indigo-100 bg-indigo-50/70 p-4">
+              <p className="text-sm font-black text-indigo-800">جاري الحفظ…</p>
+              <div className="mt-3 h-2.5 overflow-hidden rounded-full bg-white">
+                <div
+                  className="h-full rounded-full bg-indigo-600 transition-all duration-300"
+                  style={{ width: `${Math.max(6, Math.min(100, saveProgress.pct || 0))}%` }}
+                />
+              </div>
+              {saveProgress.total > 0 && (
+                <p className="mt-2 text-xs font-bold text-indigo-700">
+                  {saveProgress.current} / {saveProgress.total}
+                </p>
+              )}
+            </div>
+          )}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {stat('الأسماء في الملف', approved.length, 'border-slate-200 bg-slate-50 text-slate-700')}
             {stat('تمت مطابقتهم', matches.length, 'border-emerald-200 bg-emerald-50 text-emerald-700')}

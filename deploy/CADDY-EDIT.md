@@ -41,6 +41,7 @@ sudo nano /etc/caddy/Caddyfile
 	@public {
 		path /teacher-lookup /teacher-lookup/*
 		path /portal /portal/*
+		path /certificates /certificates/*
 		path /assets/* /vite.svg /favicon.ico
 		path /*.jpeg /*.jpg /*.png /*.ico /*.webp /*.svg
 	}

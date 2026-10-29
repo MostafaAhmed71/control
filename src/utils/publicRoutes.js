@@ -2,6 +2,7 @@
 export const PUBLIC_PATHS = {
   teacherLookup: '/teacher-lookup',
   portal: '/portal',
+  certificates: '/certificates',
 };
 
 /** على VPS نستخدم مسارات عادية؛ محلياً/file قد يُستخدم hash */
