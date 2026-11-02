@@ -83,17 +83,40 @@ const usesCloudSync = () => {
 const localApi = (path) => `${OMR_API_BASE}${path}`;
 
 const localRequest = async (path, opts = {}) => {
-    const res = await fetch(localApi(path), opts);
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }));
-        const msg = err.detail || err.message || res.statusText;
-        _setConnected(false);
-        throw new SupabaseError('local', opts.method || 'GET', String(msg));
+    const { timeoutMs = 20000, signal: userSignal, ...fetchOpts } = opts;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onUserAbort = () => controller.abort();
+    if (userSignal) {
+        if (userSignal.aborted) controller.abort();
+        else userSignal.addEventListener('abort', onUserAbort, { once: true });
     }
-    _setConnected(true);
-    if (res.status === 204) return null;
-    const ct = res.headers.get('content-type') || '';
-    return ct.includes('json') ? res.json() : res;
+    try {
+        const res = await fetch(localApi(path), { ...fetchOpts, signal: controller.signal });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: res.statusText }));
+            const msg = err.detail || err.message || res.statusText;
+            _setConnected(false);
+            throw new SupabaseError('local', fetchOpts.method || 'GET', String(msg));
+        }
+        _setConnected(true);
+        if (res.status === 204) return null;
+        const ct = res.headers.get('content-type') || '';
+        return ct.includes('json') ? res.json() : res;
+    } catch (err) {
+        if (err?.name === 'AbortError') {
+            _setConnected(false);
+            throw new SupabaseError(
+                'local',
+                fetchOpts.method || 'GET',
+                'انتهت مهلة الاتصال بالمخزن المحلي. أعد تشغيل محرك OMR ثم حدّث الصفحة.'
+            );
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+        if (userSignal) userSignal.removeEventListener('abort', onUserAbort);
+    }
 };
 
 const hydrateLocalRow = (row) => {
@@ -1065,7 +1088,7 @@ export const saveOmrSubjects = async (subjects) => {
 };
 
 // --- OMR Methods ---
-const examIsArchived = (e) => {
+export const examIsArchived = (e) => {
     if (!e || typeof e !== 'object') return false;
     const v = e.archived;
     return v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true';

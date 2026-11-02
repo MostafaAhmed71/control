@@ -62,8 +62,10 @@ def sheets_dir() -> str:
 def _connect() -> sqlite3.Connection:
     os.makedirs(data_root(), exist_ok=True)
     os.makedirs(sheets_dir(), exist_ok=True)
-    conn = sqlite3.connect(db_path(), check_same_thread=False)
+    conn = sqlite3.connect(db_path(), check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 

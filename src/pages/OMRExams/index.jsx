@@ -307,6 +307,7 @@ const OMRExams = () => {
   const [archiveTargetFolderInput, setArchiveTargetFolderInput] = useState('');
   /** طي/فتح أقسام المجلدات في الأرشيف — المفتاح غائب = مفتوح */
   const [archiveFolderOpen, setArchiveFolderOpen] = useState({});
+  const [archivingExams, setArchivingExams] = useState(false);
 
   /* New exam form */
   /* New exam form */
@@ -953,30 +954,102 @@ const OMRExams = () => {
     setIsAdding(true);
   };
 
+  const examsPendingArchive = archiveTargetModal?.exams || [];
+
   const openArchiveFolderModal = (exam) => {
     if (!exam?.id) return;
-    setArchiveTargetModal(exam);
+    setArchiveTargetModal({ exams: [exam] });
+    setArchiveTargetFolderInput('');
+  };
+
+  const openBulkArchiveModal = () => {
+    const targets = selectedExamsForMultiPrint.filter((e) => e?.id && !examArchived(e));
+    if (!targets.length) {
+      toast.error('حدّد اختبارات نشطة لأرشفتها.', 'أرشيف');
+      return;
+    }
+    setArchiveTargetModal({ exams: targets });
     setArchiveTargetFolderInput('');
   };
 
   const closeArchiveFolderModal = () => {
+    if (archivingExams) return;
     setArchiveTargetModal(null);
     setArchiveTargetFolderInput('');
   };
 
   const confirmArchiveToFolder = async () => {
-    if (!archiveTargetModal?.id) return;
+    const targets = (archiveTargetModal?.exams || []).filter((e) => e?.id);
+    if (!targets.length) return;
     const folder = normalizeArchiveFolder(archiveTargetFolderInput);
-    await saveOmrExam({
-      ...archiveTargetModal,
-      archived: true,
-      archivedAt: new Date().toISOString(),
-      archiveFolder: folder || undefined,
-      updatedAt: new Date().toISOString(),
-    });
-    closeArchiveFolderModal();
-    load();
-    toast.success(folder ? `تمت الأرشفة داخل المجلد «${folder}».` : 'تمت أرشفة الاختبار (بدون مجلد).', 'أرشيف');
+    const now = new Date().toISOString();
+    setArchivingExams(true);
+    try {
+      const results = await Promise.allSettled(
+        targets.map((exam) =>
+          saveOmrExam({
+            ...exam,
+            archived: true,
+            archivedAt: now,
+            archiveFolder: folder || undefined,
+            updatedAt: now,
+          })
+        )
+      );
+      const failed = targets.filter((_, i) => results[i].status === 'rejected');
+      const okCount = targets.length - failed.length;
+      setSelectedExamIds(new Set());
+      await load();
+      if (okCount > 0) {
+        toast.success(
+          folder
+            ? `تمت أرشفة ${okCount} اختبار داخل المجلد «${folder}». لن تظهر في بوابة الطلاب.`
+            : `تمت أرشفة ${okCount} اختبار. لن تظهر في بوابة الطلاب.`,
+          'أرشيف'
+        );
+      }
+      if (failed.length > 0) {
+        toast.error(`فشل أرشفة: ${failed.map((e) => e.title || e.subject).join('، ')}`, 'خطأ');
+      }
+    } finally {
+      setArchivingExams(false);
+      setArchiveTargetModal(null);
+      setArchiveTargetFolderInput('');
+    }
+  };
+
+  const handleRestoreSelected = async () => {
+    const targets = selectedExamsForMultiPrint.filter((e) => e?.id && examArchived(e));
+    if (!targets.length) {
+      toast.error('حدّد اختبارات من الأرشيف لاستعادتها.', 'استعادة');
+      return;
+    }
+    if (!window.confirm(`استعادة ${targets.length} اختبار إلى القائمة النشطة؟ ستظهر نتائجها مجدداً في بوابة الطلاب.`)) {
+      return;
+    }
+    setArchivingExams(true);
+    try {
+      const now = new Date().toISOString();
+      const results = await Promise.allSettled(
+        targets.map((exam) =>
+          saveOmrExam({
+            ...exam,
+            archived: false,
+            archivedAt: null,
+            archiveFolder: undefined,
+            updatedAt: now,
+          })
+        )
+      );
+      const failed = targets.filter((_, i) => results[i].status === 'rejected');
+      const okCount = targets.length - failed.length;
+      setSelectedExamIds(new Set());
+      await load();
+      if (okCount > 0) toast.success(`تمت استعادة ${okCount} اختبار.`, 'استعادة');
+      if (failed.length > 0) toast.error(`فشل استعادة: ${failed.map((e) => e.title || e.subject).join('، ')}`, 'خطأ');
+    } finally {
+      setArchivingExams(false);
+    }
   };
 
   const handleMoveArchivedExamFolder = async (exam, folderRaw) => {
@@ -2524,6 +2597,27 @@ const OMRExams = () => {
                       تطبيق القالب
                     </button>
                   </div>
+                  {examArchiveTab === 'active' ? (
+                    <button
+                      type="button"
+                      disabled={selectedExamIds.size === 0 || archivingExams}
+                      onClick={openBulkArchiveModal}
+                      className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-600 text-white font-black text-xs hover:bg-amber-700 transition-all disabled:opacity-40 shadow-lg shadow-amber-100"
+                    >
+                      {archivingExams ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
+                      أرشفة المحدد
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={selectedExamIds.size === 0 || archivingExams}
+                      onClick={handleRestoreSelected}
+                      className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 text-white font-black text-xs hover:bg-emerald-700 transition-all disabled:opacity-40 shadow-lg shadow-emerald-100"
+                    >
+                      {archivingExams ? <Loader2 size={16} className="animate-spin" /> : <ArchiveRestore size={16} />}
+                      استعادة المحدد
+                    </button>
+                  )}
                   <button
                     type="button"
                     disabled={selectedExamIds.size === 0 || isGenerating}
@@ -2561,7 +2655,7 @@ const OMRExams = () => {
                         ? 'bg-indigo-600 border-indigo-600 text-white'
                         : 'bg-white border-slate-300 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 hover:bg-indigo-50'
                     }`}
-                    title={selectedExamIds.has(exam.id) ? 'إلغاء التحديد' : 'تحديد للطباعة المتعددة'}
+                    title={selectedExamIds.has(exam.id) ? 'إلغاء التحديد' : 'تحديد للطباعة أو الأرشفة'}
                   >
                     {selectedExamIds.has(exam.id) ? <Check size={18} strokeWidth={3} /> : <Square size={16} />}
                   </button>
@@ -2686,7 +2780,7 @@ const OMRExams = () => {
                                 ? 'bg-indigo-600 border-indigo-600 text-white'
                                 : 'bg-white border-slate-300 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 hover:bg-indigo-50'
                             }`}
-                            title={selectedExamIds.has(exam.id) ? 'إلغاء التحديد' : 'تحديد للطباعة المتعددة'}
+                            title={selectedExamIds.has(exam.id) ? 'إلغاء التحديد' : 'تحديد للطباعة أو الأرشفة'}
                           >
                             {selectedExamIds.has(exam.id) ? <Check size={18} strokeWidth={3} /> : <Square size={16} />}
                           </button>
@@ -2790,10 +2884,18 @@ const OMRExams = () => {
               <div className="bg-white w-full max-w-md rounded-[2rem] shadow-2xl p-8 space-y-6 text-right border border-slate-100">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h3 className="text-xl font-black text-slate-900 font-header">أرشفة الاختبار</h3>
-                    <p className="text-sm font-bold text-slate-500 mt-2 line-clamp-2">{archiveTargetModal.title}</p>
+                    <h3 className="text-xl font-black text-slate-900 font-header">
+                      {examsPendingArchive.length > 1 ? `أرشفة ${examsPendingArchive.length} اختبار` : 'أرشفة الاختبار'}
+                    </h3>
+                    <p className="text-sm font-bold text-slate-500 mt-2 line-clamp-3">
+                      {examsPendingArchive.length === 1
+                        ? examsPendingArchive[0]?.title
+                        : examsPendingArchive.map((e) => e.title || e.subject).filter(Boolean).slice(0, 4).join('، ')
+                          + (examsPendingArchive.length > 4 ? '…' : '')}
+                    </p>
+                    <p className="text-xs font-bold text-amber-800 mt-2">بعد الأرشفة لن تظهر نتائج هذه الاختبارات في بوابة الطلاب.</p>
                   </div>
-                  <button type="button" onClick={closeArchiveFolderModal} className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 hover:text-rose-500 shrink-0"><X size={22} /></button>
+                  <button type="button" onClick={closeArchiveFolderModal} disabled={archivingExams} className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 hover:text-rose-500 shrink-0 disabled:opacity-40"><X size={22} /></button>
                 </div>
                 <div className="space-y-2">
                   <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest">مجلد داخل الأرشيف (اختياري)</label>
@@ -2803,7 +2905,8 @@ const OMRExams = () => {
                     value={archiveTargetFolderInput}
                     onChange={(e) => setArchiveTargetFolderInput(e.target.value)}
                     placeholder="مثال: نافس 2026 — الفصل الأول"
-                    className="w-full px-4 py-3.5 rounded-xl border-2 border-slate-100 focus:border-amber-200 focus:ring-4 focus:ring-amber-50 font-bold text-slate-800 text-right outline-none transition-all"
+                    disabled={archivingExams}
+                    className="w-full px-4 py-3.5 rounded-xl border-2 border-slate-100 focus:border-amber-200 focus:ring-4 focus:ring-amber-50 font-bold text-slate-800 text-right outline-none transition-all disabled:opacity-50"
                   />
                   <datalist id="omr-archive-folder-suggestions">
                     {existingArchiveFolders.map((f) => (
@@ -2813,8 +2916,11 @@ const OMRExams = () => {
                   <p className="text-xs font-bold text-slate-400 leading-relaxed">اتركه فارغاً لوضع الاختبار في «بدون مجلد»، أو اكتب اسماً جديداً لإنشاء مجلد.</p>
                 </div>
                 <div className="flex gap-3 justify-end flex-wrap-reverse">
-                  <button type="button" onClick={closeArchiveFolderModal} className="px-6 py-3 rounded-xl font-black text-sm text-slate-500 hover:bg-slate-50 transition-all">إلغاء</button>
-                  <button type="button" onClick={confirmArchiveToFolder} className="px-6 py-3 rounded-xl font-black text-sm bg-amber-600 text-white hover:bg-amber-700 shadow-lg shadow-amber-100 transition-all">تأكيد الأرشفة</button>
+                  <button type="button" onClick={closeArchiveFolderModal} disabled={archivingExams} className="px-6 py-3 rounded-xl font-black text-sm text-slate-500 hover:bg-slate-50 transition-all disabled:opacity-40">إلغاء</button>
+                  <button type="button" onClick={confirmArchiveToFolder} disabled={archivingExams} className="px-6 py-3 rounded-xl font-black text-sm bg-amber-600 text-white hover:bg-amber-700 shadow-lg shadow-amber-100 transition-all disabled:opacity-40 flex items-center gap-2">
+                    {archivingExams ? <Loader2 size={16} className="animate-spin" /> : null}
+                    تأكيد الأرشفة
+                  </button>
                 </div>
               </div>
             </div>

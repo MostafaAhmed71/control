@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getOmrResults, getOmrExams, getAppSettings, getStudents } from '../../utils/dataService';
+import { getOmrResults, getOmrExams, getAppSettings, getStudents, examIsArchived } from '../../utils/dataService';
 import { Search, Printer, CheckCircle, AlertCircle } from 'lucide-react';
 
 const getGradeLabel = (pct) => {
@@ -271,7 +271,24 @@ export default function StudentPortal() {
         return false;
       };
 
-      const matching = allResults.filter(natMatchesResult);
+      const allExams = await getOmrExams({ includeArchived: true }).catch(() => []);
+      const archivedExamIds = new Set(
+        (allExams || []).filter((e) => examIsArchived(e)).map((e) => String(e.id))
+      );
+      const archivedExamTitles = new Set(
+        (allExams || [])
+          .filter((e) => examIsArchived(e))
+          .map((e) => String(e.title || '').trim())
+          .filter(Boolean)
+      );
+      const matching = allResults.filter((r) => {
+        if (!natMatchesResult(r)) return false;
+        const eid = r.examId != null && String(r.examId).trim() !== '' ? String(r.examId) : '';
+        const title = String(r.examTitle || '').trim();
+        if (eid && archivedExamIds.has(eid)) return false;
+        if (title && archivedExamTitles.has(title)) return false;
+        return true;
+      });
 
       if (matching.length > 0) {
         setResults(matching);

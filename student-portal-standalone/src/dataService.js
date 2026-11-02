@@ -555,7 +555,7 @@ let _studentsCache = { t: 0, v: null };
 let _examsCache = { t: 0, v: null };
 let _examsPortalCache = { t: 0, v: null };
 const META_CACHE_MS = 90_000;
-const EXAMS_PORTAL_CACHE_MS = 30 * 60 * 1000;
+const EXAMS_PORTAL_CACHE_MS = 10 * 1000;
 
 /** طالب بالهوية — فهرس الخادم ثم مطابقة يدوية على القائمة (يدعم الهوية في id أو studentId). */
 export const findStudentByNormalizedNationalId = async (normalizedNationalId) => {

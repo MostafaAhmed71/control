@@ -783,15 +783,19 @@ export default function StudentPortal() {
       const archivedExamIds = new Set(
         allExams.filter((e) => examIsArchived(e)).map((e) => String(e.id))
       );
+      const archivedExamTitles = new Set(
+        allExams
+          .filter((e) => examIsArchived(e))
+          .map((e) => String(e.title || '').trim())
+          .filter(Boolean)
+      );
 
       const isResultFromActiveExam = (r) => {
         const eid = r.examId != null && String(r.examId).trim() !== '' ? String(r.examId) : '';
-        if (eid) {
-          if (archivedExamIds.has(eid)) return false;
-          if (activeExamById.has(eid)) return true;
-          return true;
-        }
         const title = String(r.examTitle || '').trim();
+        if (eid && archivedExamIds.has(eid)) return false;
+        if (title && archivedExamTitles.has(title)) return false;
+        if (eid) return true;
         if (title) {
           return activeExams.some((ex) => String(ex.title || '').trim() === title);
         }
@@ -866,8 +870,7 @@ export default function StudentPortal() {
         ? rawResults.filter(rowMatchesLookup)
         : rawResults.filter(natMatchesResult);
 
-      const afterExamFilter = matching.filter(isResultFromActiveExam);
-      matching = (afterExamFilter.length > 0 ? afterExamFilter : matching).map(enrichResult);
+      matching = matching.filter(isResultFromActiveExam).map(enrichResult);
 
       matching.sort((a, b) => {
         const da = parseResultDate(a);

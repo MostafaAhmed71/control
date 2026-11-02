@@ -1,8 +1,13 @@
+import dns from 'node:dns'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// This config is used when running the app in pure browser mode (non-Electron)
-// For Electron mode, see electron.vite.config.js
+// Windows: Node may bind Vite to IPv6 [::1] only. Then http://localhost:5173 hangs
+// after a long session while 127.0.0.1 refuses. Force IPv4.
+dns.setDefaultResultOrder('ipv4first')
+
+const omrTarget = process.env.OMR_PROXY_TARGET || 'http://127.0.0.1:8000'
+
 export default defineConfig({
   plugins: [react()],
   optimizeDeps: {
@@ -15,7 +20,12 @@ export default defineConfig({
     ],
   },
   server: {
-    hmr: false,
+    host: '127.0.0.1',
+    port: 5173,
+    hmr: {
+      host: '127.0.0.1',
+      protocol: 'ws',
+    },
     allowedHosts: ['control0.northelite0.com'],
     watch: {
       ignored: [
@@ -31,13 +41,12 @@ export default defineConfig({
         '**/node_modules/**',
       ],
     },
-    warmup: {
-      clientFiles: ['./src/main.jsx', './src/App.jsx', './src/index.css'],
-    },
     proxy: {
       '/api/omr': {
-        target: process.env.OMR_PROXY_TARGET || 'http://127.0.0.1:8000',
+        target: omrTarget,
         changeOrigin: true,
+        timeout: 20000,
+        proxyTimeout: 20000,
         rewrite: (path) => path.replace(/^\/api\/omr/, ''),
         configure: (proxy) => {
           proxy.on('error', (err, _req, res) => {
@@ -51,10 +60,12 @@ export default defineConfig({
         },
       },
       '/api/whatsapp': {
-        target: 'http://localhost:3001',
+        target: 'http://127.0.0.1:3001',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/whatsapp/, '')
-      }
-    }
-  }
+        timeout: 15000,
+        proxyTimeout: 15000,
+        rewrite: (path) => path.replace(/^\/api\/whatsapp/, ''),
+      },
+    },
+  },
 })
