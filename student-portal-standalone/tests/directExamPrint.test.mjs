@@ -4,6 +4,7 @@ import { prepareDirectExamBatches, matchesPrintScope, activePrintExams } from '.
 const students = [
   { id: 'student-1', name: 'طالب تجريبي', nationalId: '1000000000', grade: 'الثالث الثانوي', seatNumber: '123' },
   { id: 'student-2', name: 'طالب تجريبي', nationalId: '2000000000', grade: 'الأول الثانوي', seatNumber: '124' },
+  { id: 'student-3', name: 'طالب آخر', nationalId: '3000000000', grade: 'الثالث الثانوي', seatNumber: '125' },
 ];
 const exams = [
   { id: 'chemistry', subject: 'كيمياء', title: 'كيمياء - الثالث الثانوي', stage: 'ثانوي', grades: ['الثالث الثانوي'], template: 'custom:chemistry', template_config: { school_name: 'مدرسة تجريبية', show_date_row: false }, qCount: 20 },
@@ -29,10 +30,19 @@ for (const job of jobs) {
 assert.equal(JSON.stringify(input), before, 'Direct printing must not alter student, exam or request data');
 assert.equal(matchesPrintScope({ grade: 'ثالث ثانوي' }, 'ثانوي', 'الثالث الثانوي'), true);
 assert.equal(activePrintExams(exams).length, 3);
-assert.throws(() => prepareDirectExamBatches({ ...input, studentId: 'student-2' }), /الطالب/);
+assert.throws(() => prepareDirectExamBatches({ ...input, studentId: 'student-2' }), /الطلاب/);
 assert.throws(() => prepareDirectExamBatches({ ...input, examIds: ['first-grade'] }), /الاختبارات/);
 assert.throws(() => prepareDirectExamBatches({ ...input, examIds: ['archived'] }), /الاختبارات/);
 assert.throws(() => prepareDirectExamBatches({ ...input, examIds: [] }), /اختر/);
 assert.throws(() => prepareDirectExamBatches({ ...input, day: '2026-02-30' }), /تاريخ/);
 assert.equal(prepareDirectExamBatches({ ...input, examIds: ['physics', 'physics'] }).length, 1);
-console.log('Direct printing: multiple subjects, correct student and template, scope validation and no request changes passed.');
+
+const multi = prepareDirectExamBatches({ ...input, studentId: undefined, studentIds: ['student-1', 'student-3'] });
+assert.equal(multi.length, 2);
+assert.deepEqual(multi.map((job) => job.body.students.map((row) => row.national_id)), [
+  ['1000000000', '3000000000'],
+  ['1000000000', '3000000000'],
+]);
+assert.throws(() => prepareDirectExamBatches({ ...input, studentId: undefined, studentIds: [] }), /اختر/);
+assert.throws(() => prepareDirectExamBatches({ ...input, studentId: undefined, studentIds: ['student-2'] }), /الطلاب/);
+console.log('Direct printing: multiple subjects, multiple students, template, scope validation and no request changes passed.');
